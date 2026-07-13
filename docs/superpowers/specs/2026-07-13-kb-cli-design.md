@@ -55,6 +55,10 @@ kb/                       (this repo; package name `kb`, console script `kb`)
 
 ## Command group: Query
 
+**Why `filter` and `search` are separate commands.** They answer different questions with different result types: `filter` answers "which documents have these properties?" from frontmatter alone (guaranteed zero body-reading cost — the survey tool) and returns a document set; `search` answers "where does this text appear?" by reading bodies and returns locations within documents (path + line + snippet). Keeping them separate keeps each command's `--json` schema stable (NFR-9) and encodes the survey-before-reading discipline structurally — the same reason Unix separates `find` and `grep`, composed via pipes.
+
+Both commands accept one **shared selection-flag set** — `--type`, `--status`, `--tag`, `--class`, `--where` — implemented once in `core/query.py` and documented once. `filter` is selection; `search` is selection + body scan.
+
 ### `kb filter` (CLI-1)
 
 ```
@@ -71,12 +75,12 @@ kb filter [--type T]... [--status S]... [--tag G]... [--derived-from REF]
 ### `kb search` (CLI-2)
 
 ```
-kb search QUERY [--type T]... [--status S]... [--tag G]... [--class C]
+kb search QUERY [--type T]... [--status S]... [--tag G]... [--class C] [--where key=value]...
           [--regex] [--context N] [--limit N] [--output snippets|paths] [--json]
 ```
 
 - Default: case-insensitive substring match over body + `title` + `description`; `--regex` opts into regex matching.
-- Filter flags (`--type`, `--status`, `--tag`, `--class`) narrow the searched set on frontmatter **before** bodies are read — the single-command form of "search within a slice" (`kb search "user feedback" --class raw`), preferred over piping when one command can express it.
+- The shared selection flags narrow the searched set on frontmatter **before** bodies are read — the single-command form of "search within a slice" (`kb search "user feedback" --class raw`), preferred over piping when one command can express it.
 - Each hit prints path, id, and ±`N` lines of context (default 2). Snippets only, never whole documents — this is the survey tool (G8/NFR-4).
 - `--output paths` emits matching paths one per line for pipelines (see Pipelines under shared foundations); snippet output is not intended to be piped.
 - A candidate set on stdin restricts the search to those documents (`kb filter --class raw --output paths | kb search "user feedback"`).
