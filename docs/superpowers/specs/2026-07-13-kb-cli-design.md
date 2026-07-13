@@ -49,6 +49,7 @@ kb/                       (this repo; package name `kb`, console script `kb`)
 - **Output modes.** `--output paths|frontmatter|full` (default `frontmatter`) on commands that return documents; `--json` on every command. JSON schemas are stable within a major version (NFR-9).
 - **Exit codes.** `0` success / checks pass; `1` findings or verification failures (CI-friendly); `2` usage or environment errors.
 - **Document references.** Every command accepts an id (`KB-0042`) or a path wherever a document is named (spelled `REF` below).
+- **Pipelines.** Commands that accept `REF...` (`filter`, `frontmatter`, `resolve`, `validate`) also read newline-separated ids/paths from stdin when stdin is piped and no refs are given on the command line. Combined with `--output paths`, commands compose Unix-style: `kb search "user feedback" --output paths | kb filter --class raw`, or `kb links KB-0007 --reverse --transitive --output paths | kb validate`. When a command receives a candidate set this way, it operates within that set instead of the whole KB.
 - **Dependencies.** `typer`, `PyYAML` only. Frontmatter is parsed with a small wrapper that preserves key order and unknown keys (FM2). Pure-Python search; no ripgrep or other external binaries.
 - **Errors.** Human message on stderr + documented exit code; under `--json`, errors are structured: `{"error": {"code": ..., "message": ...}}`.
 
@@ -70,12 +71,15 @@ kb filter [--type T]... [--status S]... [--tag G]... [--derived-from REF]
 ### `kb search` (CLI-2)
 
 ```
-kb search QUERY [--type T]... [--status S]... [--regex] [--context N] [--limit N] [--json]
+kb search QUERY [--type T]... [--status S]... [--tag G]... [--class C]
+          [--regex] [--context N] [--limit N] [--output snippets|paths] [--json]
 ```
 
 - Default: case-insensitive substring match over body + `title` + `description`; `--regex` opts into regex matching.
-- Filter flags narrow the searched set before bodies are read.
+- Filter flags (`--type`, `--status`, `--tag`, `--class`) narrow the searched set on frontmatter **before** bodies are read — the single-command form of "search within a slice" (`kb search "user feedback" --class raw`), preferred over piping when one command can express it.
 - Each hit prints path, id, and ±`N` lines of context (default 2). Snippets only, never whole documents — this is the survey tool (G8/NFR-4).
+- `--output paths` emits matching paths one per line for pipelines (see Pipelines under shared foundations); snippet output is not intended to be piped.
+- A candidate set on stdin restricts the search to those documents (`kb filter --class raw --output paths | kb search "user feedback"`).
 
 ### `kb frontmatter` (CLI-3)
 
