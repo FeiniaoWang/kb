@@ -5,7 +5,7 @@
 
 ## 1. Purpose
 
-Scaffold a new knowledge base — or repair the scaffold of an existing one — so that every other `kb` command has a root to discover and a valid empty structure to operate on. `kb init` is the only command that runs without an existing `.kb` marker.
+Scaffold a new knowledge base — or repair the scaffold of an existing one — so that every other `kb` command has a root to discover and a valid empty structure to operate on. `kb init` is the only command that runs without an existing `kb-config.json` root marker.
 
 ## 2. CLI surface
 
@@ -28,7 +28,7 @@ Run `kb init` from the folder you want to become the KB root; it scaffolds the c
 
 > Scaffold a new knowledge base, or repair an existing one.
 >
-> Run this from the folder you want to become the KB root; it scaffolds the current directory by default (pass --root to target a different folder). Creates the standard KB layout (raw/, synthetic/, governance/), the root index.md and log.md, a starter governance/kb-config.md, and the .kb marker that identifies the KB root. Safe to re-run: existing files are never touched unless --force is given. Runs `git init` if the target is not already inside a Git repository (disable with --no-git).
+> Run this from the folder you want to become the KB root; it scaffolds the current directory by default (pass --root to target a different folder). Creates the standard KB layout (raw/, synthetic/, governance/), the root index.md and log.md, and kb-config.json — the file at the KB root that holds project configuration and marks the root for every other command. Safe to re-run: existing files are never touched unless --force is given. Runs `git init` if the target is not already inside a Git repository (disable with --no-git).
 
 **Option help strings:**
 
@@ -52,7 +52,7 @@ Examples:
 ## 4. Behavior (normative algorithm)
 
 1. Determine the root: `--root` if given, else the current directory. Resolve it to an absolute path (call it `ROOT`). If it exists and is not a directory → `E_INIT_NOT_DIR`, exit 2. If missing, create it with parents.
-2. **Nesting guard.** Walk up from `ROOT`'s parent to the filesystem root. If any ancestor directory contains a `.kb` marker → `E_INIT_NESTED` (message names the enclosing KB root), exit 2, nothing created. `--force` does NOT override this.
+2. **Nesting guard.** Walk up from `ROOT`'s parent to the filesystem root. If any ancestor directory contains a `kb-config.json` file → `E_INIT_NESTED` (message names the enclosing KB root), exit 2, nothing created. `--force` does NOT override this.
 3. For each scaffold entry in §5, classify and act:
    - absent → **create** with the pinned content;
    - present, `--force` given → **overwrite** with the pinned content (scaffold files only — nothing under `raw/sources/`, `raw/chats/`, `raw/feedback/`, or `synthetic/` other than the listed `index.md` files is ever written);
@@ -65,11 +65,10 @@ Examples:
 
 ```
 ROOT/
-├── .kb
+├── kb-config.json           # root marker + project configuration
 ├── index.md
 ├── log.md
 ├── governance/
-│   ├── kb-config.md
 │   ├── conventions.md
 │   └── templates/.gitkeep
 ├── raw/
@@ -81,13 +80,37 @@ ROOT/
     └── index.md
 ```
 
-`governance/health.md` is deliberately absent — it is `kb-lint` output, created when lint first runs.
+`kb-config.json` at the root is both the discovery marker and the config — there is no separate `.kb` file (00-shared §1). `governance/health.md` is deliberately absent — it is `kb-lint` output, created when lint first runs.
 
-### 5.1 `.kb`
+### 5.1 `kb-config.json` (root — marker + configuration)
 
-```yaml
-schema: 1
+Strict JSON (stdlib `json`-parseable — no trailing commas, no comments). `_comment*` keys carry the steward guidance JSON cannot express as comments; `load_config` ignores every `_`-prefixed key (00-shared §7). Pinned content:
+
+```json
+{
+  "_comment": "Project configuration and KB root marker. Edit the vocab fields below; kb commands read this file directly. 'schema' is managed by kb — do not edit.",
+  "schema": 1,
+
+  "_comment_types": "Document type vocabulary (open list). Examples: outcome, ux-flow, coding-spec, test-plan, adr, runbook, context-package. Empty means not yet constrained.",
+  "types": [],
+
+  "_comment_tags": "Tag vocabulary. kb validate flags tags not listed here. Empty means no tags declared.",
+  "tags": [],
+
+  "_comment_id_prefixes": "Id prefix per document class.",
+  "id_prefixes": {
+    "synthetic": "KB",
+    "source": "RAW",
+    "chat": "CHAT",
+    "feedback": "FEED"
+  },
+
+  "_comment_propagation_auto_safe": "Change classes governance considers auto-safe during propagation (CS3). Start empty; expand from field data (PRD OQ1).",
+  "propagation_auto_safe": []
+}
 ```
+
+The pinned file is byte-for-byte fixed (it contains no timestamp). Indentation is two spaces; keys appear in the order above.
 
 ### 5.2 `index.md` (root)
 
@@ -104,9 +127,10 @@ _No documents yet. Run `kb ingest` to add evidence or start a `kb-author` sessio
 (empty)
 
 ## governance/
-- kb-config.md — Project configuration: type vocabulary, tag vocabulary, id prefixes.
 - conventions.md — Standing project conventions.
 ```
+
+(The root `kb-config.json` is configuration, not a listed document, so it does not appear in the index.)
 
 ### 5.3 `log.md`
 
@@ -119,41 +143,7 @@ _No documents yet. Run `kb ingest` to add evidence or start a `kb-author` sessio
 
 (The timestamp is the only non-literal byte in the scaffold; everything else is byte-pinned.)
 
-### 5.4 `governance/kb-config.md`
-
-````markdown
----
-type: kb-config
----
-# KB Configuration
-
-Project-owned vocabularies and rules. Edit the YAML block below; `kb` commands
-read it directly. Add types and tags as the project discovers them — an empty
-list means "not yet constrained" for types, and "no tags declared" for tags
-(kb validate flags undeclared tags).
-
-```yaml
-# Document type vocabulary (open list; examples: outcome, ux-flow, coding-spec,
-# test-plan, adr, runbook, context-package).
-types: []
-
-# Tag vocabulary (kb validate flags tags not listed here).
-tags: []
-
-# Id prefixes per document class.
-id_prefixes:
-  synthetic: KB
-  source: RAW
-  chat: CHAT
-  feedback: FEED
-
-# Change classes governance considers auto-safe during propagation (CS3).
-# Start empty; expand from field data (PRD OQ1).
-propagation_auto_safe: []
-```
-````
-
-### 5.5 `governance/conventions.md`
+### 5.4 `governance/conventions.md`
 
 ```markdown
 ---
@@ -170,11 +160,11 @@ Standing conventions for this knowledge base. Human-maintained.
 (none yet)
 ```
 
-### 5.6 `raw/index.md` and `synthetic/index.md`
+### 5.5 `raw/index.md` and `synthetic/index.md`
 
 Same generated header as §5.2, title `# Index — raw/` / `# Index — synthetic/`, body `(empty)`.
 
-### 5.7 `.gitkeep` files
+### 5.6 `.gitkeep` files
 
 Zero bytes. Placed in `governance/templates/`, `raw/sources/`, `raw/chats/`, `raw/feedback/`.
 
@@ -183,7 +173,7 @@ Zero bytes. Placed in `governance/templates/`, `raw/sources/`, `raw/chats/`, `ra
 **Text (stdout):** one line per manifest entry, `<created|overwritten|skipped>  <relative path>` (skips annotated `(exists)`), then a summary line:
 
 ```
-KB ready at /abs/path — 11 created, 0 overwritten, 0 skipped, git initialized
+KB ready at /abs/path — 10 created, 0 overwritten, 0 skipped, git initialized
 ```
 
 **JSON (`--json`):**
@@ -206,7 +196,7 @@ KB ready at /abs/path — 11 created, 0 overwritten, 0 skipped, git initialized
 | # | Condition | Behavior | Exit |
 |---|---|---|---|
 | E1 | `ROOT` exists and is a file | `E_INIT_NOT_DIR` — `target exists and is not a directory: <path>` | 2 |
-| E2 | An ancestor of `ROOT` contains `.kb` | `E_INIT_NESTED` — `already inside a knowledge base rooted at <root>` | 2 |
+| E2 | An ancestor of `ROOT` contains `kb-config.json` | `E_INIT_NESTED` — `already inside a knowledge base rooted at <root>` | 2 |
 | E3 | Target unwritable / OS error mid-scaffold | `E_INIT_IO` with the OS message; partial files may remain (documented, not rolled back) | 2 |
 | E4 | Healthy KB, re-run, no flags | all entries skipped, zero writes, no new log entry | 0 |
 | E5 | Re-run with `--force` | scaffold files rewritten pristine; documents and non-manifest files untouched | 0 |
@@ -223,7 +213,8 @@ One pytest test per item (00-shared §10), named `test_ac<NN>_<slug>`.
 | AC2 | Given AC1's run, then stdout lists each entry as `created` and the summary line matches the §6 form. |
 | AC3 | Given a scaffolded KB, when `kb init` re-runs, then exit 0, all entries `skipped`, and no file's mtime/content changed. |
 | AC4 | Given three consecutive runs, then `log.md` contains exactly one `initialized` entry. |
-| AC5 | Given a KB where `governance/kb-config.md` was edited, when `kb init --force` runs, then the file is restored byte-identical to §5.4. |
+| AC5 | Given a KB where `kb-config.json` was edited, when `kb init --force` runs, then the file is restored byte-identical to §5.1. |
+| AC5b | Given a fresh `kb init` KB, then `kb-config.json` parses with stdlib `json` and contains `schema == 1`, `types == []`, `tags == []`, `id_prefixes == {synthetic:KB, source:RAW, chat:CHAT, feedback:FEED}`, and `propagation_auto_safe == []`. |
 | AC6 | Given a KB containing a document at `raw/sources/x.md`, when `kb init --force` runs, then that document is byte-identical afterwards. |
 | AC7 | Given a KB at `/a`, when `kb init --root /a/b` runs, then exit 2, `E_INIT_NESTED` names `/a`, and `/a/b` gained no files. |
 | AC8 | Given the AC7 setup, when `kb init --root /a/b --force` runs, then it is still refused identically. |

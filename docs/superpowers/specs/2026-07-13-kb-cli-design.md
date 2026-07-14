@@ -44,7 +44,7 @@ kb/                       (this repo; package name `kb`, console script `kb`)
 
 ## Shared foundations (all commands)
 
-- **Root discovery.** Walk up from cwd for a `.kb` marker file (written by `kb init`; contains schema version). Overrides: `--kb PATH` flag, `KB_ROOT` env var. No marker found → clear error, exit 2.
+- **Root discovery.** Walk up from cwd for a `kb-config.json` file (written by `kb init`; holds project config and the schema version, and doubles as the root marker — there is no separate `.kb` file). Discovery is existence-based; a malformed config is a separate error, not "no KB found". Overrides: `--kb PATH` flag, `KB_ROOT` env var. No marker found → clear error, exit 2.
 - **The scan.** One pass per invocation builds the `KB` object: every `*.md` under `raw/`, `synthetic/`, `governance/` is parsed for frontmatter. Bodies are lazily loaded only when a command needs them (`search`, `mv`). Frontmatter parse failures do not crash query commands; the document is excluded from results, noted on stderr, and fully reported by `validate`.
 - **Output modes.** `--output paths|frontmatter|full` (default `frontmatter`) on commands that return documents; `--json` on every command. JSON schemas are stable within a major version (NFR-9).
 - **Exit codes.** `0` success / checks pass; `1` findings or verification failures (CI-friendly); `2` usage or environment errors.
@@ -172,7 +172,7 @@ kb ingest --from file|stdin|clipboard --class source|chat|feedback
           [--about REF] [--title T] [--origin O] [PATH_OR_INPUT]
 ```
 
-- Assigns the next sequential id with the class's prefix (`RAW-` / `CHAT-` / `FEED-` by default; prefixes configurable in `governance/kb-config.md`).
+- Assigns the next sequential id with the class's prefix (`RAW-` / `CHAT-` / `FEED-` by default; prefixes configurable in root `kb-config.json`).
 - Writes a normalized Markdown file into `raw/sources/`, `raw/chats/`, or `raw/feedback/` with the reduced frontmatter (`id`, `type: raw-source|chat|feedback`, `ingested_at`, `origin`, plus `about` for feedback).
 - Body is copied **verbatim** — adapters normalize and file; they never synthesize (per CLI-8).
 - `--about` is mandatory for `--class feedback` and is validated against existing ids.
@@ -190,7 +190,7 @@ kb init [--root PATH] [--force]
 ```
 
 - Run from the folder to become the KB root; scaffolds the current directory by default (`--root` targets a different folder, resolved to an absolute path).
-- Scaffolds the Appendix A layout: `raw/{sources,chats,feedback}/`, `synthetic/`, `governance/` (starter `kb-config.md` with commented examples of type vocabulary, tag vocabulary, id prefixes), root `index.md`, `log.md`, and the `.kb` marker containing the schema version.
+- Scaffolds the Appendix A layout: `raw/{sources,chats,feedback}/`, `synthetic/`, `governance/`, root `index.md`, `log.md`, and root `kb-config.json` — the project config (starter type/tag vocabulary and id prefixes, with `_comment` fields for guidance since JSON has no comments) that also holds the schema version and marks the KB root. (Deviation from PRD Appendix A, which nested `kb-config` under `governance/`: moved to root so it can double as the discovery marker.)
 - Idempotent: on an existing KB it creates only what's missing; never overwrites without `--force`.
 - Runs `git init` if the target is not already inside a Git repository.
 - Prints a summary of what was created. The steward interview (INIT-2) is the `kb-init` skill's job; this command only scaffolds.

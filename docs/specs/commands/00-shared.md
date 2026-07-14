@@ -10,17 +10,25 @@ Every command except `kb init` locates the KB root before doing anything:
 
 1. `--kb PATH` flag, if given.
 2. Else `KB_ROOT` environment variable, if set.
-3. Else walk up from cwd (inclusive) to the filesystem root, looking for a directory containing a `.kb` marker file. First hit wins.
+3. Else walk up from cwd (inclusive) to the filesystem root, looking for a directory containing a `kb-config.json` file. First hit wins.
 
-Failure: message `not inside a knowledge base (no .kb marker found); run 'kb init' or pass --kb` on stderr, exit 2.
+Failure: message `not inside a knowledge base (no kb-config.json found); run 'kb init' or pass --kb` on stderr, exit 2.
 
-The `.kb` marker is a YAML file. Current content:
+`kb-config.json` at the KB root is both the **root marker** and the project configuration; there is no separate `.kb` file. Discovery is **existence-based**: a directory is a KB root iff it contains a file named `kb-config.json`. Whether that file parses is a separate concern — a malformed config is reported as `E_CONFIG_INVALID` (exit 2) by the command that loads it, never as "no KB found".
 
-```yaml
-schema: 1
+The file is a JSON object. Minimum content written by `kb init`:
+
+```json
+{
+  "schema": 1,
+  "types": [],
+  "tags": [],
+  "id_prefixes": { "synthetic": "KB", "source": "RAW", "chat": "CHAT", "feedback": "FEED" },
+  "propagation_auto_safe": []
+}
 ```
 
-`schema` is the KB layout schema version. Commands MUST refuse (exit 2, `E_SCHEMA_UNSUPPORTED`) a schema newer than they know.
+`schema` is the KB layout schema version — a **reserved, tooling-owned** key, not hand-edited by stewards. Commands MUST refuse (exit 2, `E_SCHEMA_UNSUPPORTED`) a schema newer than they know. Keys beginning with `_` (e.g. `_comment`) are ignored by `load_config` and exist only to carry human guidance (JSON has no comments).
 
 ## 2. Exit codes
 
@@ -62,7 +70,7 @@ Resolution rules:
 
 ## 5. The scan
 
-- One scan per invocation builds the in-memory `KB`: every `*.md` file under `raw/`, `synthetic/`, and `governance/` is parsed for frontmatter. `index.md` and `log.md` files are excluded from the document set.
+- One scan per invocation builds the in-memory `KB`: every `*.md` file under `raw/`, `synthetic/`, and `governance/` is parsed for frontmatter. `index.md` and `log.md` files are excluded from the document set. `kb-config.json` is configuration, not a document — it is loaded separately by `load_config` and never appears in the document set.
 - Bodies are loaded lazily — only by commands that need them (`search`, `mv`).
 - Frontmatter parsing preserves key order and unknown keys (FM2). Unknown keys are never an error.
 - A file whose frontmatter fails to parse never crashes a query command: it is excluded from results, one warning line per file goes to stderr, and `kb validate` reports it fully.
@@ -72,7 +80,7 @@ Resolution rules:
 ## 6. Id grammar and allocation
 
 - Id pattern: `<PREFIX>-<NNNNNN>` — an uppercase prefix, a hyphen, a zero-padded integer of at least 6 digits (`KB-000042`, `RAW-000113`; numbers above 999999 keep growing — `KB-1000001` is legal).
-- Default prefixes: `KB` (synthetic), `RAW` (raw sources), `CHAT` (session records), `FEED` (feedback). Projects may override in `governance/kb-config.md`.
+- Default prefixes: `KB` (synthetic), `RAW` (raw sources), `CHAT` (session records), `FEED` (feedback). Projects may override in `kb-config.json`.
 - Allocation: next id for a prefix = max existing number for that prefix + 1, computed over the in-memory `KB` built by the scan (no extra I/O — the scan already parses every document's frontmatter). Monotonic: gaps are never refilled (nothing is deleted, LS4). First id of a prefix is `<PREFIX>-000001`.
 - **Malformed-file guard.** A document whose frontmatter fails to parse has an invisible id. Commands that allocate ids MUST refuse to run while `KB.malformed` is non-empty (exit 2), directing the user to `kb validate` — otherwise an invisible id could be reallocated as a duplicate.
 - Merge collisions (two branches allocating the same id) are detected by `kb validate` as duplicate-id errors; repair is manual.
@@ -91,7 +99,7 @@ Pinned so that independently implemented commands land on the same names. **Grow
 | `SyntheticFrontmatter` | `core/model.py` | `id`, `type`, `title`, `description`, `status` (draft\|current\|superseded\|retired), `derived_from: list`, `timestamp`, `last_human_touch`; optional `tags`, `supersedes`, `instructions`. Shape pinned now; enforcement specced in kb-validate | kb-validate (enforcement) |
 | `Document` | `core/model.py` | `id: DocId \| None`, `path` (KB-root-relative), `doc_class: DocClass`, `frontmatter: Frontmatter`, `body` (lazy property) | kb-ingest |
 | `KB` | `core/scan.py` | `root: Path`, `documents: list[Document]`, `by_id: dict[str, Document]`, `malformed: list[(path, error)]`; built by `scan(root)` | kb-ingest |
-| `Config` | `core/model.py` | `types: list[str]`, `tags: list[str]`, `id_prefixes: dict[str, str]`, `propagation_auto_safe: list[str]`; parsed by `load_config(root)` from the first ` ```yaml ` block in `governance/kb-config.md` body; every field has the documented default when file or key is absent | kb-init |
+| `Config` | `core/model.py` | `schema: int`, `types: list[str]`, `tags: list[str]`, `id_prefixes: dict[str, str]`, `propagation_auto_safe: list[str]`; parsed by `load_config(root)` as a JSON object from `kb-config.json` at the KB root (stdlib `json`); `_`-prefixed keys ignored; every field has the documented default when the key is absent; unparseable file → `E_CONFIG_INVALID` | kb-init |
 | `LogEntry` | `core/housekeeping.py` | `at` (ISO-8601 UTC), `action`, `actor`, `doc_ids: list[str]`, `note`; line format §8 | kb-init |
 
 ## 8. `log.md` line format
