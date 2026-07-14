@@ -89,6 +89,8 @@ Resolution rules:
 
 Pinned so that independently implemented commands land on the same names. **Growth policy:** a model is added here by the first command spec that needs it; the *Introduced by* column records that spec. Later specs may add fields but not change existing ones.
 
+**Implementation:** every model below is a Pydantic 2.x `BaseModel` (or `RootModel`), giving validation, typed access, and structured (de)serialization. Frontmatter models set `model_config = ConfigDict(extra="allow")` to preserve unknown keys (FM2). The generic `Frontmatter` is a `RootModel` wrapping an insertion-ordered `dict[str, Any]` so raw YAML round-trips without reordering; `RawFrontmatter` / `SyntheticFrontmatter` are validated views constructed over it. Pydantic validates already-parsed structures and does **not** perform file I/O: PyYAML parses document frontmatter and stdlib `json` parses `kb-config.json`, then the result is handed to the model. `DocId` implements ordering by `(prefix, number)`.
+
 | Model | Module | Fields / contract | Introduced by |
 |---|---|---|---|
 | `DocClass` | `core/model.py` | enum: `RAW`, `SYNTHETIC`, `GOVERNANCE` | kb-init |

@@ -13,6 +13,7 @@
 | Id↔path index | No stored index. Every invocation scans the KB and reads frontmatter; ids live in the files. Zero staleness, zero merge conflicts, honors NFR-1. A gitignored cache may be added later only if scanning ever becomes slow. |
 | Output rendering | Compact plain text by default (YAML-ish frontmatter blocks, path lists); `--json` on every command for structured output with stable schemas. |
 | Architecture | Layered: pure core library + thin Typer CLI shell (Approach A below). |
+| Data models | Pydantic 2.x `BaseModel`s for validation and typed access; `extra="allow"` preserves unknown frontmatter keys (FM2). Pydantic validates parsed structures only — PyYAML/`json` do the file parsing. |
 
 ### Approaches considered
 
@@ -27,7 +28,7 @@ kb/                       (this repo; package name `kb`, console script `kb`)
 ├── pyproject.toml        entry point: kb = "kb.cli.app:app"
 ├── src/kb/
 │   ├── core/
-│   │   ├── model.py      Document, Frontmatter, KB dataclasses; id patterns
+│   │   ├── model.py      Document, Frontmatter, KB, Config Pydantic models; id patterns
 │   │   ├── scan.py       repo discovery + frontmatter scan → KB object
 │   │   ├── query.py      filter / search / frontmatter extraction
 │   │   ├── graph.py      links, transitive closure, depth, cycle detection
@@ -50,7 +51,7 @@ kb/                       (this repo; package name `kb`, console script `kb`)
 - **Exit codes.** `0` success / checks pass; `1` findings or verification failures (CI-friendly); `2` usage or environment errors.
 - **Document references.** Every command accepts an id (`KB-000042`) or a path wherever a document is named (spelled `REF`; defined normatively in 00-shared.md §4).
 - **Pipelines.** Commands that accept `REF...` (`show`, `filter`, `frontmatter`, `resolve`, `validate`) also read newline-separated ids/paths from stdin when stdin is piped and no refs are given on the command line. Combined with `--output paths`, commands compose Unix-style: `kb search "user feedback" --output paths | kb filter --class raw`, or `kb links KB-000007 --reverse --transitive --output paths | kb validate`. When a command receives a candidate set this way, it operates within that set instead of the whole KB.
-- **Dependencies.** `typer`, `PyYAML` only. Frontmatter is parsed with a small wrapper that preserves key order and unknown keys (FM2). Pure-Python search; no ripgrep or other external binaries.
+- **Dependencies.** `typer`, `PyYAML`, `pydantic` (2.x) only. Data models are Pydantic 2.x `BaseModel`s (validation + typed access); frontmatter models use `extra="allow"` and the generic `Frontmatter` wraps an insertion-ordered dict to preserve key order and unknown keys (FM2). Pydantic validates parsed structures, not files — PyYAML parses frontmatter, stdlib `json` parses config. Pure-Python search; no ripgrep or other external binaries.
 - **Errors.** Human message on stderr + documented exit code; under `--json`, errors are structured: `{"error": {"code": ..., "message": ...}}`.
 
 ## Command group: Query

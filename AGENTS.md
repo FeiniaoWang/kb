@@ -45,6 +45,8 @@ Layering rule: `core/` is pure logic — no Typer, no printing, no `sys.exit`. `
 - **Frontmatter handling** preserves key order and unknown keys (FM2). Malformed files never crash query commands.
 - **Id allocation** is max+1 per prefix from the scan, and is refused while malformed files exist (an unparsed file could hide an id).
 - **Determinism:** no LLM judgment in this CLI, no content synthesis, no network calls. Adapters normalize and file; they never invent content.
+- **Data models are Pydantic 2.x `BaseModel`s** (validation + typed access; see 00-shared.md §7). Frontmatter models set `extra="allow"` to preserve unknown keys (FM2); the generic `Frontmatter` wraps an insertion-ordered dict so raw YAML round-trips without reordering. Pydantic validates parsed structures — it does not do file I/O (PyYAML parses frontmatter, stdlib `json` parses `kb-config.json`).
+- Dependencies stay `typer`, `PyYAML`, and `pydantic` (2.x) only. Adding another requires a spec change.
 
 ## Working conventions
 
