@@ -10,12 +10,14 @@ Scaffold a new knowledge base — or repair the scaffold of an existing one — 
 ## 2. CLI surface
 
 ```
-kb init [PATH] [--force] [--json] [--no-git]
+kb init [--root PATH] [--force] [--json] [--no-git]
 ```
+
+Run `kb init` from the folder you want to become the KB root; it scaffolds the current directory by default. Use `--root` only when scaffolding a different folder.
 
 | Param | Kind | Type | Default | Meaning |
 |---|---|---|---|---|
-| `PATH` | argument | directory path | `.` | Directory to scaffold; created (with parents) if missing |
+| `--root` | option | directory path | current directory | Folder to become the KB root; resolved to an absolute path, created (with parents) if missing |
 | `--force` | option | flag | off | Re-write scaffold files that already exist with pristine versions |
 | `--json` | option | flag | off | Structured output (§6) |
 | `--no-git` | option | flag | off | Skip Git detection/initialization |
@@ -26,13 +28,13 @@ kb init [PATH] [--force] [--json] [--no-git]
 
 > Scaffold a new knowledge base, or repair an existing one.
 >
-> Creates the standard KB layout (raw/, synthetic/, governance/), the root index.md and log.md, a starter governance/kb-config.md, and the .kb marker that identifies the KB root. Safe to re-run: existing files are never touched unless --force is given. Runs `git init` if the target is not already inside a Git repository (disable with --no-git).
+> Run this from the folder you want to become the KB root; it scaffolds the current directory by default (pass --root to target a different folder). Creates the standard KB layout (raw/, synthetic/, governance/), the root index.md and log.md, a starter governance/kb-config.md, and the .kb marker that identifies the KB root. Safe to re-run: existing files are never touched unless --force is given. Runs `git init` if the target is not already inside a Git repository (disable with --no-git).
 
 **Option help strings:**
 
 | Param | Help string |
 |---|---|
-| `PATH` | Directory to scaffold. Created if it does not exist. [default: current directory] |
+| `--root` | Folder to become the KB root. Resolved to an absolute path and created if it does not exist. [default: current directory] |
 | `--force` | Overwrite existing scaffold files with pristine versions. Documents are never touched. |
 | `--json` | Emit results as JSON. |
 | `--no-git` | Do not run git init even if the target is not a Git repository. |
@@ -41,28 +43,28 @@ kb init [PATH] [--force] [--json] [--no-git]
 
 ```
 Examples:
-  kb init                    Scaffold a KB in the current directory
-  kb init ~/team-kb          Scaffold a KB at the given path
-  kb init --force            Restore pristine scaffold files (documents untouched)
-  kb init --json --no-git    Machine-readable scaffold in a plain directory
+  kb init                       Scaffold a KB in the current directory (the KB root)
+  kb init --root ~/team-kb      Scaffold a KB at the given path
+  kb init --force               Restore pristine scaffold files (documents untouched)
+  kb init --json --no-git       Machine-readable scaffold in a plain directory
 ```
 
 ## 4. Behavior (normative algorithm)
 
-1. Resolve `PATH` to an absolute path (default: cwd). If it exists and is not a directory → `E_INIT_NOT_DIR`, exit 2. If missing, create it with parents.
-2. **Nesting guard.** Walk up from `PATH`'s parent to the filesystem root. If any ancestor directory contains a `.kb` marker → `E_INIT_NESTED` (message names the enclosing KB root), exit 2, nothing created. `--force` does NOT override this.
+1. Determine the root: `--root` if given, else the current directory. Resolve it to an absolute path (call it `ROOT`). If it exists and is not a directory → `E_INIT_NOT_DIR`, exit 2. If missing, create it with parents.
+2. **Nesting guard.** Walk up from `ROOT`'s parent to the filesystem root. If any ancestor directory contains a `.kb` marker → `E_INIT_NESTED` (message names the enclosing KB root), exit 2, nothing created. `--force` does NOT override this.
 3. For each scaffold entry in §5, classify and act:
    - absent → **create** with the pinned content;
    - present, `--force` given → **overwrite** with the pinned content (scaffold files only — nothing under `raw/sources/`, `raw/chats/`, `raw/feedback/`, or `synthetic/` other than the listed `index.md` files is ever written);
    - present, no `--force` → **skip**, no write.
-4. **Git.** Unless `--no-git`: determine whether `PATH` is inside a Git work tree (`git rev-parse --is-inside-work-tree` from `PATH`). If not, run `git init` in `PATH`. Outcomes: `initialized`, `already`, `skipped` (--no-git), `unavailable` (no `git` executable → one warning line on stderr, continue, exit unaffected).
+4. **Git.** Unless `--no-git`: determine whether `ROOT` is inside a Git work tree (`git rev-parse --is-inside-work-tree` from `ROOT`). If not, run `git init` in `ROOT`. Outcomes: `initialized`, `already`, `skipped` (--no-git), `unavailable` (no `git` executable → one warning line on stderr, continue, exit unaffected).
 5. **Log.** Append an `initialized` entry to `log.md` (format: 00-shared §8, actor `kb-cli`, note `KB scaffolded by kb init`) — but only if `log.md` does not already contain an `initialized` entry. Re-runs never add duplicate entries.
 6. Report per §6. Exit 0 for every outcome that reaches this step.
 
 ## 5. Filesystem effects — scaffold manifest (contents verbatim)
 
 ```
-PATH/
+ROOT/
 ├── .kb
 ├── index.md
 ├── log.md
@@ -203,8 +205,8 @@ KB ready at /abs/path — 11 created, 0 overwritten, 0 skipped, git initialized
 
 | # | Condition | Behavior | Exit |
 |---|---|---|---|
-| E1 | `PATH` exists and is a file | `E_INIT_NOT_DIR` — `target exists and is not a directory: <path>` | 2 |
-| E2 | An ancestor of `PATH` contains `.kb` | `E_INIT_NESTED` — `already inside a knowledge base rooted at <root>` | 2 |
+| E1 | `ROOT` exists and is a file | `E_INIT_NOT_DIR` — `target exists and is not a directory: <path>` | 2 |
+| E2 | An ancestor of `ROOT` contains `.kb` | `E_INIT_NESTED` — `already inside a knowledge base rooted at <root>` | 2 |
 | E3 | Target unwritable / OS error mid-scaffold | `E_INIT_IO` with the OS message; partial files may remain (documented, not rolled back) | 2 |
 | E4 | Healthy KB, re-run, no flags | all entries skipped, zero writes, no new log entry | 0 |
 | E5 | Re-run with `--force` | scaffold files rewritten pristine; documents and non-manifest files untouched | 0 |
@@ -223,10 +225,11 @@ One pytest test per item (00-shared §10), named `test_ac<NN>_<slug>`.
 | AC4 | Given three consecutive runs, then `log.md` contains exactly one `initialized` entry. |
 | AC5 | Given a KB where `governance/kb-config.md` was edited, when `kb init --force` runs, then the file is restored byte-identical to §5.4. |
 | AC6 | Given a KB containing a document at `raw/sources/x.md`, when `kb init --force` runs, then that document is byte-identical afterwards. |
-| AC7 | Given a KB at `/a`, when `kb init /a/b` runs, then exit 2, `E_INIT_NESTED` names `/a`, and `/a/b` gained no files. |
-| AC8 | Given the AC7 setup, when `kb init /a/b --force` runs, then it is still refused identically. |
-| AC9 | Given a file at `PATH`, when `kb init PATH` runs, then exit 2 with `E_INIT_NOT_DIR`. |
-| AC10 | Given a nonexistent nested path `x/y/z`, when `kb init x/y/z` runs, then the directories are created and scaffolded, exit 0. |
+| AC7 | Given a KB at `/a`, when `kb init --root /a/b` runs, then exit 2, `E_INIT_NESTED` names `/a`, and `/a/b` gained no files. |
+| AC8 | Given the AC7 setup, when `kb init --root /a/b --force` runs, then it is still refused identically. |
+| AC9 | Given a file at path `P`, when `kb init --root P` runs, then exit 2 with `E_INIT_NOT_DIR`. |
+| AC10 | Given a nonexistent nested path `x/y/z`, when `kb init --root x/y/z` runs, then the directories are created and scaffolded, exit 0. |
+| AC10b | Given an empty dir as cwd with no `--root`, when `kb init` runs, then that cwd (resolved absolute) becomes the KB root and is scaffolded, exit 0. |
 | AC11 | Given a KB with `log.md` and `raw/index.md` deleted, when `kb init` re-runs, then exactly those are recreated (`created`), the rest `skipped`. |
 | AC12 | Given a plain dir (not a repo), when `kb init` runs, then `.git/` exists and JSON reports `"git": "initialized"`. |
 | AC13 | Given a dir already inside a Git repo, when `kb init` runs, then no nested `.git/` is created and JSON reports `"git": "already"`. |

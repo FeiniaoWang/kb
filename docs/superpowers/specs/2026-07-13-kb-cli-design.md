@@ -186,9 +186,10 @@ kb ingest --from file|stdin|clipboard --class source|chat|feedback
 ### `kb init` (CLI-11)
 
 ```
-kb init [PATH] [--force]
+kb init [--root PATH] [--force]
 ```
 
+- Run from the folder to become the KB root; scaffolds the current directory by default (`--root` targets a different folder, resolved to an absolute path).
 - Scaffolds the Appendix A layout: `raw/{sources,chats,feedback}/`, `synthetic/`, `governance/` (starter `kb-config.md` with commented examples of type vocabulary, tag vocabulary, id prefixes), root `index.md`, `log.md`, and the `.kb` marker containing the schema version.
 - Idempotent: on an existing KB it creates only what's missing; never overwrites without `--force`.
 - Runs `git init` if the target is not already inside a Git repository.
