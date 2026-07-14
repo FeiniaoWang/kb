@@ -102,6 +102,7 @@ kb show REF... [--output body|full|frontmatter] [--json]
 ```
 
 - Prints documents by id or path. Default `body`: first line `# <title>` (frontmatter `title`; falls back to `# <id>` for raw documents, whose reduced schema has no title), a blank line, the body verbatim, then a terminator line containing exactly `---`. The terminator follows **every** document — single-doc and pipeline output parse identically, and truncated streams stay detectable.
+- **Markdown preservation.** The body between heading and terminator is byte-for-byte the file's body: no reflowing, no markup interpretation, no escaping, trailing whitespace intact. Implementation note: document content MUST be written to stdout raw (e.g. `sys.stdout.write` in the render layer), never through a rich/Typer console that could interpret `[...]` as markup or rewrap lines. Under `--json`, the body is a plain string field and round-trips exactly.
 - `full` prepends the frontmatter block; `frontmatter` aliases `kb frontmatter` for symmetry.
 - The **only** sanctioned way for skills to read document content — agents never open KB files directly. Routing all reads through the CLI keeps the NFR-8 access-control hooks effective and completes the CLI-served progressive-disclosure ladder: `index` → `filter`/`frontmatter` → `search` snippets → `show`.
 - Accepts refs from stdin (pipelines): `kb filter --type coding-spec --output paths | kb show`.
