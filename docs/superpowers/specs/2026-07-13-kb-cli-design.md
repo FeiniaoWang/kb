@@ -46,7 +46,8 @@ kb/                       (this repo; package name `kb`, console script `kb`)
 ## Shared foundations (all commands)
 
 - **Root discovery.** Walk up from cwd for a `kb-config.json` file (written by `kb init`; holds project config and the schema version, and doubles as the root marker — there is no separate `.kb` file). Discovery is existence-based; a malformed config is a separate error, not "no KB found". Overrides: `--kb PATH` flag, `KB_ROOT` env var. No marker found → clear error, exit 2.
-- **The scan.** One pass per invocation builds the `KB` object: every `*.md` in the tree is parsed for frontmatter, except `log.md` (operational). `index.md` files are included as `DocClass INDEX` documents (one per directory, path-addressed, no id). Bodies are lazily loaded only when a command needs them (`search`, `mv`). Frontmatter parse failures do not crash query commands; the document is excluded from results, noted on stderr, and fully reported by `validate`.
+- **The scan.** One pass per invocation builds the `KB` object: every `*.md` in the tree is parsed for frontmatter, except `log.md` (operational; carries `type: log` for OKF conformance but is not a document). `index.md` files are included as `DocClass INDEX` documents (one per directory, path-addressed, no id). Bodies are lazily loaded only when a command needs them (`search`, `mv`). Frontmatter parse failures do not crash query commands; the document is excluded from results, noted on stderr, and fully reported by `validate`.
+- **`type` is mandatory and authoritative (OKF).** Every `*.md` carries a `type` frontmatter field. `DocClass`/`RawClass` are derived from `type` (`index`→INDEX; `raw-source|chat|feedback`→RAW; `conventions|kb-config|health`→GOVERNANCE; `log`→operational; anything else→SYNTHETIC), never from path. Location must agree with `type`; `validate` flags mismatches and universal-`type` violations. See 00-shared.md §5.
 - **Output modes.** `--output paths|frontmatter|full` (default `frontmatter`) on commands that return documents; `--json` on every command. JSON schemas are stable within a major version (NFR-9).
 - **Exit codes.** `0` success / checks pass; `1` findings or verification failures (CI-friendly); `2` usage or environment errors.
 - **Document references.** Every command accepts an id (`KB-000042`) or a path wherever a document is named (spelled `REF`; defined normatively in 00-shared.md §4).
@@ -143,6 +144,8 @@ No args → whole KB. With refs → scoped to those documents, plus graph checks
 
 | Check group | Checks |
 |---|---|
+| Universal `type` (FM0/OKF) | **every** `*.md` (including `index.md` and `log.md`) carries a `type` frontmatter field — missing `type` is an error |
+| Type↔location agreement | a document's directory matches its authoritative `type` (`index`→`index.md`; `raw-*`→`raw/<subclass>/`; governance types→`governance/`; synthetic types→`synthetic/`) — mismatch is an error |
 | Schema (FM1–FM3) | frontmatter parses; mandatory fields per class (synthetic full schema; raw reduced schema: `id`, `type`, `ingested_at`, `origin`, `about` for feedback); legal `status` values; `description` ≤ 2 sentences (heuristic sentence count → severity `warning`, never an error); timestamps parse as ISO-8601; unknown keys preserved and never flagged |
 | Tags (FM1b) | every `tags` value appears in the governance tag vocabulary |
 | Ids | globally unique; format matches governance-configured prefixes; duplicate detection catches sequential-allocation collisions after merges |

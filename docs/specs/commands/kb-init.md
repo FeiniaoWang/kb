@@ -145,7 +145,12 @@ When `<LISTING>` is empty, the section is: frontmatter, `# <TITLE>`, one blank l
 
 ### 5.3 `log.md`
 
+Operational file (CLI-appended by `kb log`, excluded from the document set), but it still carries a `type: log` frontmatter field so it satisfies OKF's every-markdown-file `type` requirement (00-shared §5). `type: log` maps to the operational classification, not a `DocClass`.
+
 ```markdown
+---
+type: log
+---
 <!-- KB history — append-only; written by `kb log`. Format: - <UTC ISO> | <action> | <actor> | <ids or -> | <note> -->
 # Knowledge Base Log
 
@@ -256,6 +261,7 @@ One pytest test per item (00-shared §10), named `test_ac<NN>_<slug>`.
 | AC7 | Given a fresh `kb init` KB, then `governance/conventions.md` frontmatter has `id == GOVERNANCE-CONVENTIONS` and `governance/kb-config.md` has `id == GOVERNANCE-KB-CONFIG` (parsed from the pinned files). Resolving them by id and confirming `DocClass GOVERNANCE` is covered by the scan spec; marked `xfail` here until the scan exists. |
 | AC7a | Given a fresh `kb init` KB, then exactly eight `index.md` files exist (root, `governance/`, `governance/templates/`, `raw/`, `raw/sources/`, `raw/chats/`, `raw/feedback/`, `synthetic/`), each parses with frontmatter `type: index`, carries a `description`, has **no** `id` key, and its body byte-matches the §5.2 pinned content for that path (generated-header comment + listing). |
 | AC7b | Given a fresh `kb init` KB, then no file named `.gitkeep` exists anywhere under the root. |
+| AC7c | Given a fresh `kb init` KB, then **every** scaffolded `*.md` file carries a `type` frontmatter field (OKF-mandatory): the eight `index.md` have `type: index`, `governance/conventions.md` has `type: conventions`, `governance/kb-config.md` has `type: kb-config`, and `log.md` has `type: log`. |
 | AC8 | Given a KB containing a document at `raw/sources/x.md`, when `kb init --force` runs, then that document is byte-identical afterwards. |
 | AC9 | Given a file at path `P`, when `kb init --root P` runs, then exit 2 with `E_INIT_NOT_DIR`. |
 | AC10 | Given a nonexistent nested path `x/y/z`, when `kb init --root x/y/z` runs, then the directories are created and scaffolded, exit 0. |

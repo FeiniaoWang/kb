@@ -43,6 +43,7 @@ Layering rule: `core/` is pure logic — no Typer, no printing, no `sys.exit`. `
 - **Exit codes:** `0` success / `1` findings or reference failures / `2` usage or environment errors.
 - **Output:** compact plain text by default; every command supports `--json` (`{"ok": true, ...}` / `{"error": {"code", "message"}}`). JSON fields are added, never renamed or removed.
 - **Frontmatter handling** preserves key order and unknown keys (FM2). Malformed files never crash query commands.
+- **`type` is mandatory and authoritative (OKF).** Every `*.md` (including `index.md` → `type: index` and `log.md` → `type: log`) carries a `type` field. `DocClass`/`RawClass` derive from `type`, never from path (`index`→INDEX; `raw-source|chat|feedback`→RAW; `conventions|kb-config|health`→GOVERNANCE; `log`→operational; else→SYNTHETIC). Location must agree with `type`; `kb validate` enforces universal `type` presence and `type`↔location agreement.
 - **Id allocation** is max+1 per prefix from the scan, and is refused while malformed files exist (an unparsed file could hide an id).
 - **Determinism:** no LLM judgment in this CLI, no content synthesis, no network calls. Adapters normalize and file; they never invent content.
 - **Git-agnostic:** no command runs `git` or inspects Git state — the CLI only reads and writes files. The KB lives in Git, but initializing/committing/branching is the user's or a skill's job.

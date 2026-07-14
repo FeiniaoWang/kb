@@ -74,11 +74,17 @@ Resolution rules:
 
 ## 5. The scan
 
-- One scan per invocation builds the in-memory `KB`: every `*.md` file in the KB tree (recursively from the root) is parsed for frontmatter, **except `log.md`** (operational, CLI-appended, never a document). `index.md` files **are** documents (`DocClass INDEX`) — one per directory — and are included. `kb-config.json` is configuration (not `*.md`); it is loaded separately by `load_config` and never appears in the document set.
-- **`DocClass` derivation.** A file named `index.md` → `INDEX` (regardless of directory). Otherwise by top-level directory: `raw/` → `RAW`, `synthetic/` → `SYNTHETIC`, `governance/` → `GOVERNANCE`.
+- One scan per invocation builds the in-memory `KB`: every `*.md` file in the KB tree (recursively from the root) is parsed for frontmatter. `log.md` is **operational** (CLI-appended, never a document); it carries `type: log` for OKF conformance but is excluded from the document set. `index.md` files **are** documents (`DocClass INDEX`), one per directory, included. `kb-config.json` is configuration (not `*.md`); it is loaded separately by `load_config` and never appears in the document set.
+- **`type` is mandatory and authoritative (OKF).** Every `*.md` file in the KB MUST carry a `type` frontmatter field; `kb validate` enforces this on **every** markdown file, including `log.md`. A file missing `type` is malformed (§ malformed-file handling below). `type` is the single source of truth for classification — `DocClass` and `RawClass` are **derived from `type`, never from path**:
+    - `type: index` → `INDEX`
+    - `type: raw-source | chat | feedback` → `RAW` (`RawClass` `SOURCE | CHAT | FEEDBACK`)
+    - reserved governance types `conventions | kb-config | health` → `GOVERNANCE`
+    - `type: log` → operational (not a `DocClass`; excluded from the document set)
+    - any other `type` → `SYNTHETIC` (the open project vocabulary in `kb-config.json`)
+- **Location must agree with `type`.** A document's directory is expected to match its `type`, and `kb validate` flags any mismatch (it never silently reclassifies): `index` → file named `index.md`; `raw-source|chat|feedback` → under `raw/sources|chats|feedback/`; governance types → under `governance/`; synthetic types → under `synthetic/`. `type` wins; a misplaced file is a validation error to be fixed (e.g. via `kb mv`), not a reclassification.
 - Bodies are loaded lazily — only by commands that need them (`search`, `mv`).
 - Frontmatter parsing preserves key order and unknown keys (FM2). Unknown keys are never an error.
-- A file whose frontmatter fails to parse never crashes a query command: it is excluded from results, one warning line per file goes to stderr, and `kb validate` reports it fully.
+- A file that is **unclassifiable** — its frontmatter fails to parse, or it parses but has no `type` (so no `DocClass` can be derived) — never crashes a query command: it goes to `KB.malformed`, is excluded from results, emits one stderr warning, and is fully reported by `kb validate` (missing `type` is an FM0 error).
 - No stored index. Ids live in the files; the id→path map is rebuilt by each scan.
 - **CLI-only access discipline.** The CLI is the sole KB data interface for skills: document content is read through `kb show` (and `search` snippets), never by opening KB files directly. This keeps the NFR-8 access-control hooks in the query layer effective. Skills carry the corresponding mandate (PRD §5.2).
 
@@ -99,8 +105,8 @@ Pinned so that independently implemented commands land on the same names. **Grow
 
 | Model | Module | Fields / contract | Introduced by |
 |---|---|---|---|
-| `DocClass` | `core/model.py` | enum: `RAW`, `SYNTHETIC`, `GOVERNANCE`, `INDEX` | kb-init |
-| `RawClass` | `core/model.py` | enum: `SOURCE`, `CHAT`, `FEEDBACK`; maps to `raw/sources`, `raw/chats`, `raw/feedback` and types `raw-source`, `chat`, `feedback` | kb-init |
+| `DocClass` | `core/model.py` | enum: `RAW`, `SYNTHETIC`, `GOVERNANCE`, `INDEX`; **derived from the authoritative `type`** (§5), not from path | kb-init |
+| `RawClass` | `core/model.py` | enum: `SOURCE`, `CHAT`, `FEEDBACK`; **derived from `type`** (`raw-source`→`SOURCE`, `chat`→`CHAT`, `feedback`→`FEEDBACK`); the matching subdirectory (`raw/sources|chats|feedback/`) is required and checked by `kb validate` | kb-init |
 | `DocId` | `core/ids.py` | `prefix: str`, `number: int`; models the **numeric** id form only; `parse(s)`, `format()` (zero-pad to 6), ordering by (prefix, number); `next_id(kb, prefix) -> DocId`. Reserved slug ids (`GOVERNANCE-CONVENTIONS`, …) are literal id strings, not `DocId`s | kb-init (grammar), kb-ingest (allocation) |
 | `Frontmatter` | `core/model.py` | ordered mapping preserving unknown keys; round-trips YAML without reordering | kb-init |
 | `RawFrontmatter` | `core/model.py` | `id`, `type` (raw-source\|chat\|feedback), `ingested_at` (ISO-8601 UTC), `origin: str`, `about: str \| None` (feedback only) | kb-ingest |

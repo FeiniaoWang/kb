@@ -120,7 +120,9 @@ Rationale: mechanical correctness (does this frontmatter parse? which documents 
 | **Synthetic** | `synthetic/` | Living | Humans (co-authoring sessions) | Agents, under §6.7 rules |
 | **Governance** | `governance/` | Human-controlled | KB steward | Steward, with agent assistance |
 | **Index** | `<dir>/index.md` (one per directory) | Regenerated | CLI | CLI (read-only for humans/agents) |
-| **Operational** | `log.md` | Appended | CLI | CLI |
+| **Operational** | `log.md` (`type: log`) | Appended | CLI | CLI |
+
+**Class is derived from the authoritative `type` field, not from location** (FM0): `index` → Index; `raw-source`/`chat`/`feedback` → Raw; the reserved governance types (`conventions`, `kb-config`, `health`) → Governance; `log` → Operational; any other type → Synthetic. The *Location* column is therefore an **invariant that `kb validate` enforces** (a document's directory must agree with its `type`), not the definition of its class — a misplaced file is a validation error, fixed with `kb mv`, never silently reclassified.
 
 Raw documents come in three subclasses. **Sources** (`raw/sources/`) are ingested external material. **Session records** (`raw/chats/`) are the archived history of every human-led `kb-author` or `kb-ingest` session, headed by an agent-written, human-confirmed decision summary; they are the captured form of human decisions — "the PM decided on 2026-07-08" cites the session record — and replace the earlier separate decisions class. **Feedback** (`raw/feedback/`) is evidence produced by consumers of synthetic documents — a coding agent's errors while executing a spec, failing tests, structured review comments — filed with an `about:` reference to the document it concerns.
 
@@ -164,7 +166,8 @@ last_human_touch: 2026-07-10T14:30:00Z # last human-confirmed revision (§6.8)
 ---
 ```
 
-- **FM1.** `id`, `type`, `title`, `description`, `status`, `derived_from`, `timestamp`, `last_human_touch` are mandatory for synthetic documents. Raw documents carry a reduced schema (`id`, `type: raw-source | chat | feedback`, `ingested_at`, `origin`, plus `about` for feedback records).
+- **FM0 — universal `type` (OKF).** Per the Open Knowledge Format, **every markdown file in the KB carries a mandatory `type` frontmatter field** — no exception, including `index.md` (`type: index`) and `log.md` (`type: log`). `type` is the **authoritative classifier**: a document's class (raw/synthetic/governance/index) is *derived from `type`*, and `kb validate` (a) enforces that every `*.md` has a `type` and (b) flags any file whose location disagrees with its `type` (see §6.1). `type` wins over path.
+- **FM1.** Beyond the universal `type`: synthetic documents additionally require `id`, `title`, `description`, `status`, `derived_from`, `timestamp`, `last_human_touch`. Raw documents carry a reduced schema (`id`, `type: raw-source | chat | feedback`, `ingested_at`, `origin`, plus `about` for feedback records). Governance system documents carry `id` (reserved slug), `type`, `title`, `description`; index documents carry `type: index` + `description` (no `id`).
 - **FM1a.** `description` is at most two sentences. Every directory has an `index.md` (a first-class document, `DocClass INDEX`, with its own `type: index` and folder-level `description`) whose CLI-generated body enumerates each child's `description` verbatim, so survey-level reading can proceed on indexes alone. `index.md` files are maintained only by the CLI (`kb index`) and are read-only for humans and agents.
 - **FM1b.** `tags` is an optional list; when present, every value must appear in the tag vocabulary declared in `kb-config.json` (`kb validate` flags undeclared tags for the steward to add to the vocabulary or correct).
 - **FM2.** Unknown additional keys are permitted and preserved (forward compatibility; OKF extension-key behavior).
@@ -294,7 +297,7 @@ Humans spent their time exactly where the product intends: supplying evidence, a
 ## 9. Non-Functional Requirements
 
 - **NFR-1 — Substrate portability.** Plain UTF-8 Markdown + YAML in Git; fully readable and navigable by a human with a text editor. No database, server, or index required for correctness.
-- **NFR-2 — OKF compatibility.** Bundles conform to OKF v0.1's required surface (parseable frontmatter with `type`; `index.md`/`log.md` conventions; body links as relative paths). KBDD-specific fields (`id`, `instructions`, `last_human_touch`, …) ride as extension keys per FM2/§6.5.
+- **NFR-2 — OKF compatibility.** Bundles conform to OKF v0.1's required surface: **every markdown file carries a mandatory `type` frontmatter field** (FM0), and `type` is the authoritative classifier; `index.md`/`log.md` follow OKF conventions (`log.md` carries `type: log`); body links are relative paths. `kb validate` enforces universal `type` presence and `type`/location agreement. KBDD-specific fields (`id`, `instructions`, `last_human_touch`, …) ride as extension keys per FM2/§6.5.
 - **NFR-3 — Deterministic mechanical truth.** Every property checkable without an LLM is checked by the CLI (CLI-12); governance rules about status, schema, and graph shape never depend on model judgment.
 - **NFR-4 — Token economics.** Frontmatter-first CLI defaults, mandatory one-line `description`, index-before-body discipline in every skill.
 - **NFR-5 — Auditability.** Any document's derivation chain, decision history, supersession lineage, and human-vs-agent modification record are reconstructible from the repository and its Git history alone. Suitable for regulated environments.
