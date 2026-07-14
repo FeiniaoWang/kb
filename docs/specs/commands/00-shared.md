@@ -4,7 +4,9 @@
 **Implementation context rule:** to implement or validate any `kb` command, an agent reads exactly two files — this one and the command's own spec (`kb-<command>.md`).
 **Sources:** [PRD §7.1](../../prd.md), [master design 2026-07-13](../../superpowers/specs/2026-07-13-kb-cli-design.md). Where this document is more specific, this document wins.
 
-**Git-agnostic (applies to every command).** No `kb` command runs `git` or inspects Git state; the CLI only reads and writes files. The KB is stored in Git (NFR-1/NFR-7), but initializing, staging, committing, and branching the repository are the user's or a skill's responsibility. (`.gitkeep` placeholder files written by `kb init` are inert files, not a Git operation.)
+**Git-agnostic (applies to every command).** No `kb` command runs `git` or inspects Git state; the CLI only reads and writes files. The KB is stored in Git (NFR-1/NFR-7), but initializing, staging, committing, and branching the repository are the user's or a skill's responsibility.
+
+**Directory invariant (applies to every command).** Every directory in the KB contains an `index.md` (`DocClass INDEX`). Any command that creates a directory MUST also create that directory's `index.md` in the same operation (e.g. `kb ingest` creating a new `raw/` subdirectory). There are no `.gitkeep` files — the `index.md` keeps each directory non-empty. `index.md` files are **maintained only by the CLI and are read-only** for humans and agents (they read them, never hand-edit them); `kb index` regenerates their bodies.
 
 ## 1. Root discovery
 
@@ -72,7 +74,8 @@ Resolution rules:
 
 ## 5. The scan
 
-- One scan per invocation builds the in-memory `KB`: every `*.md` file under `raw/`, `synthetic/`, and `governance/` is parsed for frontmatter. `index.md` and `log.md` files are excluded from the document set. `kb-config.json` is configuration, not a document — it is loaded separately by `load_config` and never appears in the document set.
+- One scan per invocation builds the in-memory `KB`: every `*.md` file in the KB tree (recursively from the root) is parsed for frontmatter, **except `log.md`** (operational, CLI-appended, never a document). `index.md` files **are** documents (`DocClass INDEX`) — one per directory — and are included. `kb-config.json` is configuration (not `*.md`); it is loaded separately by `load_config` and never appears in the document set.
+- **`DocClass` derivation.** A file named `index.md` → `INDEX` (regardless of directory). Otherwise by top-level directory: `raw/` → `RAW`, `synthetic/` → `SYNTHETIC`, `governance/` → `GOVERNANCE`.
 - Bodies are loaded lazily — only by commands that need them (`search`, `mv`).
 - Frontmatter parsing preserves key order and unknown keys (FM2). Unknown keys are never an error.
 - A file whose frontmatter fails to parse never crashes a query command: it is excluded from results, one warning line per file goes to stderr, and `kb validate` reports it fully.
@@ -96,13 +99,14 @@ Pinned so that independently implemented commands land on the same names. **Grow
 
 | Model | Module | Fields / contract | Introduced by |
 |---|---|---|---|
-| `DocClass` | `core/model.py` | enum: `RAW`, `SYNTHETIC`, `GOVERNANCE` | kb-init |
+| `DocClass` | `core/model.py` | enum: `RAW`, `SYNTHETIC`, `GOVERNANCE`, `INDEX` | kb-init |
 | `RawClass` | `core/model.py` | enum: `SOURCE`, `CHAT`, `FEEDBACK`; maps to `raw/sources`, `raw/chats`, `raw/feedback` and types `raw-source`, `chat`, `feedback` | kb-init |
 | `DocId` | `core/ids.py` | `prefix: str`, `number: int`; models the **numeric** id form only; `parse(s)`, `format()` (zero-pad to 6), ordering by (prefix, number); `next_id(kb, prefix) -> DocId`. Reserved slug ids (`GOVERNANCE-CONVENTIONS`, …) are literal id strings, not `DocId`s | kb-init (grammar), kb-ingest (allocation) |
 | `Frontmatter` | `core/model.py` | ordered mapping preserving unknown keys; round-trips YAML without reordering | kb-init |
 | `RawFrontmatter` | `core/model.py` | `id`, `type` (raw-source\|chat\|feedback), `ingested_at` (ISO-8601 UTC), `origin: str`, `about: str \| None` (feedback only) | kb-ingest |
 | `SyntheticFrontmatter` | `core/model.py` | `id`, `type`, `title`, `description`, `status` (draft\|current\|superseded\|retired), `derived_from: list`, `timestamp`, `last_human_touch`; optional `tags`, `supersedes`, `instructions`. Shape pinned now; enforcement specced in kb-validate | kb-validate (enforcement) |
 | `GovernanceFrontmatter` | `core/model.py` | `id` (reserved slug, e.g. `GOVERNANCE-CONVENTIONS`), `type`, `title`, `description`; the two system files scaffolded by `kb init`. Full schema/enforcement specced in kb-validate | kb-init |
+| `IndexFrontmatter` | `core/model.py` | `type: index`, `description`; optional `title`; **no `id`** (index docs are path-addressed). One per directory (`DocClass INDEX`). CLI-maintained and read-only for humans/agents: the body is a generated child listing (`kb index` regenerates it). Full enforcement specced in kb-validate | kb-init |
 | `Document` | `core/model.py` | `id: str \| None` (the literal frontmatter id; numeric ids parse via `DocId`), `path` (KB-root-relative), `doc_class: DocClass`, `frontmatter: Frontmatter`, `body` (lazy property) | kb-ingest |
 | `KB` | `core/scan.py` | `root: Path`, `documents: list[Document]`, `by_id: dict[str, Document]`, `malformed: list[(path, error)]`; built by `scan(root)` | kb-ingest |
 | `Config` | `core/model.py` | `schema: int`, `types: list[str]`, `tags: list[str]`, `id_prefixes: dict[str, str]`, `propagation_auto_safe: list[str]`; parsed by `load_config(root)` as a JSON object from `kb-config.json` at the KB root (stdlib `json`); unknown keys ignored; every field has the documented default when the key is absent; unparseable file → `E_CONFIG_INVALID` | kb-init |

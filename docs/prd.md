@@ -12,7 +12,7 @@
 
 **Changes from v0.2:** Session records (`raw/chats/`) — the archived history of human-led sessions — replace `raw/decisions/` as the captured form of human decisions, and every synthetic document must carry at least one session record among its parents (DG5). Consumer feedback (e.g., a coding agent's errors executing a spec) added as a raw document subclass (`raw/feedback/`). DG3 coverage discipline scoped to explicit decomposition only; extraction/reference documents make no claims about children. Optional `tags` frontmatter with a governance-declared vocabulary. `description` extended to two sentences and copied into `index.md` for progressive disclosure.
 
-**Consistency updates (2026-07-14), from the CLI design pass ([docs/superpowers/specs/2026-07-13-kb-cli-design.md](superpowers/specs/2026-07-13-kb-cli-design.md), [docs/specs/commands/](specs/commands/)):** Project config is `kb-config.json` — strict JSON at the **KB root**, which also serves as the root-discovery marker (no separate `.kb` file); it moved out of `governance/`. Document ids zero-pad to **6 digits** (`KB-000042`). Added **`kb show`** (CLI-3a) as the sole sanctioned document-read path for skills, and `kb frontmatter --field` for single-field retrieval. Id↔path resolution is by per-invocation scan, with no stored index.
+**Consistency updates (2026-07-14), from the CLI design pass ([docs/superpowers/specs/2026-07-13-kb-cli-design.md](superpowers/specs/2026-07-13-kb-cli-design.md), [docs/specs/commands/](specs/commands/)):** Project config is `kb-config.json` — strict JSON at the **KB root**, which also serves as the root-discovery marker (no separate `.kb` file); it moved out of `governance/`. Document ids zero-pad to **6 digits** (`KB-000042`). Added **`kb show`** (CLI-3a) as the sole sanctioned document-read path for skills, and `kb frontmatter --field` for single-field retrieval. Id↔path resolution is by per-invocation scan, with no stored index. The CLI performs **no Git operations** (Git is the user's/skills' responsibility). Governance system files carry reserved slug ids (`GOVERNANCE-CONVENTIONS`, `GOVERNANCE-KB-CONFIG`). **Every directory has an `index.md`** (a first-class `DocClass INDEX` document, CLI-maintained and read-only for humans/agents); `.gitkeep` files are gone, and `kb index` regenerates each `index.md` listing.
 
 ---
 
@@ -119,7 +119,8 @@ Rationale: mechanical correctness (does this frontmatter parse? which documents 
 | **Raw** | `raw/` | Immutable, append-only | Ingestion, session records, feedback intake (all human-initiated) | Nobody (corrections arrive as new raw docs) |
 | **Synthetic** | `synthetic/` | Living | Humans (co-authoring sessions) | Agents, under §6.7 rules |
 | **Governance** | `governance/` | Human-controlled | KB steward | Steward, with agent assistance |
-| **Operational** | `index.md`, `log.md` | Regenerated / appended | CLI | CLI |
+| **Index** | `<dir>/index.md` (one per directory) | Regenerated | CLI | CLI (read-only for humans/agents) |
+| **Operational** | `log.md` | Appended | CLI | CLI |
 
 Raw documents come in three subclasses. **Sources** (`raw/sources/`) are ingested external material. **Session records** (`raw/chats/`) are the archived history of every human-led `kb-author` or `kb-ingest` session, headed by an agent-written, human-confirmed decision summary; they are the captured form of human decisions — "the PM decided on 2026-07-08" cites the session record — and replace the earlier separate decisions class. **Feedback** (`raw/feedback/`) is evidence produced by consumers of synthetic documents — a coding agent's errors while executing a spec, failing tests, structured review comments — filed with an `about:` reference to the document it concerns.
 
@@ -164,7 +165,7 @@ last_human_touch: 2026-07-10T14:30:00Z # last human-confirmed revision (§6.8)
 ```
 
 - **FM1.** `id`, `type`, `title`, `description`, `status`, `derived_from`, `timestamp`, `last_human_touch` are mandatory for synthetic documents. Raw documents carry a reduced schema (`id`, `type: raw-source | chat | feedback`, `ingested_at`, `origin`, plus `about` for feedback records).
-- **FM1a.** `description` is at most two sentences and is copied verbatim into the owning directory's `index.md` by `kb index`, so survey-level reading can proceed on indexes alone.
+- **FM1a.** `description` is at most two sentences. Every directory has an `index.md` (a first-class document, `DocClass INDEX`, with its own `type: index` and folder-level `description`) whose CLI-generated body enumerates each child's `description` verbatim, so survey-level reading can proceed on indexes alone. `index.md` files are maintained only by the CLI (`kb index`) and are read-only for humans and agents.
 - **FM1b.** `tags` is an optional list; when present, every value must appear in the tag vocabulary declared in `kb-config.json` (`kb validate` flags undeclared tags for the steward to add to the vocabulary or correct).
 - **FM2.** Unknown additional keys are permitted and preserved (forward compatibility; OKF extension-key behavior).
 - **FM3.** Mechanical validity of all of the above is checkable by `kb validate` without an LLM.
@@ -228,8 +229,8 @@ Independently versioned Python package (pip-installable); skills declare a minim
 | **Query** | **CLI-1.** `kb filter` — select documents by any frontmatter field (`--type`, `--status`, `--tag`, `--derived-from`, arbitrary `--where key=value`), returning paths or frontmatter without bodies. **CLI-2.** `kb search` — full-text search across bodies with per-hit context snippets. **CLI-3.** `kb frontmatter <refs…>` — bulk frontmatter extraction (`--field` retrieves specific fields). **CLI-3a.** `kb show <refs…>` — read document content (body by default; the sole sanctioned read path for skills, so the CLI's access-control layer stays authoritative). |
 | **Graph** | **CLI-4.** `kb links <id|path>` — parents; `--reverse` — children; `--transitive` — full ancestry/impact set; `--depth` — derived depth-from-evidence. **CLI-5.** `kb resolve <id>` / reverse — id↔path resolution computed by the per-invocation scan (no stored index; §6.5). |
 | **Integrity** | **CLI-6.** `kb validate` — frontmatter schema (FM1–FM3, including tag-vocabulary conformance), status-transition legality, acyclicity (DG2), session-record parentage (DG5), link/id integrity, uniqueness of ids; exit codes suitable for CI. **CLI-7.** `kb mv` — move/rename preserving id, updating body links. |
-| **Ingest adapters** | **CLI-8.** `kb ingest --from file|stdin|clipboard --class source|chat|feedback [--about <id>] <target>` — normalize incoming material into the matching `raw/` subclass with correct frontmatter and assigned ids (`--about` links a feedback record to the document it concerns). Adapter architecture is extensible (Slack, mail, ticketing later) without skill changes. Adapters normalize and file; they never synthesize. |
-| **Housekeeping** | **CLI-9.** `kb index` — regenerate `index.md` files from frontmatter, copying each document's `description` (≤2 sentences, FM1a) so an index alone supports survey-level reading. **CLI-10.** `kb log` — append structured entries. **CLI-11.** `kb init` — scaffold repository structure (invoked by the `kb-init` skill). |
+| **Ingest adapters** | **CLI-8.** `kb ingest --from file|stdin|clipboard --class source|chat|feedback [--about <id>] <target>` — normalize incoming material into the matching `raw/` subclass with correct frontmatter and assigned ids (`--about` links a feedback record to the document it concerns); a target subdirectory that does not yet exist is created together with its `index.md`. Adapter architecture is extensible (Slack, mail, ticketing later) without skill changes. Adapters normalize and file; they never synthesize. |
+| **Housekeeping** | **CLI-9.** `kb index` — create any missing directory `index.md` and regenerate each one's listing body (one `- <child> — <description>` line per child, FM1a). `index.md` is CLI-owned and read-only for humans/agents. **CLI-10.** `kb log` — append structured entries. **CLI-11.** `kb init` — scaffold repository structure (invoked by the `kb-init` skill). |
 
 **CLI-12 (quality bar).** The CLI is developed with unit tests and CI, released independently of the skills, and treated as the single source of mechanical truth: any correctness property that *can* be checked deterministically *must* be checked by the CLI, not entrusted to model judgment.
 
@@ -344,20 +345,25 @@ Humans spent their time exactly where the product intends: supplying evidence, a
 ## Appendix A — Repository Layout
 
 ```
-kb/
+kb/                               # every directory has an index.md (DocClass INDEX); no .gitkeep files
 ├── kb-config.json                # config + KB root marker: type vocabulary, readiness checklists, propagation rules, id prefixes, schema version
-├── index.md                      # root navigation (CLI-generated)
+├── index.md                      # root navigation (CLI-maintained, read-only for humans/agents)
 ├── log.md                        # KB-wide history (CLI-appended)
 ├── governance/
+│   ├── index.md
 │   ├── templates/                # optional per-type document templates
+│   │   └── index.md
 │   ├── conventions.md            # standing project conventions (id GOVERNANCE-CONVENTIONS)
 │   ├── kb-config.md              # human-readable field reference for kb-config.json (id GOVERNANCE-KB-CONFIG)
 │   └── health.md                 # latest lint report
 ├── raw/
 │   ├── index.md
 │   ├── sources/                  # normalized external evidence (immutable)
+│   │   └── index.md
 │   ├── chats/                    # session records from kb-author / kb-ingest (immutable)
+│   │   └── index.md
 │   └── feedback/                 # consumer feedback about synthetic documents (immutable)
+│       └── index.md
 └── synthetic/                    # human-created, agent-maintained; organization is
     ├── index.md                  # project-chosen (by role, epic, …) — structure is
     └── …                         # the derivation graph, not the directory tree

@@ -35,7 +35,7 @@ kb/                       (this repo; package name `kb`, console script `kb`)
 │   │   ├── validate.py   all FM/DG/LS mechanical checks → list of Findings
 │   │   ├── ids.py        id allocation (max+1 per prefix), id↔path resolution
 │   │   ├── ingest.py     adapters (file/stdin/clipboard) → raw/ documents
-│   │   ├── housekeeping.py  index.md generation, log.md append, scaffold
+│   │   ├── housekeeping.py  index.md listing maintenance, log.md append, scaffold
 │   │   └── mv.py         move/rename + body-link rewriting
 │   └── cli/
 │       ├── app.py        Typer app; one thin command module per group
@@ -46,7 +46,7 @@ kb/                       (this repo; package name `kb`, console script `kb`)
 ## Shared foundations (all commands)
 
 - **Root discovery.** Walk up from cwd for a `kb-config.json` file (written by `kb init`; holds project config and the schema version, and doubles as the root marker — there is no separate `.kb` file). Discovery is existence-based; a malformed config is a separate error, not "no KB found". Overrides: `--kb PATH` flag, `KB_ROOT` env var. No marker found → clear error, exit 2.
-- **The scan.** One pass per invocation builds the `KB` object: every `*.md` under `raw/`, `synthetic/`, `governance/` is parsed for frontmatter. Bodies are lazily loaded only when a command needs them (`search`, `mv`). Frontmatter parse failures do not crash query commands; the document is excluded from results, noted on stderr, and fully reported by `validate`.
+- **The scan.** One pass per invocation builds the `KB` object: every `*.md` in the tree is parsed for frontmatter, except `log.md` (operational). `index.md` files are included as `DocClass INDEX` documents (one per directory, path-addressed, no id). Bodies are lazily loaded only when a command needs them (`search`, `mv`). Frontmatter parse failures do not crash query commands; the document is excluded from results, noted on stderr, and fully reported by `validate`.
 - **Output modes.** `--output paths|frontmatter|full` (default `frontmatter`) on commands that return documents; `--json` on every command. JSON schemas are stable within a major version (NFR-9).
 - **Exit codes.** `0` success / checks pass; `1` findings or verification failures (CI-friendly); `2` usage or environment errors.
 - **Document references.** Every command accepts an id (`KB-000042`) or a path wherever a document is named (spelled `REF`; defined normatively in 00-shared.md §4).
@@ -162,7 +162,7 @@ kb mv SRC DEST [--json]
 
 - Moves/renames a document or directory. Identity is untouched — ids live in the files.
 - Rewrites relative body links in the moved document **and** in every document that links to it.
-- Regenerates affected `index.md` files and appends a `moved` entry to `log.md`.
+- Regenerates the affected `index.md` listings (source and destination directories) and appends a `moved` entry to `log.md`.
 
 ## Command group: Ingest
 
@@ -179,6 +179,7 @@ kb ingest --from file|stdin|clipboard --class source|chat|feedback
 - `--about` is mandatory for `--class feedback` and is validated against existing ids.
 - Non-text input: the original file is copied alongside; a generated `.md` stub with the frontmatter becomes the citable form.
 - Target filename: slugified `--title`, else the source filename.
+- If the target subdirectory does not exist, it is created **together with its `index.md`** (`DocClass INDEX`), per the directory invariant (00-shared).
 - Appends an `ingested` entry to `log.md`.
 - Adapters register in a small registry (name → callable returning normalized text + origin metadata) so later adapters (Slack, mail, ticketing) are additive and require no skill changes.
 
@@ -193,6 +194,7 @@ kb init [--root PATH] [--force]
 - Run from the folder to become the KB root; scaffolds the current directory by default (`--root` targets a different folder, resolved to an absolute path).
 - Scaffolds the Appendix A layout: `raw/{sources,chats,feedback}/`, `synthetic/`, `governance/`, root `index.md`, `log.md`, and root `kb-config.json` — clean JSON config (starter type/tag vocabulary and id prefixes) that also holds the schema version and marks the KB root. (Deviation from PRD Appendix A, which nested `kb-config` under `governance/`: moved to root so it can double as the discovery marker.) It also scaffolds two governance documents with reserved fixed ids — `governance/conventions.md` (`GOVERNANCE-CONVENTIONS`) and `governance/kb-config.md` (`GOVERNANCE-KB-CONFIG`, the human-readable field reference for `kb-config.json`) — so agents can read them by known id.
 - No nesting guard: `kb init` never checks whether the target sits inside an existing KB; a nested root is allowed, and discovery takes the closest ancestor `kb-config.json`.
+- Every directory gets an `index.md` (`DocClass INDEX`, CLI-maintained, read-only for humans/agents) — eight at init (root, `governance/`, `governance/templates/`, `raw/`, `raw/sources/`, `raw/chats/`, `raw/feedback/`, `synthetic/`). No `.gitkeep` files; each `index.md` keeps its directory non-empty.
 - Idempotent: on an existing KB it creates only what's missing; never overwrites without `--force`.
 - **Git-agnostic** (whole CLI): `kb init` and every other command only read and write files; they never run `git` or inspect Git state. The KB lives in Git (NFR-1/NFR-7), but initializing and managing the repository is the user's or a skill's job.
 - Prints a summary of what was created. The steward interview (INIT-2) is the `kb-init` skill's job; this command only scaffolds.
@@ -203,9 +205,9 @@ kb init [--root PATH] [--force]
 kb index [--check] [--json]
 ```
 
-- Regenerates every directory's `index.md` from frontmatter: per document — id, title, status, and the verbatim ≤2-sentence `description` (FM1a), grouped by subdirectory.
-- Generated files carry a "generated by `kb index` — do not edit" header.
-- `--check`: exit 1 if any index is stale, writing nothing (for CI).
+- `index.md` is a first-class **INDEX document** (frontmatter `type: index` + `description`), one per directory, **maintained only by the CLI and read-only for humans/agents**. `kb index` creates a starter `index.md` in any directory that lacks one and regenerates each directory's listing body; the frontmatter `description` is set at creation and carried forward.
+- The generated body holds one `- <name> — <its description>` line per immediate child (subdirectories then child documents, sorted), sourced from each child's `description` (the FM1a survey-on-index property).
+- `--check`: exit 1 if any directory lacks an `index.md` or any listing is stale, writing nothing (for CI).
 
 ### `kb log` (CLI-10)
 
