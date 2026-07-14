@@ -193,7 +193,7 @@ kb init [--root PATH] [--force]
 - Run from the folder to become the KB root; scaffolds the current directory by default (`--root` targets a different folder, resolved to an absolute path).
 - Scaffolds the Appendix A layout: `raw/{sources,chats,feedback}/`, `synthetic/`, `governance/`, root `index.md`, `log.md`, and root `kb-config.json` — the project config (starter type/tag vocabulary and id prefixes, with `_comment` fields for guidance since JSON has no comments) that also holds the schema version and marks the KB root. (Deviation from PRD Appendix A, which nested `kb-config` under `governance/`: moved to root so it can double as the discovery marker.)
 - Idempotent: on an existing KB it creates only what's missing; never overwrites without `--force`.
-- Runs `git init` if the target is not already inside a Git repository.
+- **Git-agnostic** (whole CLI): `kb init` and every other command only read and write files; they never run `git` or inspect Git state. The KB lives in Git (NFR-1/NFR-7), but initializing and managing the repository is the user's or a skill's job.
 - Prints a summary of what was created. The steward interview (INIT-2) is the `kb-init` skill's job; this command only scaffolds.
 
 ### `kb index` (CLI-9)

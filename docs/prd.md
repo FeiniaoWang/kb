@@ -235,7 +235,7 @@ Independently versioned Python package (pip-installable); skills declare a minim
 
 *Trigger: user asks to create or adopt a knowledge base.*
 
-- **INIT-1.** Runs `kb init` to scaffold `raw/` (with `sources/`, `chats/`, `feedback/`), `synthetic/`, `governance/`, root `index.md`, `log.md`, and root `kb-config.json` (the config file that also marks the KB root), in a new or existing Git repository; verifies/installs the compatible CLI version.
+- **INIT-1.** Runs `kb init` to scaffold `raw/` (with `sources/`, `chats/`, `feedback/`), `synthetic/`, `governance/`, root `index.md`, `log.md`, and root `kb-config.json` (the config file that also marks the KB root); verifies/installs the compatible CLI version. The `kb` CLI itself performs no Git operations; the skill (or the user) initializes the Git repository the KB lives in.
 - **INIT-2.** Interviews the KB steward to draft `kb-config.json` (at the KB root): type vocabulary (optional at start — types can be added as the project discovers them), tag vocabulary, optional per-type readiness checklists and templates, conventions, propagation-safety rules (CS3), id prefixes.
 - **INIT-3.** For adoption of an existing document collection: runs `kb validate`, reports gaps, and assists the human in bringing existing documents into conformance (assigning ids, adding frontmatter) — under human direction, per G2. The adoption session itself is archived as a session record, which becomes the adopted documents' chat parent so DG5 holds from day one.
 

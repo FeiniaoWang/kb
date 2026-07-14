@@ -4,6 +4,8 @@
 **Implementation context rule:** to implement or validate any `kb` command, an agent reads exactly two files — this one and the command's own spec (`kb-<command>.md`).
 **Sources:** [PRD §7.1](../../prd.md), [master design 2026-07-13](../../superpowers/specs/2026-07-13-kb-cli-design.md). Where this document is more specific, this document wins.
 
+**Git-agnostic (applies to every command).** No `kb` command runs `git` or inspects Git state; the CLI only reads and writes files. The KB is stored in Git (NFR-1/NFR-7), but initializing, staging, committing, and branching the repository are the user's or a skill's responsibility. (`.gitkeep` placeholder files written by `kb init` are inert files, not a Git operation.)
+
 ## 1. Root discovery
 
 Every command except `kb init` locates the KB root before doing anything:
