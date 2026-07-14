@@ -4,13 +4,15 @@
 |---|---|
 | **Status** | Draft v0.3 (supersedes v0.2) |
 | **Owner** | Pengfei (Director of AI Engineering) |
-| **Last updated** | 2026-07-10 |
+| **Last updated** | 2026-07-14 |
 | **Product name** | KB Skill Suite (working name; skills prefixed `kb-`, CLI named `kb`) |
 | **Delivery form** | A set of [Agent Skills](https://platform.claude.com/docs/en/agents-and-tools/agent-skills/overview) + an independently versioned `kb` CLI toolset |
 
 **Changes from v0.1:** Human-driven authoring replaces autonomous generation; document creation is always initiated and steered by a human, agents maintain. Fixed refinement layers (L1–L4) replaced by an emergent derivation graph. Coding-spec focus generalized to a multi-role shared knowledge base (PM, UX, engineering, infra, QA). `kb-review` and `kb-pack` removed from v1. Deterministic operations moved into a shared `kb` CLI. New: optional per-document maintenance `instructions` frontmatter; clarification-first conflict handling; supersession-with-propagation on ingest.
 
 **Changes from v0.2:** Session records (`raw/chats/`) — the archived history of human-led sessions — replace `raw/decisions/` as the captured form of human decisions, and every synthetic document must carry at least one session record among its parents (DG5). Consumer feedback (e.g., a coding agent's errors executing a spec) added as a raw document subclass (`raw/feedback/`). DG3 coverage discipline scoped to explicit decomposition only; extraction/reference documents make no claims about children. Optional `tags` frontmatter with a governance-declared vocabulary. `description` extended to two sentences and copied into `index.md` for progressive disclosure.
+
+**Consistency updates (2026-07-14), from the CLI design pass ([docs/superpowers/specs/2026-07-13-kb-cli-design.md](superpowers/specs/2026-07-13-kb-cli-design.md), [docs/specs/commands/](specs/commands/)):** Project config is `kb-config.json` — strict JSON at the **KB root**, which also serves as the root-discovery marker (no separate `.kb` file); it moved out of `governance/`. Document ids zero-pad to **6 digits** (`KB-000042`). Added **`kb show`** (CLI-3a) as the sole sanctioned document-read path for skills, and `kb frontmatter --field` for single-field retrieval. Id↔path resolution is by per-invocation scan, with no stored index.
 
 ---
 
@@ -85,7 +87,8 @@ No existing solution provides a role-neutral, agent-operable, human-governed kno
                      │        ▲                specs, test plans,         │    agents &
                      │        │ derived_from   runbooks, packages …)      │    humans
                      │        └────────────────────┘                      │
-                     │  governance/  (config, types, conventions)         │
+                     │  governance/  (types, conventions, readiness)      │
+                     │  kb-config.json (config + root marker)             │
                      │  index.md, log.md                                  │
                      └────────────────────────────────────────────────────┘
                                     ▲                      ▲
@@ -132,7 +135,7 @@ There is **no predefined layer taxonomy**. Structure emerges from `derived_from`
 
 ### 6.3 Document Types and Readiness
 
-`governance/kb-config.md` defines the project's **type vocabulary** — an open, project-owned list (illustrative: `domain-note`, `outcome`, `ux-flow`, `capability`, `coding-spec`, `test-plan`, `adr`, `runbook`, `context-package`). For any type, governance MAY define a **readiness checklist**: the conditions under which a document of that type is complete enough for its consumers. During co-authoring, the agent checks the draft against the applicable checklist and reports gaps to the human; unresolved gaps are grounds for the human to leave the document in `draft`.
+`kb-config.json` (at the KB root; also the root marker) defines the project's **type vocabulary** — an open, project-owned list (illustrative: `domain-note`, `outcome`, `ux-flow`, `capability`, `coding-spec`, `test-plan`, `adr`, `runbook`, `context-package`). For any type, governance MAY define a **readiness checklist**: the conditions under which a document of that type is complete enough for its consumers. During co-authoring, the agent checks the draft against the applicable checklist and reports gaps to the human; unresolved gaps are grounds for the human to leave the document in `draft`.
 
 Readiness checklists generalize v0.1's coding-only "Completeness Contract": a `coding-spec` checklist (objective, verifiable acceptance criteria, interfaces, constraints, dependencies, scope boundary, self-containment, zero open questions) ships as an *example profile* in Appendix B; a `test-plan` or `ux-flow` type would define different criteria. The suite mandates the mechanism, not any particular checklist.
 
@@ -140,20 +143,20 @@ Readiness checklists generalize v0.1's coding-only "Completeness Contract": a `c
 
 ```yaml
 ---
-id: KB-0042                      # stable identity; never changes (§6.5)
+id: KB-000042                    # stable identity; never changes (§6.5)
 type: coding-spec                # from the project vocabulary
 title: Rate-limit alert webhook
 description: Webhook contract and behavior for rate-limit alerts. Covers retry and auth semantics.  # ≤2 sentences; copied into index.md
 tags: [alerting, api, compliance]  # optional; values from the governance tag vocabulary
 status: current                  # draft | current | superseded | retired
 derived_from:                    # parents: any class, any depth, one or more
-  - KB-0007                      # an outcome document
-  - KB-0019                      # a ux-flow document
-  - RAW-0113                     # a raw compliance source
-  - CHAT-0027                    # the authoring session record (DG5)
-supersedes: KB-0031              # present only when replacing a prior document
+  - KB-000007                    # an outcome document
+  - KB-000019                    # a ux-flow document
+  - RAW-000113                   # a raw compliance source
+  - CHAT-000027                  # the authoring session record (DG5)
+supersedes: KB-000031            # present only when replacing a prior document
 instructions: |                  # OPTIONAL maintenance directives (§6.6)
-  Keep the interface table consistent with KB-0012.
+  Keep the interface table consistent with KB-000012.
   Do not change retry semantics without asking the author.
 timestamp: 2026-07-10T14:30:00Z        # last modification (any actor)
 last_human_touch: 2026-07-10T14:30:00Z # last human-confirmed revision (§6.8)
@@ -162,7 +165,7 @@ last_human_touch: 2026-07-10T14:30:00Z # last human-confirmed revision (§6.8)
 
 - **FM1.** `id`, `type`, `title`, `description`, `status`, `derived_from`, `timestamp`, `last_human_touch` are mandatory for synthetic documents. Raw documents carry a reduced schema (`id`, `type: raw-source | chat | feedback`, `ingested_at`, `origin`, plus `about` for feedback records).
 - **FM1a.** `description` is at most two sentences and is copied verbatim into the owning directory's `index.md` by `kb index`, so survey-level reading can proceed on indexes alone.
-- **FM1b.** `tags` is an optional list; when present, every value must appear in the tag vocabulary declared in `governance/kb-config.md` (`kb validate` flags undeclared tags for the steward to add to the vocabulary or correct).
+- **FM1b.** `tags` is an optional list; when present, every value must appear in the tag vocabulary declared in `kb-config.json` (`kb validate` flags undeclared tags for the steward to add to the vocabulary or correct).
 - **FM2.** Unknown additional keys are permitted and preserved (forward compatibility; OKF extension-key behavior).
 - **FM3.** Mechanical validity of all of the above is checkable by `kb validate` without an LLM.
 
@@ -173,11 +176,11 @@ OKF defines a concept's ID as its bundle-relative file path. This PRD **keeps a 
 Why a path alone is insufficient here:
 
 1. **Reorganization is expected.** A multi-role KB will be restructured as the project grows (directories split by role, by epic, by quarter). Path-IDs turn every reorganization into a link-breaking event across the whole graph; stable `id`s make moves free (the CLI re-resolves).
-2. **Supersession needs identity across files.** `supersedes: KB-0031` must keep meaning after the old file is archived or the new one is renamed. A path-based chain rots.
-3. **External references must not rot.** Commit messages, code comments, tickets, and audit findings will cite documents. `KB-0042` survives ten years of refactoring; `synthetic/specs/webhook.md` will not.
+2. **Supersession needs identity across files.** `supersedes: KB-000031` must keep meaning after the old file is archived or the new one is renamed. A path-based chain rots.
+3. **External references must not rot.** Commit messages, code comments, tickets, and audit findings will cite documents. `KB-000042` survives ten years of refactoring; `synthetic/specs/webhook.md` will not.
 4. **Merge safety.** Concurrent branches renaming or moving files merge cleanly when links are id-based.
 
-Reconciliation with OKF: `derived_from`/`supersedes` use `id`s (the machine layer); links *within document bodies* remain OKF-style relative paths (the human layer); `id` rides as an OKF extension key, so bundles stay OKF-conformant. The CLI maintains the id↔path index and `kb mv` updates body links on moves. Net cost of keeping `id`: one frontmatter line and one CLI index — cheap insurance for properties 1–4.
+Reconciliation with OKF: `derived_from`/`supersedes` use `id`s (the machine layer); links *within document bodies* remain OKF-style relative paths (the human layer); `id` rides as an OKF extension key, so bundles stay OKF-conformant. The CLI resolves id↔path by scanning frontmatter on each invocation (no stored index — see the CLI design), and `kb mv` updates body links on moves. Net cost of keeping `id`: one frontmatter line and a per-invocation scan — cheap insurance for properties 1–4.
 
 ### 6.6 Per-Document Maintenance `instructions` — decision and rationale
 
@@ -220,7 +223,7 @@ Independently versioned Python package (pip-installable); skills declare a minim
 
 | Command group | Requirements |
 |---|---|
-| **Query** | **CLI-1.** `kb filter` — select documents by any frontmatter field (`--type`, `--status`, `--tag`, `--derived-from`, arbitrary `--where key=value`), returning paths or frontmatter without bodies. **CLI-2.** `kb search` — full-text search across bodies with per-hit context snippets. **CLI-3.** `kb frontmatter <paths…>` — bulk frontmatter extraction. |
+| **Query** | **CLI-1.** `kb filter` — select documents by any frontmatter field (`--type`, `--status`, `--tag`, `--derived-from`, arbitrary `--where key=value`), returning paths or frontmatter without bodies. **CLI-2.** `kb search` — full-text search across bodies with per-hit context snippets. **CLI-3.** `kb frontmatter <refs…>` — bulk frontmatter extraction (`--field` retrieves specific fields). **CLI-3a.** `kb show <refs…>` — read document content (body by default; the sole sanctioned read path for skills, so the CLI's access-control layer stays authoritative). |
 | **Graph** | **CLI-4.** `kb links <id|path>` — parents; `--reverse` — children; `--transitive` — full ancestry/impact set; `--depth` — derived depth-from-evidence. **CLI-5.** `kb resolve <id>` / reverse — id↔path resolution from the maintained index. |
 | **Integrity** | **CLI-6.** `kb validate` — frontmatter schema (FM1–FM3, including tag-vocabulary conformance), status-transition legality, acyclicity (DG2), session-record parentage (DG5), link/id integrity, uniqueness of ids; exit codes suitable for CI. **CLI-7.** `kb mv` — move/rename preserving id, updating body links. |
 | **Ingest adapters** | **CLI-8.** `kb ingest --from file|stdin|clipboard --class source|chat|feedback [--about <id>] <target>` — normalize incoming material into the matching `raw/` subclass with correct frontmatter and assigned ids (`--about` links a feedback record to the document it concerns). Adapter architecture is extensible (Slack, mail, ticketing later) without skill changes. Adapters normalize and file; they never synthesize. |
@@ -232,8 +235,8 @@ Independently versioned Python package (pip-installable); skills declare a minim
 
 *Trigger: user asks to create or adopt a knowledge base.*
 
-- **INIT-1.** Runs `kb init` to scaffold `raw/` (with `sources/`, `chats/`, `feedback/`), `synthetic/`, `governance/`, root `index.md` and `log.md`, in a new or existing Git repository; verifies/installs the compatible CLI version.
-- **INIT-2.** Interviews the KB steward to draft `governance/kb-config.md`: type vocabulary (optional at start — types can be added as the project discovers them), tag vocabulary, optional per-type readiness checklists and templates, conventions, propagation-safety rules (CS3), id prefixes.
+- **INIT-1.** Runs `kb init` to scaffold `raw/` (with `sources/`, `chats/`, `feedback/`), `synthetic/`, `governance/`, root `index.md`, `log.md`, and root `kb-config.json` (the config file that also marks the KB root), in a new or existing Git repository; verifies/installs the compatible CLI version.
+- **INIT-2.** Interviews the KB steward to draft `kb-config.json` (at the KB root): type vocabulary (optional at start — types can be added as the project discovers them), tag vocabulary, optional per-type readiness checklists and templates, conventions, propagation-safety rules (CS3), id prefixes.
 - **INIT-3.** For adoption of an existing document collection: runs `kb validate`, reports gaps, and assists the human in bringing existing documents into conformance (assigning ids, adding frontmatter) — under human direction, per G2. The adoption session itself is archived as a session record, which becomes the adopted documents' chat parent so DG5 holds from day one.
 
 ### 7.3 Skill: `kb-ingest` — Evidence intake with clarification-first reconciliation
@@ -340,10 +343,10 @@ Humans spent their time exactly where the product intends: supplying evidence, a
 
 ```
 kb/
+├── kb-config.json                # config + KB root marker: type vocabulary, readiness checklists, propagation rules, id prefixes, schema version
 ├── index.md                      # root navigation (CLI-generated)
 ├── log.md                        # KB-wide history (CLI-appended)
 ├── governance/
-│   ├── kb-config.md              # type vocabulary, readiness checklists, propagation rules
 │   ├── templates/                # optional per-type document templates
 │   ├── conventions.md            # standing project conventions
 │   └── health.md                 # latest lint report
