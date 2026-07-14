@@ -38,9 +38,25 @@ schema: 1
 - Error codes are SCREAMING_SNAKE with `E_` prefix, unique across the CLI, defined in each command's spec.
 - Human-readable errors and warnings go to stderr; payload output goes to stdout.
 
-## 4. Pipelines
+## 4. Document references (`REF`) and pipelines
 
-- Commands accepting `REF...` (`show`, `filter`, `frontmatter`, `resolve`, `validate`) read newline-separated ids/paths from stdin when stdin is piped and no refs were passed as arguments.
+### 4.1 What `REF` means
+
+Throughout the specs, `REF` denotes a **document reference**: the way a command names one document, on the command line or via stdin. A `REF` is exactly one of:
+
+1. **An id** — matches the id grammar in §6 (e.g. `KB-000042`). Resolved to a document through the scan's id→path map.
+2. **A path** — a filesystem path to a `*.md` document in the KB, either KB-root-relative (`synthetic/specs/webhook.md`) or absolute. Accepted with or without the `.md` extension.
+
+Resolution rules:
+
+- A token matching the id grammar is treated as an id first; if no document carries that id, it is unresolved (not retried as a path).
+- Any other token is treated as a path.
+- Unresolvable `REF` → reported on stderr with exit 1; in a batch (`REF...`), remaining refs are still processed (batch-friendly, per §2).
+- `REF...` means one or more references as positional arguments; commands that accept `REF...` also read them from stdin (§4.2).
+
+### 4.2 Pipelines
+
+- Commands accepting `REF...` (`show`, `filter`, `frontmatter`, `resolve`, `validate`) read newline-separated refs from stdin when stdin is piped and no refs were passed as arguments.
 - A command that receives a candidate set this way operates within that set instead of the whole KB.
 - `--output paths` is the producing end of a pipeline. Example: `kb search "user feedback" --output paths | kb filter --class raw`.
 
@@ -55,9 +71,9 @@ schema: 1
 
 ## 6. Id grammar and allocation
 
-- Id pattern: `<PREFIX>-<NNNN>` — an uppercase prefix, a hyphen, a zero-padded integer of at least 4 digits (`KB-0042`, `RAW-0113`, `KB-10001` is legal).
+- Id pattern: `<PREFIX>-<NNNNNN>` — an uppercase prefix, a hyphen, a zero-padded integer of at least 6 digits (`KB-000042`, `RAW-000113`; numbers above 999999 keep growing — `KB-1000001` is legal).
 - Default prefixes: `KB` (synthetic), `RAW` (raw sources), `CHAT` (session records), `FEED` (feedback). Projects may override in `governance/kb-config.md`.
-- Allocation: next id for a prefix = max existing number for that prefix + 1, computed over the in-memory `KB` built by the scan (no extra I/O — the scan already parses every document's frontmatter). Monotonic: gaps are never refilled (nothing is deleted, LS4). First id of a prefix is `<PREFIX>-0001`.
+- Allocation: next id for a prefix = max existing number for that prefix + 1, computed over the in-memory `KB` built by the scan (no extra I/O — the scan already parses every document's frontmatter). Monotonic: gaps are never refilled (nothing is deleted, LS4). First id of a prefix is `<PREFIX>-000001`.
 - **Malformed-file guard.** A document whose frontmatter fails to parse has an invisible id. Commands that allocate ids MUST refuse to run while `KB.malformed` is non-empty (exit 2), directing the user to `kb validate` — otherwise an invisible id could be reallocated as a duplicate.
 - Merge collisions (two branches allocating the same id) are detected by `kb validate` as duplicate-id errors; repair is manual.
 
@@ -69,7 +85,7 @@ Pinned so that independently implemented commands land on the same names. **Grow
 |---|---|---|---|
 | `DocClass` | `core/model.py` | enum: `RAW`, `SYNTHETIC`, `GOVERNANCE` | kb-init |
 | `RawClass` | `core/model.py` | enum: `SOURCE`, `CHAT`, `FEEDBACK`; maps to `raw/sources`, `raw/chats`, `raw/feedback` and types `raw-source`, `chat`, `feedback` | kb-init |
-| `DocId` | `core/ids.py` | `prefix: str`, `number: int`; `parse(s)`, `format()` (zero-pad to 4), ordering by (prefix, number); `next_id(kb, prefix) -> DocId` | kb-init (grammar), kb-ingest (allocation) |
+| `DocId` | `core/ids.py` | `prefix: str`, `number: int`; `parse(s)`, `format()` (zero-pad to 6), ordering by (prefix, number); `next_id(kb, prefix) -> DocId` | kb-init (grammar), kb-ingest (allocation) |
 | `Frontmatter` | `core/model.py` | ordered mapping preserving unknown keys; round-trips YAML without reordering | kb-init |
 | `RawFrontmatter` | `core/model.py` | `id`, `type` (raw-source\|chat\|feedback), `ingested_at` (ISO-8601 UTC), `origin: str`, `about: str \| None` (feedback only) | kb-ingest |
 | `SyntheticFrontmatter` | `core/model.py` | `id`, `type`, `title`, `description`, `status` (draft\|current\|superseded\|retired), `derived_from: list`, `timestamp`, `last_human_touch`; optional `tags`, `supersedes`, `instructions`. Shape pinned now; enforcement specced in kb-validate | kb-validate (enforcement) |

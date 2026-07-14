@@ -9,7 +9,7 @@
 | Question | Decision |
 |---|---|
 | Scope of first build | Full CLI including ingest (all of PRD §7.1), not just PRD Phase 1 groups. The whole deterministic layer ships before skill work begins. |
-| Id allocation | Sequential per prefix (`KB-0042` style), assigned max+1 at creation. Merge collisions from parallel branches are caught by `kb validate` in CI; fix-up happens before merge. |
+| Id allocation | Sequential per prefix (`KB-000042` style, 6-digit zero-pad), assigned max+1 at creation. Merge collisions from parallel branches are caught by `kb validate` in CI; fix-up happens before merge. |
 | Id↔path index | No stored index. Every invocation scans the KB and reads frontmatter; ids live in the files. Zero staleness, zero merge conflicts, honors NFR-1. A gitignored cache may be added later only if scanning ever becomes slow. |
 | Output rendering | Compact plain text by default (YAML-ish frontmatter blocks, path lists); `--json` on every command for structured output with stable schemas. |
 | Architecture | Layered: pure core library + thin Typer CLI shell (Approach A below). |
@@ -48,8 +48,8 @@ kb/                       (this repo; package name `kb`, console script `kb`)
 - **The scan.** One pass per invocation builds the `KB` object: every `*.md` under `raw/`, `synthetic/`, `governance/` is parsed for frontmatter. Bodies are lazily loaded only when a command needs them (`search`, `mv`). Frontmatter parse failures do not crash query commands; the document is excluded from results, noted on stderr, and fully reported by `validate`.
 - **Output modes.** `--output paths|frontmatter|full` (default `frontmatter`) on commands that return documents; `--json` on every command. JSON schemas are stable within a major version (NFR-9).
 - **Exit codes.** `0` success / checks pass; `1` findings or verification failures (CI-friendly); `2` usage or environment errors.
-- **Document references.** Every command accepts an id (`KB-0042`) or a path wherever a document is named (spelled `REF` below).
-- **Pipelines.** Commands that accept `REF...` (`show`, `filter`, `frontmatter`, `resolve`, `validate`) also read newline-separated ids/paths from stdin when stdin is piped and no refs are given on the command line. Combined with `--output paths`, commands compose Unix-style: `kb search "user feedback" --output paths | kb filter --class raw`, or `kb links KB-0007 --reverse --transitive --output paths | kb validate`. When a command receives a candidate set this way, it operates within that set instead of the whole KB.
+- **Document references.** Every command accepts an id (`KB-000042`) or a path wherever a document is named (spelled `REF`; defined normatively in 00-shared.md §4).
+- **Pipelines.** Commands that accept `REF...` (`show`, `filter`, `frontmatter`, `resolve`, `validate`) also read newline-separated ids/paths from stdin when stdin is piped and no refs are given on the command line. Combined with `--output paths`, commands compose Unix-style: `kb search "user feedback" --output paths | kb filter --class raw`, or `kb links KB-000007 --reverse --transitive --output paths | kb validate`. When a command receives a candidate set this way, it operates within that set instead of the whole KB.
 - **Dependencies.** `typer`, `PyYAML` only. Frontmatter is parsed with a small wrapper that preserves key order and unknown keys (FM2). Pure-Python search; no ripgrep or other external binaries.
 - **Errors.** Human message on stderr + documented exit code; under `--json`, errors are structured: `{"error": {"code": ..., "message": ...}}`.
 
@@ -92,7 +92,7 @@ kb frontmatter REF... [--field KEY]... [--json]
 ```
 
 - Prints each document's full frontmatter, nothing else. Any number of ids/paths.
-- `--field KEY` (repeatable) retrieves specific frontmatter fields instead of the full block. Single doc + single field → the bare value alone (scripting-friendly: `kb frontmatter KB-0042 --field status` → `current`). Multiple docs and/or fields → TSV lines `<id>\t<key>\t<value>`, list values comma-joined. Missing key → empty value plus a stderr warning. `--json` returns properly typed values (`{"KB-0042": {"status": "current"}}`).
+- `--field KEY` (repeatable) retrieves specific frontmatter fields instead of the full block. Single doc + single field → the bare value alone (scripting-friendly: `kb frontmatter KB-000042 --field status` → `current`). Multiple docs and/or fields → TSV lines `<id>\t<key>\t<value>`, list values comma-joined. Missing key → empty value plus a stderr warning. `--json` returns properly typed values (`{"KB-000042": {"status": "current"}}`).
 - Companion to `filter --output paths`: cheap bulk metadata for skills.
 
 ### `kb show` (new — CLI-only read path)
