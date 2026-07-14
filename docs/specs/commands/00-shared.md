@@ -13,12 +13,11 @@
 Every command except `kb init` locates the KB root before doing anything:
 
 1. `--kb PATH` flag, if given.
-2. Else `KB_ROOT` environment variable, if set.
-3. Else walk up from cwd (inclusive) toward the filesystem root, looking for a directory containing a `kb-config.json` file. The **closest** such ancestor is the root (stop at the first hit); only when none is found does the walk reach the filesystem root and conclude there is no KB.
+2. Else walk up from cwd (inclusive) toward the filesystem root, looking for a directory containing a `kb-config.json` file. The **closest** such ancestor is the root (stop at the first hit); only when none is found does the walk reach the filesystem root and conclude there is no KB.
 
-Failure: message `not inside a knowledge base (no kb-config.json found); run 'kb init' or pass --kb` on stderr, exit 2.
+Failure: message `not inside a knowledge base (no kb-config.json found); run 'kb init' or pass --kb` on stderr, exit 2. This same failure applies when the root was supplied explicitly via `--kb PATH` but that directory contains no `kb-config.json`: an explicit path is still subject to existence-based discovery, so a config-less path falls through to this generic "no KB found" error (exit 2) rather than a path-specific message.
 
-`kb-config.json` at the KB root is both the **root marker** and the project configuration; there is no separate `.kb` file. Discovery is **existence-based**: a directory is a KB root iff it contains a file named `kb-config.json`. Whether that file parses is a separate concern — a malformed config is reported as `E_CONFIG_INVALID` (exit 2) by the command that loads it, never as "no KB found".
+`kb-config.json` at the KB root is both the **root marker** and the project configuration. Discovery is **existence-based**: a directory is a KB root iff it contains a file named `kb-config.json`. Whether that file parses is a separate concern — a malformed config is reported as `E_CONFIG_INVALID` (exit 2) by the command that loads it, never as "no KB found".
 
 The file is a JSON object. Minimum content written by `kb init`:
 
@@ -57,7 +56,7 @@ The file is a JSON object. Minimum content written by `kb init`:
 Throughout the specs, `REF` denotes a **document reference**: the way a command names one document, on the command line or via stdin. A `REF` is exactly one of:
 
 1. **An id** — matches the id grammar in §6 (e.g. `KB-000042`). Resolved to a document through the scan's id→path map.
-2. **A path** — a filesystem path to a `*.md` document in the KB, either KB-root-relative (`synthetic/specs/webhook.md`) or absolute. Accepted with or without the `.md` extension.
+2. **A path** — a KB-root-relative path to a `*.md` document in the KB (`synthetic/specs/webhook.md`). Accepted with or without the `.md` extension. Only KB-root-relative paths are accepted; absolute paths are not a valid `REF`.
 
 Resolution rules:
 

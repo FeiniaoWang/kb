@@ -86,7 +86,7 @@ ROOT/
     └── index.md
 ```
 
-Twelve files: `kb-config.json`, `log.md`, the two governance documents, and **eight `index.md` files — one per directory** (root, `governance/`, `governance/templates/`, `raw/`, `raw/sources/`, `raw/chats/`, `raw/feedback/`, `synthetic/`). There are no `.gitkeep` files — every directory is kept non-empty by its `index.md`. `kb-config.json` at the root is both the discovery marker and the config — there is no separate `.kb` file (00-shared §1). `governance/health.md` is deliberately absent — it is `kb-lint` output, created when lint first runs.
+Twelve files: `kb-config.json`, `log.md`, the two governance documents, and **eight `index.md` files — one per directory** (root, `governance/`, `governance/templates/`, `raw/`, `raw/sources/`, `raw/chats/`, `raw/feedback/`, `synthetic/`). There are no `.gitkeep` files — every directory is kept non-empty by its `index.md`. `kb-config.json` at the root is both the discovery marker and the config. `governance/health.md` is deliberately absent — it is `kb-lint` output, created when lint first runs.
 
 ### 5.1 `kb-config.json` (root — marker + configuration)
 
