@@ -20,7 +20,7 @@ kb/                       (this repo; package name `kb`, console script `kb`)
 ├── pyproject.toml        entry point: kb = "kb.cli.app:app"
 ├── src/kb/
 │   ├── core/
-│   │   ├── model.py      Document, Frontmatter, KB dataclasses; id patterns
+│   │   ├── model.py      Document, Frontmatter, KB, Config Pydantic models; id patterns
 │   │   ├── scan.py       repo discovery + frontmatter scan → KB object
 │   │   ├── query.py      filter / search / frontmatter extraction
 │   │   ├── graph.py      links, transitive closure, depth, cycle detection
