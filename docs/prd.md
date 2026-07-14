@@ -182,6 +182,8 @@ Why a path alone is insufficient here:
 
 Reconciliation with OKF: `derived_from`/`supersedes` use `id`s (the machine layer); links *within document bodies* remain OKF-style relative paths (the human layer); `id` rides as an OKF extension key, so bundles stay OKF-conformant. The CLI resolves id↔path by scanning frontmatter on each invocation (no stored index — see the CLI design), and `kb mv` updates body links on moves. Net cost of keeping `id`: one frontmatter line and a per-invocation scan — cheap insurance for properties 1–4.
 
+System governance documents are an exception to the numeric id scheme: `governance/conventions.md` and `governance/kb-config.md` carry **reserved fixed slug ids** (`GOVERNANCE-CONVENTIONS`, `GOVERNANCE-KB-CONFIG`) assigned by `kb init`, so agents can address these system files by a stable, well-known id.
+
 ### 6.6 Per-Document Maintenance `instructions` — decision and rationale
 
 **Adopted, as an optional frontmatter field.** A document may carry natural-language directives telling maintenance agents how to keep it: what to update on what triggers, what to preserve, what requires asking a specific human, style and length constraints. This makes each document a self-describing maintenance contract — the instruction lives exactly where it applies, travels with the document, and is versioned with it. It is, in effect, a per-document micro-skill.
@@ -348,7 +350,8 @@ kb/
 ├── log.md                        # KB-wide history (CLI-appended)
 ├── governance/
 │   ├── templates/                # optional per-type document templates
-│   ├── conventions.md            # standing project conventions
+│   ├── conventions.md            # standing project conventions (id GOVERNANCE-CONVENTIONS)
+│   ├── kb-config.md              # human-readable field reference for kb-config.json (id GOVERNANCE-KB-CONFIG)
 │   └── health.md                 # latest lint report
 ├── raw/
 │   ├── index.md

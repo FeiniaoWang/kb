@@ -12,7 +12,7 @@ Every command except `kb init` locates the KB root before doing anything:
 
 1. `--kb PATH` flag, if given.
 2. Else `KB_ROOT` environment variable, if set.
-3. Else walk up from cwd (inclusive) to the filesystem root, looking for a directory containing a `kb-config.json` file. First hit wins.
+3. Else walk up from cwd (inclusive) toward the filesystem root, looking for a directory containing a `kb-config.json` file. The **closest** such ancestor is the root (stop at the first hit); only when none is found does the walk reach the filesystem root and conclude there is no KB.
 
 Failure: message `not inside a knowledge base (no kb-config.json found); run 'kb init' or pass --kb` on stderr, exit 2.
 
@@ -30,7 +30,7 @@ The file is a JSON object. Minimum content written by `kb init`:
 }
 ```
 
-`schema` is the KB layout schema version — a **reserved, tooling-owned** key, not hand-edited by stewards. Commands MUST refuse (exit 2, `E_SCHEMA_UNSUPPORTED`) a schema newer than they know. Keys beginning with `_` (e.g. `_comment`) are ignored by `load_config` and exist only to carry human guidance (JSON has no comments).
+`schema` is the KB layout schema version — a **reserved, tooling-owned** key, not hand-edited by stewards. Commands MUST refuse (exit 2, `E_SCHEMA_UNSUPPORTED`) a schema newer than they know. The file carries no comment/annotation keys; unknown keys are ignored by `load_config`. Field-by-field documentation for `kb-config.json` lives in the governance document `governance/kb-config.md` (id `GOVERNANCE-KB-CONFIG`), not inside the data file.
 
 ## 2. Exit codes
 
@@ -83,6 +83,7 @@ Resolution rules:
 
 - Id pattern: `<PREFIX>-<NNNNNN>` — an uppercase prefix, a hyphen, a zero-padded integer of at least 6 digits (`KB-000042`, `RAW-000113`; numbers above 999999 keep growing — `KB-1000001` is legal).
 - Default prefixes: `KB` (synthetic), `RAW` (raw sources), `CHAT` (session records), `FEED` (feedback). Projects may override in `kb-config.json`.
+- **Reserved governance ids.** System governance documents carry fixed, well-known **slug ids** of the form `GOVERNANCE-<SLUG>` (e.g. `GOVERNANCE-CONVENTIONS`, `GOVERNANCE-KB-CONFIG`) instead of the numeric scheme, so agents can address them by a stable known id. These ids are assigned by `kb init` (not allocated), never change, and the `GOVERNANCE` prefix is reserved — `next_id` never allocates in it. They are matched by an alternate id form (`<PREFIX>-<UPPER-SLUG>`) and resolve through the scan like any id; only the numeric `<PREFIX>-<NNNNNN>` form participates in allocation.
 - Allocation: next id for a prefix = max existing number for that prefix + 1, computed over the in-memory `KB` built by the scan (no extra I/O — the scan already parses every document's frontmatter). Monotonic: gaps are never refilled (nothing is deleted, LS4). First id of a prefix is `<PREFIX>-000001`.
 - **Malformed-file guard.** A document whose frontmatter fails to parse has an invisible id. Commands that allocate ids MUST refuse to run while `KB.malformed` is non-empty (exit 2), directing the user to `kb validate` — otherwise an invisible id could be reallocated as a duplicate.
 - Merge collisions (two branches allocating the same id) are detected by `kb validate` as duplicate-id errors; repair is manual.
@@ -97,13 +98,14 @@ Pinned so that independently implemented commands land on the same names. **Grow
 |---|---|---|---|
 | `DocClass` | `core/model.py` | enum: `RAW`, `SYNTHETIC`, `GOVERNANCE` | kb-init |
 | `RawClass` | `core/model.py` | enum: `SOURCE`, `CHAT`, `FEEDBACK`; maps to `raw/sources`, `raw/chats`, `raw/feedback` and types `raw-source`, `chat`, `feedback` | kb-init |
-| `DocId` | `core/ids.py` | `prefix: str`, `number: int`; `parse(s)`, `format()` (zero-pad to 6), ordering by (prefix, number); `next_id(kb, prefix) -> DocId` | kb-init (grammar), kb-ingest (allocation) |
+| `DocId` | `core/ids.py` | `prefix: str`, `number: int`; models the **numeric** id form only; `parse(s)`, `format()` (zero-pad to 6), ordering by (prefix, number); `next_id(kb, prefix) -> DocId`. Reserved slug ids (`GOVERNANCE-CONVENTIONS`, …) are literal id strings, not `DocId`s | kb-init (grammar), kb-ingest (allocation) |
 | `Frontmatter` | `core/model.py` | ordered mapping preserving unknown keys; round-trips YAML without reordering | kb-init |
 | `RawFrontmatter` | `core/model.py` | `id`, `type` (raw-source\|chat\|feedback), `ingested_at` (ISO-8601 UTC), `origin: str`, `about: str \| None` (feedback only) | kb-ingest |
 | `SyntheticFrontmatter` | `core/model.py` | `id`, `type`, `title`, `description`, `status` (draft\|current\|superseded\|retired), `derived_from: list`, `timestamp`, `last_human_touch`; optional `tags`, `supersedes`, `instructions`. Shape pinned now; enforcement specced in kb-validate | kb-validate (enforcement) |
-| `Document` | `core/model.py` | `id: DocId \| None`, `path` (KB-root-relative), `doc_class: DocClass`, `frontmatter: Frontmatter`, `body` (lazy property) | kb-ingest |
+| `GovernanceFrontmatter` | `core/model.py` | `id` (reserved slug, e.g. `GOVERNANCE-CONVENTIONS`), `type`, `title`, `description`; the two system files scaffolded by `kb init`. Full schema/enforcement specced in kb-validate | kb-init |
+| `Document` | `core/model.py` | `id: str \| None` (the literal frontmatter id; numeric ids parse via `DocId`), `path` (KB-root-relative), `doc_class: DocClass`, `frontmatter: Frontmatter`, `body` (lazy property) | kb-ingest |
 | `KB` | `core/scan.py` | `root: Path`, `documents: list[Document]`, `by_id: dict[str, Document]`, `malformed: list[(path, error)]`; built by `scan(root)` | kb-ingest |
-| `Config` | `core/model.py` | `schema: int`, `types: list[str]`, `tags: list[str]`, `id_prefixes: dict[str, str]`, `propagation_auto_safe: list[str]`; parsed by `load_config(root)` as a JSON object from `kb-config.json` at the KB root (stdlib `json`); `_`-prefixed keys ignored; every field has the documented default when the key is absent; unparseable file → `E_CONFIG_INVALID` | kb-init |
+| `Config` | `core/model.py` | `schema: int`, `types: list[str]`, `tags: list[str]`, `id_prefixes: dict[str, str]`, `propagation_auto_safe: list[str]`; parsed by `load_config(root)` as a JSON object from `kb-config.json` at the KB root (stdlib `json`); unknown keys ignored; every field has the documented default when the key is absent; unparseable file → `E_CONFIG_INVALID` | kb-init |
 | `LogEntry` | `core/housekeeping.py` | `at` (ISO-8601 UTC), `action`, `actor`, `doc_ids: list[str]`, `note`; line format §8 | kb-init |
 
 ## 8. `log.md` line format
