@@ -40,7 +40,7 @@ schema: 1
 
 ## 4. Pipelines
 
-- Commands accepting `REF...` (`filter`, `frontmatter`, `resolve`, `validate`) read newline-separated ids/paths from stdin when stdin is piped and no refs were passed as arguments.
+- Commands accepting `REF...` (`show`, `filter`, `frontmatter`, `resolve`, `validate`) read newline-separated ids/paths from stdin when stdin is piped and no refs were passed as arguments.
 - A command that receives a candidate set this way operates within that set instead of the whole KB.
 - `--output paths` is the producing end of a pipeline. Example: `kb search "user feedback" --output paths | kb filter --class raw`.
 
@@ -51,12 +51,14 @@ schema: 1
 - Frontmatter parsing preserves key order and unknown keys (FM2). Unknown keys are never an error.
 - A file whose frontmatter fails to parse never crashes a query command: it is excluded from results, one warning line per file goes to stderr, and `kb validate` reports it fully.
 - No stored index. Ids live in the files; the id→path map is rebuilt by each scan.
+- **CLI-only access discipline.** The CLI is the sole KB data interface for skills: document content is read through `kb show` (and `search` snippets), never by opening KB files directly. This keeps the NFR-8 access-control hooks in the query layer effective. Skills carry the corresponding mandate (PRD §5.2).
 
 ## 6. Id grammar and allocation
 
 - Id pattern: `<PREFIX>-<NNNN>` — an uppercase prefix, a hyphen, a zero-padded integer of at least 4 digits (`KB-0042`, `RAW-0113`, `KB-10001` is legal).
 - Default prefixes: `KB` (synthetic), `RAW` (raw sources), `CHAT` (session records), `FEED` (feedback). Projects may override in `governance/kb-config.md`.
-- Allocation: next id for a prefix = max existing number for that prefix + 1, computed from the scan. First id of a prefix is `<PREFIX>-0001`.
+- Allocation: next id for a prefix = max existing number for that prefix + 1, computed over the in-memory `KB` built by the scan (no extra I/O — the scan already parses every document's frontmatter). Monotonic: gaps are never refilled (nothing is deleted, LS4). First id of a prefix is `<PREFIX>-0001`.
+- **Malformed-file guard.** A document whose frontmatter fails to parse has an invisible id. Commands that allocate ids MUST refuse to run while `KB.malformed` is non-empty (exit 2), directing the user to `kb validate` — otherwise an invisible id could be reallocated as a duplicate.
 - Merge collisions (two branches allocating the same id) are detected by `kb validate` as duplicate-id errors; repair is manual.
 
 ## 7. Core data models

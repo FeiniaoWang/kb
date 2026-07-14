@@ -49,7 +49,7 @@ kb/                       (this repo; package name `kb`, console script `kb`)
 - **Output modes.** `--output paths|frontmatter|full` (default `frontmatter`) on commands that return documents; `--json` on every command. JSON schemas are stable within a major version (NFR-9).
 - **Exit codes.** `0` success / checks pass; `1` findings or verification failures (CI-friendly); `2` usage or environment errors.
 - **Document references.** Every command accepts an id (`KB-0042`) or a path wherever a document is named (spelled `REF` below).
-- **Pipelines.** Commands that accept `REF...` (`filter`, `frontmatter`, `resolve`, `validate`) also read newline-separated ids/paths from stdin when stdin is piped and no refs are given on the command line. Combined with `--output paths`, commands compose Unix-style: `kb search "user feedback" --output paths | kb filter --class raw`, or `kb links KB-0007 --reverse --transitive --output paths | kb validate`. When a command receives a candidate set this way, it operates within that set instead of the whole KB.
+- **Pipelines.** Commands that accept `REF...` (`show`, `filter`, `frontmatter`, `resolve`, `validate`) also read newline-separated ids/paths from stdin when stdin is piped and no refs are given on the command line. Combined with `--output paths`, commands compose Unix-style: `kb search "user feedback" --output paths | kb filter --class raw`, or `kb links KB-0007 --reverse --transitive --output paths | kb validate`. When a command receives a candidate set this way, it operates within that set instead of the whole KB.
 - **Dependencies.** `typer`, `PyYAML` only. Frontmatter is parsed with a small wrapper that preserves key order and unknown keys (FM2). Pure-Python search; no ripgrep or other external binaries.
 - **Errors.** Human message on stderr + documented exit code; under `--json`, errors are structured: `{"error": {"code": ..., "message": ...}}`.
 
@@ -93,6 +93,16 @@ kb frontmatter REF... [--json]
 
 - Prints each document's full frontmatter, nothing else. Any number of ids/paths.
 - Companion to `filter --output paths`: cheap bulk metadata for skills.
+
+### `kb show` (new — CLI-only read path)
+
+```
+kb show REF... [--output full|body|frontmatter] [--json]
+```
+
+- Prints documents by id or path: `full` (default, frontmatter + body) or `body`; `frontmatter` aliases `kb frontmatter` for symmetry.
+- The **only** sanctioned way for skills to read document content — agents never open KB files directly. Routing all reads through the CLI keeps the NFR-8 access-control hooks effective and completes the CLI-served progressive-disclosure ladder: `index` → `filter`/`frontmatter` → `search` snippets → `show`.
+- Accepts refs from stdin (pipelines): `kb filter --type coding-spec --output paths | kb show`.
 
 ## Command group: Graph
 
