@@ -56,7 +56,7 @@ Examples:
    - absent → **create** with the pinned content;
    - present, `--force` given → **overwrite** with the pinned content (scaffold files only — nothing under `raw/sources/`, `raw/chats/`, `raw/feedback/`, or `synthetic/` other than the listed `index.md` files is ever written);
    - present, no `--force` → **skip**, no write.
-3. **Log.** Append an `initialized` entry to `log.md` (format: 00-shared §8, note `KB scaffolded by kb init`) — but only if `log.md` does not already contain an `initialized` entry. Re-runs never add duplicate entries.
+3. **Log.** Append an `initialized` entry to `log.md` (format: 00-shared §8, actor `kb-cli`, note `KB scaffolded by kb init`) — but only if `log.md` does not already contain an `initialized` entry. Re-runs never add duplicate entries.
 4. Report per §6. Exit 0 for every outcome that reaches this step.
 
 `kb init` does **not** check whether `ROOT` is already inside another KB; running it inside an existing KB simply creates a nested root, and the closest ancestor `kb-config.json` wins during discovery (00-shared §1). No Git operation occurs at any step.
