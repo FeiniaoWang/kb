@@ -88,19 +88,21 @@ kb search QUERY [--type T]... [--status S]... [--tag G]... [--class C] [--where 
 ### `kb frontmatter` (CLI-3)
 
 ```
-kb frontmatter REF... [--json]
+kb frontmatter REF... [--field KEY]... [--json]
 ```
 
 - Prints each document's full frontmatter, nothing else. Any number of ids/paths.
+- `--field KEY` (repeatable) retrieves specific frontmatter fields instead of the full block. Single doc + single field → the bare value alone (scripting-friendly: `kb frontmatter KB-0042 --field status` → `current`). Multiple docs and/or fields → TSV lines `<id>\t<key>\t<value>`, list values comma-joined. Missing key → empty value plus a stderr warning. `--json` returns properly typed values (`{"KB-0042": {"status": "current"}}`).
 - Companion to `filter --output paths`: cheap bulk metadata for skills.
 
 ### `kb show` (new — CLI-only read path)
 
 ```
-kb show REF... [--output full|body|frontmatter] [--json]
+kb show REF... [--output body|full|frontmatter] [--json]
 ```
 
-- Prints documents by id or path: `full` (default, frontmatter + body) or `body`; `frontmatter` aliases `kb frontmatter` for symmetry.
+- Prints documents by id or path. Default `body`: first line `# <title>` (frontmatter `title`; falls back to `# <id>` for raw documents, whose reduced schema has no title), a blank line, the body verbatim, then a terminator line containing exactly `---`. The terminator follows **every** document — single-doc and pipeline output parse identically, and truncated streams stay detectable.
+- `full` prepends the frontmatter block; `frontmatter` aliases `kb frontmatter` for symmetry.
 - The **only** sanctioned way for skills to read document content — agents never open KB files directly. Routing all reads through the CLI keeps the NFR-8 access-control hooks effective and completes the CLI-served progressive-disclosure ladder: `index` → `filter`/`frontmatter` → `search` snippets → `show`.
 - Accepts refs from stdin (pipelines): `kb filter --type coding-spec --output paths | kb show`.
 
