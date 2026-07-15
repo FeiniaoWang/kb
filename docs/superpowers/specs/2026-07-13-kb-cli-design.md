@@ -172,19 +172,22 @@ kb mv SRC DEST [--json]
 ### `kb ingest` (CLI-8)
 
 ```
-kb ingest --from file|stdin|clipboard --class source|chat|feedback
-          [--about REF] [--title T] [--origin O] [PATH_OR_INPUT]
+kb ingest --class source|chat|feedback --from file|stdin|clipboard [SOURCE]
+          [--dest SUBDIR] [--about REF] [--title T] [--origin O] [--actor NAME]
 ```
 
+- `SOURCE` (positional) is the source file path — required iff `--from file`, forbidden otherwise. `--dest` names a subdirectory relative to the class directory (`--dest api` → `raw/sources/api/`).
 - Assigns the next sequential id with the class's prefix (`RAW-` / `CHAT-` / `FEED-` by default; prefixes configurable in root `kb-config.json`).
-- Writes a normalized Markdown file into `raw/sources/`, `raw/chats/`, or `raw/feedback/` with the reduced frontmatter (`id`, `type: raw-source|chat|feedback`, `ingested_at`, `origin`, plus `about` for feedback).
-- Body is copied **verbatim** — adapters normalize and file; they never synthesize (per CLI-8).
-- `--about` is mandatory for `--class feedback` and is validated against existing ids.
-- Non-text input: the original file is copied alongside; a generated `.md` stub with the frontmatter becomes the citable form.
-- Target filename: slugified `--title`, else the source filename.
-- If the target subdirectory does not exist, it is created **together with its `index.md`** (`DocClass INDEX`), per the directory invariant (00-shared).
+- Writes a normalized Markdown file into `raw/sources/`, `raw/chats/`, or `raw/feedback/` with the reduced frontmatter (`id`, `type: raw-source|chat|feedback`, `ingested_at`, `origin`, an always-written `title`, plus `about` for feedback).
+- Body is copied **verbatim** — adapters normalize and file; they never synthesize (per CLI-8). The only normalization: line endings → LF, exactly one trailing newline.
+- **Pre-flight, then write:** every check (malformed-file guard, flag pairing, `--about` resolution, input acquisition, id/filename computation) completes before the first byte is written; a failed ingest leaves the KB untouched.
+- `--about` is mandatory for `--class feedback` (forbidden otherwise), accepts a REF, and must resolve to a document carrying an id; the canonical id is stored.
+- Non-text input (a `--from file` input that does not decode as UTF-8): the original file is copied alongside; a generated `.md` stub with the frontmatter becomes the citable form.
+- Target filename: slugified `--title`, else the source filename stem, else the lowercased id (stdin/clipboard without `--title`). Name collision → `-<lowercased id>` suffix; nothing existing is ever overwritten.
+- Clipboard adapter shells out to platform tools (`pbpaste`; `wl-paste`/`xclip`; `powershell Get-Clipboard`) — no extra dependency.
+- If the target subdirectory does not exist, it is created **together with its `index.md`** (`DocClass INDEX`), per the directory invariant (00-shared). Ingest refreshes the target directory's `index.md` and, when directories were created, the nearest pre-existing ancestor's — global freshness stays `kb index`'s job.
 - Appends an `ingested` entry to `log.md`.
-- Adapters register in a small registry (name → callable returning normalized text + origin metadata) so later adapters (Slack, mail, ticketing) are additive and require no skill changes.
+- Adapters register in a small registry (name → callable returning raw bytes + origin metadata) so later adapters (Slack, mail, ticketing) are additive and require no skill changes.
 
 ## Command group: Housekeeping
 
