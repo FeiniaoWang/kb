@@ -31,9 +31,10 @@ Delivery is split in two layers:
 - `00-shared.md` — shared foundations + core model table (models are added by the first command spec that needs them; the *Introduced by* column tracks this).
 - `kb-init.md` — complete contract spec, user-reviewed through several revision rounds, with comprehensive acceptance criteria **AC1–AC30** and a coverage map.
 - PRD kept consistent with every design decision (it has a dated "Consistency updates" note in its header).
+- `kb-ingest.md` — contract spec **drafted (2026-07-15), awaiting the user review gate** (AC1–AC42). Session decisions: `SOURCE` positional + `--dest` subdir; clipboard via platform tools; collisions auto-suffixed with the new id; index refresh = target dir + nearest pre-existing ancestor; full pre-flight before any write; `--about` resolves to any doc carrying an id (canonical id stored); `RawFrontmatter` gains an always-written `title` (listings drop the description tail when absent). Consistency edits landed in 00-shared (`E_NO_KB`, `title`), kb-init §5.2, master design, PRD.
 - No implementation code exists yet. `pyproject.toml` has `typer`, `pyyaml`, `pydantic` (2.x), pytest via uv; Python ≥ 3.14; `src/` layout planned per AGENTS.md.
 
-**Next (agreed order):** `kb ingest` → `kb validate` → then the rest (show, filter, search, frontmatter, resolve, links, mv, index, log). Rationale: ingest forces most core models into existence (scan, DocId allocation, RawFrontmatter, Document, KB, LogEntry); validate completes them (Finding, full synthetic schema); the query/graph commands then become thin.
+**Next (agreed order):** finish the `kb ingest` review gate → `kb validate` → then the rest (show, filter, search, frontmatter, resolve, links, mv, index, log). Rationale: ingest forces most core models into existence (scan, DocId allocation, RawFrontmatter, Document, KB, LogEntry); validate completes them (Finding, full synthetic schema); the query/graph commands then become thin.
 
 **Parked:** the implementation plan for `kb init` (the writing-plans step) — spec approved, planning not started.
 
@@ -102,7 +103,7 @@ Cross-cutting rules that every new spec must honor (details in 00-shared.md):
 
 ## 7. Known open threads (candidates for future sessions)
 
-- `kb ingest` spec (next): master design bullets exist — adapters registry (file/stdin/clipboard), verbatim-body normalization, `--about` mandatory+validated for feedback, non-text originals copied alongside a generated `.md` stub, filename slugification, directory invariant (create dir → create its index.md), `ingested` log entry, malformed-file guard on id allocation. Open details to settle in-session: adapter interface shape, clipboard mechanism, filename collision handling, index.md refresh scope on ingest, exact RawFrontmatter validation timing.
+- `kb ingest` spec: drafted, in user review (see §3). All previously open details settled in the 2026-07-15 session; remaining work is applying review rounds.
 - `kb show`'s own spec (the `---` terminator is a convention, not a parse boundary — JSON is the strict path; needs stating in its spec with a round-trip AC).
 - `kb validate` spec: finding-code table must consolidate every check accumulated in 00-shared/master design (FM0 universal type, type↔location, DG2/DG5, ids, tags, supersedes, index staleness?).
 - Folder `description` customization gap: index.md is read-only, so a human currently has no way to set a folder description — deliberate; revisit with a small command if needed.
