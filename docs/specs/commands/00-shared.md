@@ -81,7 +81,7 @@ Resolution rules:
     - `type: log` → operational (not a `DocClass`; excluded from the document set)
     - any other `type` → `SYNTHETIC` (the open project vocabulary in `kb-config.json`)
 - **Location must agree with `type`.** A document's directory is expected to match its `type`, and `kb validate` flags any mismatch (it never silently reclassifies): `index` → file named `index.md`; `raw-source|chat|feedback` → under `raw/sources|chats|feedback/`; governance types → under `governance/`; synthetic types → under `synthetic/`. `type` wins; a misplaced file is a validation error to be fixed (e.g. via `kb mv`), not a reclassification.
-- Bodies are loaded lazily — only by commands that need them (`search`, `mv`).
+- Bodies are loaded lazily — only by commands that need them (`search`, `mv`, `show`).
 - Frontmatter parsing preserves key order and unknown keys (FM2). Unknown keys are never an error.
 - A file that is **unclassifiable** — its frontmatter fails to parse, or it parses but has no `type` (so no `DocClass` can be derived) — never crashes a query command: it goes to `KB.malformed`, is excluded from results, emits one stderr warning, and is fully reported by `kb validate` (missing `type` is an FM0 error).
 - No stored index. Ids live in the files; the id→path map is rebuilt by each scan.
