@@ -20,7 +20,7 @@ The command is **Git-agnostic**: it creates files and never runs `git` (no `git 
 | Param | Kind | Type | Default | Meaning |
 |---|---|---|---|---|
 | `--root` | option | directory path | current directory | Folder to become the KB root; resolved to an absolute path, created (with parents) if missing |
-| `--force` | option | flag | off | Re-write scaffold files that already exist with pristine versions |
+| `--force` | option | flag | off | Re-write **CLI-owned** scaffold files (`kb-config.json` and the eight `index.md`) with pristine versions; never touches `log.md`, the governance documents, or any KB document |
 | `--json` | option | flag | off | Structured output (§6) |
 
 ## 3. Help text (wording normative, layout Typer's)
@@ -29,14 +29,14 @@ The command is **Git-agnostic**: it creates files and never runs `git` (no `git 
 
 > Scaffold a new knowledge base, or repair an existing one.
 >
-> Run this from the folder you want to become the KB root; it scaffolds the current directory by default (pass --root to target a different folder). Creates the standard KB layout (raw/, synthetic/, governance/), the root index.md and log.md, and kb-config.json — the file at the KB root that holds project configuration and marks the root for every other command. Safe to re-run: existing files are never touched unless --force is given. Does not touch Git — putting the KB under version control is up to you.
+> Run this from the folder you want to become the KB root; it scaffolds the current directory by default (pass --root to target a different folder). Creates the standard KB layout (raw/, synthetic/, governance/), the root index.md and log.md, and kb-config.json — the file at the KB root that holds project configuration and marks the root for every other command. Safe to re-run: existing files are never touched; --force restores pristine kb-config.json and index.md files, but documents and log.md are never overwritten. Does not touch Git — putting the KB under version control is up to you.
 
 **Option help strings:**
 
 | Param | Help string |
 |---|---|
 | `--root` | Folder to become the KB root. Resolved to an absolute path and created if it does not exist. [default: current directory] |
-| `--force` | Overwrite existing scaffold files with pristine versions. Documents are never touched. |
+| `--force` | Restore pristine kb-config.json and index.md files. Documents and log.md are never touched. |
 | `--json` | Emit results as JSON. |
 
 **Examples section:**
@@ -45,17 +45,17 @@ The command is **Git-agnostic**: it creates files and never runs `git` (no `git 
 Examples:
   kb init                       Scaffold a KB in the current directory (the KB root)
   kb init --root ~/team-kb      Scaffold a KB at the given path
-  kb init --force               Restore pristine scaffold files (documents untouched)
+  kb init --force               Restore pristine kb-config.json and index.md files
   kb init --json                Machine-readable scaffold output
 ```
 
 ## 4. Behavior (normative algorithm)
 
 1. Determine the root: `--root` if given, else the current directory. Resolve it to an absolute path (call it `ROOT`). If it exists and is not a directory → `E_INIT_NOT_DIR`, exit 2. If missing, create it with parents.
-2. For each scaffold entry in §5, classify and act:
+2. The manifest divides into **CLI-owned** entries (`kb-config.json` and the eight `index.md`) and **protected** entries (`log.md`, `governance/conventions.md`, `governance/kb-config.md` — append-only history and human-maintained documents). For each scaffold entry in §5, classify and act:
    - absent → **create** with the pinned content;
-   - present, `--force` given → **overwrite** with the pinned content (scaffold files only — nothing under `raw/sources/`, `raw/chats/`, `raw/feedback/`, or `synthetic/` other than the listed `index.md` files is ever written);
-   - present, no `--force` → **skip**, no write.
+   - present, CLI-owned, `--force` given → **overwrite** with the pinned content;
+   - present otherwise → **skip**, no write. Protected entries are never overwritten, with or without `--force`; nothing outside the manifest is ever written (no file under `raw/sources/`, `raw/chats/`, `raw/feedback/`, or `synthetic/` other than the listed `index.md` files).
 3. **Log.** Append an `initialized` entry to `log.md` (format: 00-shared §8, actor `kb-cli`, note `KB scaffolded by kb init`) — but only if `log.md` does not already contain an `initialized` entry. Re-runs never add duplicate entries.
 4. Report per §6. Exit 0 for every outcome that reaches this step.
 
@@ -256,7 +256,7 @@ the project; `schema` is managed by `kb` — do not edit it.
 
 ## 6. Output
 
-**Text (stdout):** one line per manifest entry, `<created|overwritten|skipped>  <relative path>` (skips annotated `(exists)`), then a summary line:
+**Text (stdout):** one line per manifest entry, `<created|overwritten|skipped>  <relative path>` (skips annotated `(exists)`), then a summary line. Entries are ordered **alphabetically by relative path** — in the text lines and in each JSON array below — so output is deterministic run to run:
 
 ```
 KB ready at /abs/path — 12 created, 0 overwritten, 0 skipped
@@ -281,37 +281,50 @@ KB ready at /abs/path — 12 created, 0 overwritten, 0 skipped
 | E1 | `ROOT` exists and is a file | `E_INIT_NOT_DIR` — `target exists and is not a directory: <path>` | 2 |
 | E2 | Target unwritable / OS error mid-scaffold | `E_INIT_IO` with the OS message; partial files may remain (documented, not rolled back) | 2 |
 | E3 | Healthy KB, re-run, no flags | all entries skipped, zero writes, no new log entry | 0 |
-| E4 | Re-run with `--force` | scaffold files rewritten pristine; documents and non-manifest files untouched | 0 |
-| E5 | Partial scaffold (some files deleted) | missing entries recreated, present ones skipped (repair) | 0 |
+| E4 | Re-run with `--force` | CLI-owned entries (`kb-config.json`, the eight `index.md`) rewritten pristine; protected entries (`log.md`, the two governance documents), KB documents, and non-manifest files untouched | 0 |
+| E5 | Partial scaffold (some files deleted) | missing entries recreated, present ones skipped (repair) — protected entries included (a deleted `log.md` or governance doc is recreated pristine) | 0 |
 | E6 | `ROOT` is inside an existing KB | allowed — a nested KB root is created (no nesting check); closest ancestor `kb-config.json` wins during discovery | 0 |
+| E7 | A manifest path is occupied by the wrong kind — a directory where a file belongs (e.g. a directory named `kb-config.json/`) or a file where a directory belongs (e.g. a file named `raw`) | `E_INIT_IO` with the offending path; no silent replacement, no rollback of entries already written | 2 |
+| E8 | Unknown option / bad flag value | usage error (Typer-rendered message on stderr) | 2 |
 
 ## 8. Acceptance criteria
 
-One pytest test per item (00-shared §10), named `test_ac<NN>_<slug>`.
+One pytest test per item (00-shared §10), named `test_ac<NN>_<slug>`. These criteria are the input to the detailed behavior specifications that drive development; each is written to be independently testable with an unambiguous pass condition.
+
+**Coverage map:** fresh scaffold & pinned content AC1–AC8 (§5) · idempotency & repair AC9–AC12 (§4 step 2, E3/E5) · `--force` semantics AC13–AC17 (§4 step 2, E4) · root resolution AC18–AC21 (§4 step 1, E1/E6) · errors & edge cases AC22–AC24 (E2/E7/E8) · output contract AC25–AC27 (§6, 00-shared §3) · help & cross-command AC28–AC30 (§3, Git-agnosticism, born-valid).
 
 | # | Given / When / Then |
 |---|---|
-| AC1 | Given an empty dir, when `kb init` runs, then every §5 manifest path exists with byte-identical pinned content (timestamp line pattern-matched) and exit is 0. |
-| AC2 | Given AC1's run, then stdout lists each entry as `created` and the summary line matches the §6 form. |
-| AC3 | Given a scaffolded KB, when `kb init` re-runs, then exit 0, all entries `skipped`, and no file's mtime/content changed. |
-| AC4 | Given three consecutive runs, then `log.md` contains exactly one `initialized` entry. |
-| AC5 | Given a KB where `kb-config.json` was edited, when `kb init --force` runs, then the file is restored byte-identical to §5.1. |
-| AC6 | Given a fresh `kb init` KB, then `kb-config.json` parses with stdlib `json`, contains **exactly** the keys `schema`, `types`, `tags`, `id_prefixes`, `propagation_auto_safe` (no `_comment*` keys), with `schema == 1`, `types == []`, `tags == []`, `id_prefixes == {synthetic:KB, source:RAW, chat:CHAT, feedback:FEED}`, and `propagation_auto_safe == []`. |
-| AC7 | Given a fresh `kb init` KB, then `governance/conventions.md` frontmatter has `id == GOVERNANCE-CONVENTIONS` and `governance/kb-config.md` has `id == GOVERNANCE-KB-CONFIG` (parsed from the pinned files). Resolving them by id and confirming `DocClass GOVERNANCE` is covered by the scan spec; marked `xfail` here until the scan exists. |
-| AC7a | Given a fresh `kb init` KB, then exactly eight `index.md` files exist (root, `governance/`, `governance/templates/`, `raw/`, `raw/sources/`, `raw/chats/`, `raw/feedback/`, `synthetic/`), each parses with frontmatter `type: index`, carries a `description`, has **no** `id` key, and its body byte-matches the §5.2 pinned content for that path (generated-header comment plus the two-section body — `## Subdirectories` / `## Files`, with empty sections omitted). |
-| AC7b | Given a fresh `kb init` KB, then no file named `.gitkeep` exists anywhere under the root. |
-| AC7c | Given a fresh `kb init` KB, then **every** scaffolded `*.md` file carries a `type` frontmatter field (OKF-mandatory): the eight `index.md` have `type: index`, `governance/conventions.md` has `type: conventions`, `governance/kb-config.md` has `type: kb-config`, and `log.md` has `type: log`. |
-| AC8 | Given a KB containing a document at `raw/sources/x.md`, when `kb init --force` runs, then that document is byte-identical afterwards. |
-| AC9 | Given a file at path `P`, when `kb init --root P` runs, then exit 2 with `E_INIT_NOT_DIR`. |
-| AC10 | Given a nonexistent nested path `x/y/z`, when `kb init --root x/y/z` runs, then the directories are created and scaffolded, exit 0. |
-| AC11 | Given an empty dir as cwd with no `--root`, when `kb init` runs, then that cwd (resolved absolute) becomes the KB root and is scaffolded, exit 0. |
-| AC12 | Given an existing KB at `/a`, when `kb init --root /a/b` runs, then exit 0 and a nested KB root is scaffolded at `/a/b` (no nesting guard). |
-| AC13 | Given a KB with `log.md` and `raw/index.md` deleted, when `kb init` re-runs, then exactly those are recreated (`created`), the rest `skipped`. |
-| AC14 | Given a plain dir that is not a Git repo, when `kb init` runs, then no `.git/` directory is created, no `git` subprocess is invoked, and the JSON output contains no `git` key (the command is Git-agnostic). |
-| AC15 | Given `--json`, then output parses as JSON and contains exactly the §6 fields with correct types. |
-| AC16 | When `kb init --help` runs, then output contains every normative string from §3 (description sentences, each option help string, each example line) and makes no mention of Git operations. |
-| AC17 | Given a fresh `kb init` KB, when `kb validate` runs, then it exits 0 (scaffold is born valid). Marked `xfail` until `kb validate` is implemented; flips to a hard gate then. |
-| AC18 | Given an unwritable target dir, when `kb init` runs, then exit 2 with `E_INIT_IO` (skipif on platforms without POSIX permissions). |
+| AC1 | Given an empty directory, when `kb init` runs, then exit is 0 and exactly the 12 §5 manifest paths exist — no other file is created anywhere under `ROOT` — each byte-identical to its pinned content (the `log.md` timestamp is pattern-matched, everything else exact). |
+| AC2 | Given AC1's run, then stdout contains one `created  <relative path>` line per manifest entry, ordered alphabetically by relative path, followed by the summary line `KB ready at <abs ROOT> — 12 created, 0 overwritten, 0 skipped`. |
+| AC3 | Given a fresh KB, then `kb-config.json` parses with stdlib `json` and contains **exactly** the keys `schema`, `types`, `tags`, `id_prefixes`, `propagation_auto_safe` — no others — with `schema == 1`, `types == []`, `tags == []`, `id_prefixes == {synthetic: KB, source: RAW, chat: CHAT, feedback: FEED}`, `propagation_auto_safe == []`. |
+| AC4 | Given a fresh KB, then `governance/conventions.md` frontmatter has `id == GOVERNANCE-CONVENTIONS` and `governance/kb-config.md` has `id == GOVERNANCE-KB-CONFIG` (parsed from the pinned files). Resolving them by id and confirming `DocClass GOVERNANCE` belongs to the scan spec; that half is marked `xfail` until the scan exists. |
+| AC5 | Given a fresh KB, then exactly eight `index.md` files exist (root, `governance/`, `governance/templates/`, `raw/`, `raw/sources/`, `raw/chats/`, `raw/feedback/`, `synthetic/`); each parses with frontmatter `type: index` plus the pinned `description`, has **no** `id` key, and its body byte-matches §5.2 for that path — generated-header comment, then `## Subdirectories` / `## Files` sections with empty sections omitted (five leaf indexes have header-comment-only bodies; root, `governance/`, `raw/` match their pinned listings). |
+| AC6 | Given a fresh KB, then **every** scaffolded `*.md` carries a `type` frontmatter field (FM0/OKF): eight × `type: index`, `type: conventions`, `type: kb-config`, `type: log`. |
+| AC7 | Given a fresh KB, then no `.gitkeep` file exists anywhere under `ROOT`. |
+| AC8 | Given a fresh KB, then `log.md` contains exactly one log line; it matches the 00-shared §8 format `- <timestamp> | initialized | kb-cli | - | KB scaffolded by kb init`, and `<timestamp>` parses as ISO-8601 UTC. |
+| AC9 | Given a scaffolded KB, when `kb init` re-runs, then exit 0, stdout lists all 12 entries as `skipped … (exists)` with the summary `— 0 created, 0 overwritten, 12 skipped`, and no file's bytes or mtime changed. |
+| AC10 | Given three consecutive runs in the same directory, then `log.md` contains exactly one `initialized` entry. |
+| AC11 | Given a KB with `log.md` and `raw/index.md` deleted, when `kb init` re-runs, then exactly those two are `created` (pristine — the recreated `log.md` carries a fresh `initialized` entry), the other 10 are `skipped`, and exit is 0. |
+| AC12 | Given a non-empty non-KB directory containing an unrelated file `notes.txt` and an unrelated subdirectory `misc/`, when `kb init` runs, then the 12 manifest entries are created, `notes.txt` and `misc/` are byte-for-byte untouched, and **no** `index.md` is added inside `misc/` (init writes only the manifest; the directory invariant for foreign directories is `kb index`/`kb validate` territory). |
+| AC13 | Given an empty directory, when `kb init --force` runs, then all 12 entries classify as `created` (never `overwritten`), and the result is byte-identical to a plain `kb init`. |
+| AC14 | Given a KB where `kb-config.json` was hand-edited, when `kb init --force` runs, then it is restored byte-identical to §5.1 and reported `overwritten`. |
+| AC15 | Given a KB where `raw/index.md` was hand-edited, when `kb init --force` runs, then it is restored byte-identical to §5.2 and reported `overwritten`. |
+| AC16 | Given a KB where `governance/conventions.md` and `governance/kb-config.md` were edited and two extra lines were appended to `log.md`, when `kb init --force` runs, then all three files are byte-identical afterwards and reported `skipped` — protected entries are never overwritten — and the summary partitions as `0 created, 9 overwritten, 3 skipped`. |
+| AC17 | Given a KB containing a document at `raw/sources/x.md`, when `kb init --force` runs, then that document is byte-identical afterwards (nothing outside the manifest is ever written). |
+| AC18 | Given a nonexistent nested relative path `x/y/z`, when `kb init --root x/y/z` runs, then the directories are created with parents, scaffolded, exit 0, and the reported root (`--json` `root` field) is the resolved **absolute** path. |
+| AC19 | Given an empty directory as cwd and no `--root`, when `kb init` runs, then that cwd (resolved absolute) becomes the KB root and is scaffolded, exit 0. |
+| AC20 | Given an existing **file** at path `P`, when `kb init --root P` runs, then exit 2, error code `E_INIT_NOT_DIR`, and nothing is created. |
+| AC21 | Given an existing KB at `/a`, when `kb init --root /a/b` runs, then exit 0 and a complete nested KB root is scaffolded at `/a/b` (no nesting guard, E6). |
+| AC22 | Given a manifest path occupied by the wrong kind — case (a): a **directory** named `kb-config.json/`; case (b): a **file** named `raw` — when `kb init` runs, then exit 2 with `E_INIT_IO` naming the offending path, and the occupying entry is not replaced. |
+| AC23 | Given an unwritable target directory, when `kb init` runs, then exit 2 with `E_INIT_IO` (skipif on platforms without POSIX permissions). |
+| AC24 | When `kb init --bogus-flag` runs, then exit 2 with a usage error on stderr and no file created (E8). |
+| AC25 | Given `--json` on a fresh directory, then stdout parses as JSON containing exactly the fields `ok` (true), `root` (absolute path string), `created`/`overwritten`/`skipped` (arrays of relative-path strings, each sorted alphabetically), the three arrays partition the 12-entry manifest, and nothing else is on stdout. |
+| AC26 | Given `--json --root P` where `P` is a file, then stdout is exactly the error envelope `{"error": {"code": "E_INIT_NOT_DIR", "message": …}}`, exit 2. |
+| AC27 | Given a text-mode (no `--json`) failing run (AC20's setup), then the error message appears on **stderr** and stdout carries no payload lines. |
+| AC28 | When `kb init --help` runs, then exit 0 and output contains every normative string from §3 — each description sentence, each option help string, each example line — and mentions no Git operations. |
+| AC29 | Given a fresh KB, when `kb init` ran, then no `.git/` directory exists, no `git` subprocess was invoked (asserted via a PATH shim or subprocess spy), and JSON output contains no `git` key (Git-agnostic). |
+| AC30 | Given a fresh KB, when `kb validate` runs, then exit 0 (the scaffold is born valid). Marked `xfail` until `kb validate` is implemented; flips to a hard gate then. |
 
 ## 9. Out of scope
 
