@@ -1,7 +1,11 @@
+import importlib.util
 import json
+import sys
+import warnings
 
 import pytest
 
+import kb.core.model as model_module
 from kb.core.ids import DocId
 from kb.core.model import (
     ConfigLoadError,
@@ -55,6 +59,7 @@ def test_load_config_defaults_missing_fields_and_ignores_unknown_keys(tmp_path) 
         json.dumps({"schema": 1, "future": "ignored"}), encoding="utf-8"
     )
     config = load_config(tmp_path)
+    assert config.schema == 1
     assert config.model_dump() == {
         "schema": 1,
         "types": [],
@@ -82,6 +87,13 @@ def test_load_config_reports_invalid_and_unsupported_schema(tmp_path) -> None:
     assert unsupported.value.code == "E_SCHEMA_UNSUPPORTED"
 
 
+def test_load_config_reports_invalid_utf8(tmp_path) -> None:
+    (tmp_path / "kb-config.json").write_bytes(b'{"schema": "\xff"}')
+    with pytest.raises(ConfigLoadError) as invalid:
+        load_config(tmp_path)
+    assert invalid.value.code == "E_CONFIG_INVALID"
+
+
 def test_doc_id_parses_formats_and_orders_numeric_ids() -> None:
     assert DocId.parse("KB-000042") == DocId(prefix="KB", number=42)
     assert DocId.parse("KB-1000001").format() == "KB-1000001"
@@ -95,3 +107,18 @@ def test_doc_id_parses_formats_and_orders_numeric_ids() -> None:
     ]
     with pytest.raises(ValueError, match="numeric document id"):
         DocId.parse("GOVERNANCE-CONVENTIONS")
+
+
+def test_config_model_definition_emits_no_warnings() -> None:
+    module_name = "kb.core._model_warning_test"
+    spec = importlib.util.spec_from_file_location(module_name, model_module.__file__)
+    assert spec is not None
+    assert spec.loader is not None
+    isolated_module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = isolated_module
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            spec.loader.exec_module(isolated_module)
+    finally:
+        del sys.modules[module_name]

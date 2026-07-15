@@ -54,11 +54,21 @@ def _default_prefixes() -> dict[str, str]:
 
 
 class Config(BaseModel):
-    schema: int = CURRENT_SCHEMA
+    model_config = ConfigDict(serialize_by_alias=True)
+
+    schema_: int = Field(
+        default=CURRENT_SCHEMA,
+        validation_alias="schema",
+        serialization_alias="schema",
+    )
     types: list[str] = Field(default_factory=list)
     tags: list[str] = Field(default_factory=list)
     id_prefixes: dict[str, str] = Field(default_factory=_default_prefixes)
     propagation_auto_safe: list[str] = Field(default_factory=list)
+
+    @property
+    def schema(self) -> int:
+        return self.schema_
 
 
 class ConfigLoadError(Exception):
@@ -75,7 +85,7 @@ def load_config(root: Path) -> Config:
         if not isinstance(parsed, dict):
             raise TypeError("configuration must be a JSON object")
         config = Config.model_validate(parsed)
-    except (OSError, json.JSONDecodeError, TypeError, ValidationError) as error:
+    except (OSError, UnicodeError, json.JSONDecodeError, TypeError, ValidationError) as error:
         raise ConfigLoadError("E_CONFIG_INVALID", f"invalid kb-config.json: {error}") from error
     if config.schema > CURRENT_SCHEMA:
         raise ConfigLoadError(
