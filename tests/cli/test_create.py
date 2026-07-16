@@ -686,3 +686,25 @@ def test_supersedes_non_scalar_lifecycle_key_is_invalid_without_writes(
         assert "not directly editable" in result.stderr
         assert snapshot(initialized_kb) == before
         target.unlink()
+
+
+def test_supersedes_merge_only_lifecycle_is_structured_invalid_without_writes(
+    initialized_kb, invoke_create
+) -> None:
+    add_chat(initialized_kb)
+    write_doc(
+        initialized_kb,
+        "synthetic/old.md",
+        "defaults: &lifecycle\n"
+        "  status: current\n"
+        "  timestamp: 2026-06-02T14:11:08Z\n"
+        "  last_human_touch: 2026-06-02T14:11:08Z\n"
+        "id: KB-000001\ntype: spec\ntitle: Old\ndescription: Old.\n"
+        "derived_from:\n  - CHAT-000001\n<<: *lifecycle\n",
+    )
+    before = snapshot(initialized_kb)
+    result = supersede(invoke_create, initialized_kb)
+    assert result.exit_code == 1
+    assert "E_CREATE_SUPERSEDES_INVALID" in result.stderr
+    assert "explicit key" in result.stderr
+    assert snapshot(initialized_kb) == before

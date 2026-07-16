@@ -93,6 +93,9 @@ def replace_frontmatter_scalars(
     node = yaml.compose(yaml_text)
     if not isinstance(node, MappingNode):
         raise ValueError("frontmatter must be a YAML mapping")
+    effective = yaml.safe_load(yaml_text)
+    if not isinstance(effective, dict):
+        raise ValueError("frontmatter must be a YAML mapping")
     scalar_tokens = [
         token for token in yaml.scan(yaml_text) if isinstance(token, ScalarToken)
     ]
@@ -125,6 +128,18 @@ def replace_frontmatter_scalars(
                 token.end_mark.index,
                 _render_scalar_token(yaml_text, token, replacements[key]),
             )
+        )
+    indirect = [key for key in replacements if key not in found and key in effective]
+    if indirect:
+        raise ValueError(
+            f"frontmatter value for {indirect[0]!r} must be an explicit key"
+        )
+    required = [
+        key for key in replacements if key not in found and key not in append_missing
+    ]
+    if required:
+        raise ValueError(
+            f"frontmatter value for {required[0]!r} must be an explicit key"
         )
     for value_start, value_end, replacement in sorted(spans, reverse=True):
         yaml_text = yaml_text[:value_start] + replacement + yaml_text[value_end:]
