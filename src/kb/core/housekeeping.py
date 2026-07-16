@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+import stat
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -33,25 +35,83 @@ class InitFailure(Exception):
         self.message = message
 
 
-def _io_failure(error: OSError, fallback: Path | None) -> InitFailure:
-    os_message = error.strerror or str(error)
-    source = Path(error.filename) if error.filename else fallback
+def _io_failure(error: Exception, fallback: Path | None) -> InitFailure:
+    os_message = (
+        error.strerror or str(error) if isinstance(error, OSError) else str(error)
+    )
+    source = (
+        Path(error.filename)
+        if isinstance(error, OSError) and error.filename
+        else fallback
+    )
     if source is None:
         return InitFailure("E_INIT_IO", os_message)
     try:
-        offending = source.resolve()
-    except OSError:
+        offending = source.absolute()
+    except (OSError, RuntimeError):
         offending = source
     return InitFailure("E_INIT_IO", f"{offending}: {os_message}")
 
 
-def _first_non_directory_parent(root: Path, target: Path) -> Path | None:
+def _reject_manifest_link(path: Path) -> None:
+    is_junction = getattr(path, "is_junction", lambda: False)
+    if path.is_symlink() or is_junction():
+        raise InitFailure(
+            "E_INIT_IO",
+            f"manifest path must not be a symlink or junction: {path}",
+        )
+
+
+def _lstat_or_none(path: Path) -> os.stat_result | None:
+    try:
+        return path.lstat()
+    except FileNotFoundError:
+        return None
+
+
+def _inspect_manifest_target(
+    root: Path, target: Path, *, create_parents: bool
+) -> os.stat_result | None:
     current = root
     for part in target.relative_to(root).parts[:-1]:
         current /= part
-        if current.exists() and not current.is_dir():
-            return current
-    return None
+        _reject_manifest_link(current)
+        current_stat = _lstat_or_none(current)
+        if current_stat is None and create_parents:
+            current.mkdir()
+            _reject_manifest_link(current)
+            current_stat = current.lstat()
+        if current_stat is None or not stat.S_ISDIR(current_stat.st_mode):
+            raise InitFailure(
+                "E_INIT_IO",
+                f"manifest path parent is not a directory: {current}",
+            )
+    _reject_manifest_link(target)
+    return _lstat_or_none(target)
+
+
+def _open_flags(flags: int) -> int:
+    return flags | getattr(os, "O_NOFOLLOW", 0)
+
+
+def _write_manifest_text(path: Path, content: str, *, create: bool) -> None:
+    flags = os.O_WRONLY
+    flags |= os.O_CREAT | os.O_EXCL if create else os.O_TRUNC
+    descriptor = os.open(path, _open_flags(flags), 0o666)
+    with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as stream:
+        stream.write(content)
+
+
+def _read_manifest_text(path: Path) -> str:
+    descriptor = os.open(path, _open_flags(os.O_RDONLY))
+    with os.fdopen(descriptor, "r", encoding="utf-8", newline="") as stream:
+        return stream.read()
+
+
+def _append_manifest_text(path: Path, content: str) -> None:
+    descriptor = os.open(path, _open_flags(os.O_WRONLY | os.O_APPEND))
+    with os.fdopen(descriptor, "a", encoding="utf-8", newline="\n") as stream:
+        stream.write(content)
 
 
 def format_log_entry(entry: LogEntry) -> str:
@@ -231,8 +291,11 @@ def _manifest(timestamp: str) -> dict[str, ScaffoldEntry]:
     }
 
 
-def _ensure_initialized_log(path: Path, timestamp: str) -> None:
-    existing = path.read_text(encoding="utf-8")
+def _ensure_initialized_log(root: Path, path: Path, timestamp: str) -> None:
+    target_stat = _inspect_manifest_target(root, path, create_parents=False)
+    if target_stat is None or not stat.S_ISREG(target_stat.st_mode):
+        raise InitFailure("E_INIT_IO", f"manifest path is not a file: {path}")
+    existing = _read_manifest_text(path)
     for line in existing.splitlines():
         fields = line.split(" | ", 4)
         is_initialized = (
@@ -252,15 +315,17 @@ def _ensure_initialized_log(path: Path, timestamp: str) -> None:
         )
     )
     separator = "" if not existing or existing.endswith("\n") else "\n"
-    with path.open("a", encoding="utf-8", newline="\n") as stream:
-        stream.write(f"{separator}{entry}\n")
+    target_stat = _inspect_manifest_target(root, path, create_parents=False)
+    if target_stat is None or not stat.S_ISREG(target_stat.st_mode):
+        raise InitFailure("E_INIT_IO", f"manifest path is not a file: {path}")
+    _append_manifest_text(path, f"{separator}{entry}\n")
 
 
 def init_kb(root: Path | None, *, force: bool = False) -> InitResult:
     try:
         requested = root if root is not None else Path.cwd()
         resolved = requested.expanduser().resolve()
-    except OSError as error:
+    except (OSError, RuntimeError) as error:
         raise _io_failure(error, root) from error
     if resolved.exists() and not resolved.is_dir():
         raise InitFailure(
@@ -277,20 +342,16 @@ def init_kb(root: Path | None, *, force: bool = False) -> InitResult:
     for relative_path, entry in sorted(_manifest(timestamp).items()):
         target = resolved / relative_path
         try:
-            blocking_parent = _first_non_directory_parent(resolved, target)
-            if blocking_parent is not None:
-                raise InitFailure(
-                    "E_INIT_IO",
-                    f"manifest path parent is not a directory: {blocking_parent}",
-                )
-            target.parent.mkdir(parents=True, exist_ok=True)
-            if target.exists() and not target.is_file():
+            target_stat = _inspect_manifest_target(
+                resolved, target, create_parents=True
+            )
+            if target_stat is not None and not stat.S_ISREG(target_stat.st_mode):
                 raise InitFailure("E_INIT_IO", f"manifest path is not a file: {target}")
-            if not target.exists():
-                target.write_text(entry.content, encoding="utf-8", newline="\n")
+            if target_stat is None:
+                _write_manifest_text(target, entry.content, create=True)
                 result.created.append(relative_path)
             elif force and entry.cli_owned:
-                target.write_text(entry.content, encoding="utf-8", newline="\n")
+                _write_manifest_text(target, entry.content, create=False)
                 result.overwritten.append(relative_path)
             else:
                 result.skipped.append(relative_path)
@@ -299,7 +360,9 @@ def init_kb(root: Path | None, *, force: bool = False) -> InitResult:
         except OSError as error:
             raise _io_failure(error, target) from error
     try:
-        _ensure_initialized_log(resolved / "log.md", timestamp)
-    except OSError as error:
+        _ensure_initialized_log(resolved, resolved / "log.md", timestamp)
+    except InitFailure:
+        raise
+    except (OSError, UnicodeError) as error:
         raise _io_failure(error, resolved / "log.md") from error
     return result

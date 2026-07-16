@@ -395,6 +395,168 @@ def test_init_reports_first_non_directory_manifest_parent(tmp_path, invoke_init)
     assert blocker.read_text(encoding="utf-8") == "occupied"
 
 
+def test_init_refuses_symlinked_manifest_parent_without_writing_outside_root(
+    tmp_path, invoke_init
+) -> None:
+    root = tmp_path / "root"
+    outside = tmp_path / "outside"
+    root.mkdir()
+    outside.mkdir()
+    link = root / "raw"
+    link.symlink_to(outside, target_is_directory=True)
+
+    result = invoke_init(root)
+
+    assert result.exit_code == 2
+    assert result.stdout == ""
+    assert result.stderr.startswith("E_INIT_IO: ")
+    assert str(link) in result.stderr
+    assert list(outside.iterdir()) == []
+    assert (root / "governance/conventions.md").is_file()
+    assert (root / "log.md").is_file()
+    assert not (root / "synthetic").exists()
+
+
+def test_init_force_refuses_cli_owned_file_symlink_without_changing_target(
+    tmp_path, invoke_init
+) -> None:
+    root = tmp_path / "root"
+    root.mkdir()
+    assert invoke_init(root).exit_code == 0
+    external = tmp_path / "external-config.json"
+    external.write_bytes(b"external config\xff")
+    link = root / "kb-config.json"
+    link.unlink()
+    link.symlink_to(external)
+
+    result = invoke_init(root, "--force")
+
+    assert result.exit_code == 2
+    assert result.stdout == ""
+    assert result.stderr.startswith("E_INIT_IO: ")
+    assert str(link) in result.stderr
+    assert link.is_symlink()
+    assert external.read_bytes() == b"external config\xff"
+
+
+def test_init_json_refuses_log_symlink_without_reading_or_appending_target(
+    tmp_path, invoke_init
+) -> None:
+    root = tmp_path / "root"
+    root.mkdir()
+    assert invoke_init(root).exit_code == 0
+    external = tmp_path / "external-log.md"
+    external.write_bytes(b"outside log without initialized entry\xff")
+    link = root / "log.md"
+    link.unlink()
+    link.symlink_to(external)
+
+    result = invoke_init(root, "--json")
+    expected = {
+        "error": {
+            "code": "E_INIT_IO",
+            "message": f"manifest path must not be a symlink or junction: {link}",
+        }
+    }
+
+    assert result.exit_code == 2
+    assert result.stdout == json.dumps(expected, ensure_ascii=False) + "\n"
+    assert result.stderr == ""
+    assert external.read_bytes() == b"outside log without initialized entry\xff"
+
+
+def test_init_refuses_broken_manifest_symlink_without_creating_target(
+    tmp_path, invoke_init
+) -> None:
+    root = tmp_path / "root"
+    root.mkdir()
+    external = tmp_path / "missing-external-index.md"
+    link = root / "index.md"
+    link.symlink_to(external)
+
+    result = invoke_init(root)
+
+    assert result.exit_code == 2
+    assert result.stdout == ""
+    assert result.stderr.startswith("E_INIT_IO: ")
+    assert str(link) in result.stderr
+    assert link.is_symlink()
+    assert not external.exists()
+
+
+def test_init_refuses_manifest_junction_before_file_operations(
+    tmp_path, invoke_init, monkeypatch
+) -> None:
+    root = tmp_path / "root"
+    root.mkdir()
+    junction = root / "governance"
+    original_is_junction = Path.is_junction
+
+    def report_manifest_junction(self) -> bool:
+        return self == junction or original_is_junction(self)
+
+    monkeypatch.setattr(Path, "is_junction", report_manifest_junction)
+
+    result = invoke_init(root)
+
+    assert result.exit_code == 2
+    assert result.stdout == ""
+    assert result.stderr.strip() == (
+        f"E_INIT_IO: manifest path must not be a symlink or junction: {junction}"
+    )
+    assert list(root.iterdir()) == []
+
+
+@pytest.mark.parametrize("json_output", [False, True])
+def test_init_invalid_utf8_log_is_typed_io_error_on_the_correct_channel(
+    tmp_path, invoke_init, json_output
+) -> None:
+    root = tmp_path / ("json-root" if json_output else "text-root")
+    root.mkdir()
+    assert invoke_init(root).exit_code == 0
+    log_path = root / "log.md"
+    log_path.write_bytes(b"\xff")
+
+    arguments = ("--json",) if json_output else ()
+    result = invoke_init(root, *arguments)
+    message = (
+        f"{log_path}: 'utf-8' codec can't decode byte 0xff in position 0: "
+        "invalid start byte"
+    )
+
+    assert result.exit_code == 2
+    if json_output:
+        expected = {"error": {"code": "E_INIT_IO", "message": message}}
+        assert result.stdout == json.dumps(expected, ensure_ascii=False) + "\n"
+        assert result.stderr == ""
+    else:
+        assert result.stdout == ""
+        assert result.stderr == f"E_INIT_IO: {message}\n"
+
+
+def test_init_root_expanduser_runtime_error_is_exact_json_io_error(
+    tmp_path, runner, monkeypatch
+) -> None:
+    requested = tmp_path / "requested"
+
+    def fail_expanduser(self) -> Path:
+        raise RuntimeError("home directory is unavailable")
+
+    monkeypatch.setattr(Path, "expanduser", fail_expanduser)
+    result = runner.invoke(app, ["init", "--json", "--root", str(requested)])
+    expected = {
+        "error": {
+            "code": "E_INIT_IO",
+            "message": f"{requested}: home directory is unavailable",
+        }
+    }
+
+    assert result.exit_code == 2
+    assert result.stdout == json.dumps(expected, ensure_ascii=False) + "\n"
+    assert result.stderr == ""
+    assert not requested.exists()
+
+
 def test_ac25_json_success_has_exact_sorted_schema(tmp_path, invoke_init) -> None:
     result = invoke_init(tmp_path, "--json")
     payload = json.loads(result.stdout)
