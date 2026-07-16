@@ -5,7 +5,7 @@
 
 ## 1. Purpose
 
-Normalize incoming material into the knowledge base as immutable raw evidence: read from a file, stdin, or the clipboard, and file exactly one Markdown document into `raw/sources/`, `raw/chats/`, or `raw/feedback/` with the next sequential id and the reduced raw frontmatter. The body is copied **verbatim** — ingest normalizes and files; it never synthesizes (CLI-8). A non-text original is copied unchanged alongside a generated Markdown stub, which becomes the citable form. Ingest is the only v1 command that allocates ids.
+Normalize incoming material into the knowledge base as immutable raw evidence: read from a file, stdin, or the clipboard, and file exactly one Markdown document into `raw/sources/`, `raw/chats/`, or `raw/feedback/` with the next sequential id and the reduced raw frontmatter. The body is copied **verbatim** — ingest normalizes and files; it never synthesizes (CLI-8). A non-text original is copied unchanged alongside a generated Markdown stub, which becomes the citable form. Ingest and `kb create` are the two v1 commands that allocate ids — the raw and synthetic write paths.
 
 ## 2. CLI surface
 
