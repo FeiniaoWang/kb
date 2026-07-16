@@ -23,7 +23,7 @@ kb ingest --class source|chat|feedback --from file|stdin|clipboard [SOURCE]
 | `--dest` | option | relative path | class directory | Subdirectory **relative to the class directory** (`--dest api` → `raw/sources/api/`). Created (with parents) if missing, each new directory with its `index.md`. Must not be absolute or contain `.`/`..` segments |
 | `--about` | option | `REF` | — | Document the feedback concerns. **Required for `--class feedback`, forbidden otherwise.** Resolved per 00-shared §4; must resolve to a document carrying an id; the canonical id is stored |
 | `--title` | option | text | derived (§4 step 9) | Frontmatter `title`; also drives the target filename (slugified) |
-| `--origin` | option | text | adapter default (§4 step 4) | Provenance recorded in the `origin` frontmatter field |
+| `--origin` | option | text | adapter default (§4 step 4) | Provenance recorded in the `origin` frontmatter field. Free-form text — a filesystem path, a **URL** (e.g. the web page the material came from), or a label. Stored verbatim, never validated; overrides the adapter default |
 | `--actor` | option | text | `kb-cli` | Actor recorded in the log entry (00-shared §8) |
 | `--kb` | option | directory path | upward discovery | KB root (00-shared §1) |
 | `--json` | option | flag | off | Structured output (§6) |
@@ -46,7 +46,7 @@ kb ingest --class source|chat|feedback --from file|stdin|clipboard [SOURCE]
 | `--dest` | Subdirectory under the class directory (e.g. api → raw/sources/api/). Created with its index.md if missing. |
 | `--about` | Document the feedback concerns (id or KB-relative path). Required for --class feedback. |
 | `--title` | Document title; also drives the target filename. [default: derived from the source filename or the id] |
-| `--origin` | Provenance recorded in the frontmatter. [default: the source path, "stdin", or "clipboard"] |
+| `--origin` | Provenance recorded in the frontmatter — a path, a URL, or a label. [default: the source path, "stdin", or "clipboard"] |
 | `--actor` | Actor recorded in the log entry. [default: kb-cli] |
 | `--kb` | KB root. [default: discovered upward from the current directory] |
 | `--json` | Emit results as JSON. |
@@ -59,6 +59,7 @@ Examples:
   kb ingest --class source --from file report.pdf --dest q3     Non-text original + citable stub into raw/sources/q3/
   kb ingest --class feedback --from stdin --about KB-000007     Pipe feedback about KB-000007
   kb ingest --class chat --from clipboard --title "Planning session"   Clipboard into raw/chats/
+  kb ingest --class source --from file page.html --origin https://ex.com/post   Record the web page it came from
 ```
 
 ## 4. Behavior (normative algorithm)
@@ -84,7 +85,7 @@ The run is **pre-flight, then write**: steps 1–10 complete before the first by
    - **Document filename:** `<slug>.md`. **Non-text original filename:** `<slug>.<ext>` with the original extension lowercased (bare `<slug>` if the original has none).
    - **Collision:** if the document path — or, non-text, the original path — already exists in the target directory, append `-<lowercased id>` to **both** stems (`meeting-notes.md` → `meeting-notes-raw-000042.md`). The id is unique, so suffixed names never collide. Nothing existing is ever overwritten (raw is append-only, LS4).
    - **Title field (always written):** `--title` if given; else the source filename stem with `-`/`_` replaced by spaces, whitespace runs collapsed, no case change; else the id string.
-10. Construct and validate the `RawFrontmatter` (00-shared §7): `id`, `type` (`raw-source|chat|feedback`), `ingested_at` = invocation time as ISO-8601 UTC with seconds precision (`YYYY-MM-DDTHH:MM:SSZ`), `origin` (`--origin` else the adapter default), `title`, and `about` (feedback only).
+10. Construct and validate the `RawFrontmatter` (00-shared §7): `id`, `type` (`raw-source|chat|feedback`), `ingested_at` = invocation time as ISO-8601 UTC with seconds precision (`YYYY-MM-DDTHH:MM:SSZ`), `origin` (`--origin` else the adapter default), `title`, and `about` (feedback only). `origin` is free-form provenance text — a filesystem path, a URL (e.g. the web page material was saved from), or a label — stored verbatim and never validated; `--origin` overrides the adapter default (so a local copy of a web page is filed with its true URL provenance). It is emitted as a YAML plain scalar, quoted only when YAML requires it.
 
 **Write phase:**
 
@@ -261,54 +262,62 @@ Every pre-flight failure (E1–E11) leaves the KB byte-for-byte untouched (§4).
 
 ## 8. Acceptance criteria
 
-One pytest test per item (00-shared §10), named `test_ac<NN>_<slug>`. Each is independently testable with an unambiguous pass condition; `ingested_at` and log timestamps are pattern-matched, everything else asserted exactly.
+One pytest test per item (00-shared §10), named `test_ac<NN>_<slug>`. Each is independently testable with an unambiguous pass condition; `ingested_at` and log timestamps are pattern-matched, everything else asserted exactly. Every §7 row maps to at least one AC except E15 (interactive TTY stdin), which is not exercisable through `CliRunner` and stays documented behavior only.
 
-**Coverage map:** happy path & pinned content AC1–AC6 (§4, §5.1, §5.4, §5.5, §6) · classes & ids AC7–AC11 (§2, §4 steps 2/8, E4) · filenames, titles & collisions AC12–AC16 (§4 step 9, E14) · adapters AC17–AC21 (§4 steps 4–6, §4.1, E8–E10) · non-text originals AC22–AC24 (§5.2) · `--dest` & index effects AC25–AC28 (§4 steps 3/11/13, §5.3, §5.4, E6) · `--about` AC29–AC31 (§4 step 7, E11) · usage & environment errors AC32–AC35 (E1, E5, E7) · atomicity & log AC36–AC38 (§4 pre-flight, step 14, E16) · output, help & Git-agnosticism AC39–AC42 (§3, §6, 00-shared).
+**Coverage map:** happy path & pinned content AC1–AC6 (§4, §5.1, §5.4, §5.5, §6) · classes & ids AC7–AC11 (§2, §4 steps 2/8, E4) · provenance AC12 (§2 `--origin`, §4 steps 4/10) · filenames, titles & collisions AC13–AC18 (§4 step 9, E14) · adapters AC19–AC23 (§4 steps 4–6, §4.1, E8–E10) · non-text originals AC24–AC27 (§4 step 9, §5.2) · `--dest` & index effects AC28–AC32 (§4 steps 3/11/13, §5.3, §5.4, E6) · `--about` AC33–AC35 (§4 step 7, E11) · usage & environment errors AC36–AC42 (E1–E3, E5, E7, E13) · atomicity, I/O & log AC43–AC46 (§4 pre-flight, steps 11–14, E12, E16) · output, help & Git-agnosticism AC47–AC50 (§3, §6, 00-shared).
 
 | # | Given / When / Then |
 |---|---|
-| AC1 | Given a fresh KB and a UTF-8 file `/work/meeting_notes.md`, when `kb ingest --class source --from file /work/meeting_notes.md` runs, then exit 0 and `raw/sources/meeting-notes.md` exists with frontmatter containing exactly the keys `id`, `type`, `ingested_at`, `origin`, `title` in that order, with `id == RAW-000001`, `type == raw-source`, `ingested_at` parsing as `YYYY-MM-DDTHH:MM:SSZ`, `origin` == the absolute source path, `title == meeting notes`. |
-| AC2 | Given a source file with LF line endings, a trailing newline, and tricky content (a leading `---` line, Unicode, trailing spaces), when it is ingested, then the document's body — everything after the closing `---` of the frontmatter block — is byte-identical to the source. |
+| AC1 | Given a fresh KB and a UTF-8 file `/work/meeting_notes.md`, when `kb ingest --class source --from file /work/meeting_notes.md` runs, then exit 0 and `raw/sources/meeting-notes.md` exists with frontmatter containing exactly the keys `id`, `type`, `ingested_at`, `origin`, `title` in that order, with `id == RAW-000001`, `type == raw-source`, `ingested_at` parsing as `YYYY-MM-DDTHH:MM:SSZ`, `origin` == the absolute source path, `title == meeting notes` — and the only changes anywhere under the KB root are that document, `raw/sources/index.md`, and one appended `log.md` line. |
+| AC2 | Given a source file with LF line endings, a trailing newline, and tricky content (a leading `---` line, Unicode, trailing spaces), when it is ingested, then the document's body — everything after the closing `---` of the frontmatter block — is byte-identical to the source, with no inserted heading or blank line. |
 | AC3 | Given a source file with CRLF and lone-CR line endings and no trailing newline, when it is ingested, then the body contains only LF line endings and ends with exactly one newline, all other bytes verbatim. |
 | AC4 | Given AC1's run, then `raw/sources/index.md` gained exactly the line `* [RAW-000001][meeting notes](meeting-notes.md)` under `## Files` (no ` - <description>` tail), its frontmatter `description` is unchanged from the kb-init pinned value, and no other `index.md` in the KB changed. |
 | AC5 | Given AC1's run, then `log.md` gained exactly one line matching `- <timestamp> | ingested | kb-cli | RAW-000001 | raw/sources/meeting-notes.md from <absolute source path>` with `<timestamp>` parsing as ISO-8601 UTC. |
 | AC6 | Given AC1's run, then stdout is exactly: `created  raw/sources/meeting-notes.md`, `updated  raw/sources/index.md` (alphabetical), then `ingested RAW-000001 as raw/sources/meeting-notes.md`, with no `log.md` line. |
-| AC7 | Given `--class chat --from stdin` with piped text, then the document lands in `raw/chats/`, has `type: chat`, and `id == CHAT-000001`. |
+| AC7 | Given a KB at `ROOT` and text piped to `kb ingest --class chat --from stdin --kb ROOT` run from a directory **outside** the KB, then the document lands in `raw/chats/`, has `type: chat`, and `id == CHAT-000001` (`--kb` skips upward discovery). |
 | AC8 | Given a KB containing a synthetic document `KB-000007`, when `kb ingest --class feedback --from stdin --about KB-000007` runs with piped text, then the document lands in `raw/feedback/` with `type: feedback`, `id == FEED-000001`, and `about: KB-000007` as the last frontmatter key. |
 | AC9 | Given a KB whose raw sources carry ids `RAW-000001` and `RAW-000005` (a gap), when a source is ingested, then the new id is `RAW-000006` — max+1, gaps never refilled. |
-| AC10 | Given a `kb-config.json` with `id_prefixes.source == "SRC"`, when a source is ingested, then the new id is `SRC-000001`. |
+| AC10 | Given case (a) a `kb-config.json` with `id_prefixes.source == "SRC"`, then a source ingest allocates `SRC-000001`; case (b) a `kb-config.json` whose `id_prefixes` key is absent entirely, then the documented default applies and a source ingest allocates `RAW-000001` (00-shared §7 `Config` defaults). |
 | AC11 | Given a KB containing a `*.md` file whose frontmatter does not parse, when any `kb ingest` runs, then exit 2 with `E_INGEST_MALFORMED` naming that path, and nothing is written (no file, no index change, no log line). |
-| AC12 | Given `--title "Meeting Notes!"`, then the document is `meeting-notes.md` (slugified) and frontmatter `title` is the verbatim `Meeting Notes!`. |
-| AC13 | Given a source file named `q3_planning-notes.md` and no `--title`, then the filename is `q3-planning-notes.md` and the title is `q3 planning notes` (stem with `-`/`_` → spaces, no case change). |
-| AC14 | Given `raw/sources/notes.md` already exists, when a source that slugs to `notes` is ingested and receives id `RAW-000002`, then the new document is `raw/sources/notes-raw-000002.md` and the pre-existing file is byte-identical afterwards. |
-| AC15 | Given `--title "!!!"` (slugifies to empty), then the document filename falls back to the lowercased id (`raw-000001.md`). |
-| AC16 | Given the same file ingested twice, then two documents exist with distinct ids, the second collision-suffixed, the first byte-identical afterwards, and both runs exit 0 (no de-duplication, E14). |
-| AC17 | Given text piped to `--from stdin` with no `--title`, then `origin == stdin`, the filename is the lowercased id, and `title` is the id string. |
-| AC18 | Given a PATH shim providing a fake clipboard tool that prints known text, when `--from clipboard` runs, then the document body is that text and `origin == clipboard`. |
-| AC19 | Given a PATH with no clipboard tool, when `--from clipboard` runs, then exit 2 with `E_INGEST_CLIPBOARD` and nothing written. |
-| AC20 | Given non-UTF-8 bytes piped to `--from stdin`, then exit 1 with `E_INGEST_NOT_TEXT` and nothing written. |
-| AC21 | Given a file containing only whitespace, when it is ingested, then exit 1 with `E_INGEST_EMPTY` and nothing written. |
-| AC22 | Given a binary file `Q3 Report.pdf` (invalid UTF-8) and `--title "Q3 Report"`, when it is ingested, then `q3-report.pdf` is a byte-identical copy, `q3-report.md` matches §5.2 exactly (frontmatter + the pinned one-line stub body linking `q3-report.pdf`), and both appear as `created` in the output. |
-| AC23 | Given `q3-report.md` already exists in the target directory, when the AC22 ingest runs and receives id `RAW-000002`, then **both** new files are suffixed (`q3-report-raw-000002.md`, `q3-report-raw-000002.pdf`) and the stub links the suffixed original. |
-| AC24 | Given AC22's run, then the target directory's `index.md` `## Files` lists the stub `q3-report.md` and does **not** list `q3-report.pdf`. |
-| AC25 | Given `--dest api` where `raw/sources/api/` does not exist, then the directory is created with an `index.md` byte-matching §5.3 (description `Documents under raw/sources/api/.`, title `api`, listing the new document), `raw/sources/index.md` is regenerated with `* [api](api/index.md) - Documents under raw/sources/api/.` under `## Subdirectories`, and the root and `raw/` indexes are untouched. |
-| AC26 | Given `--dest a/b` where neither directory exists, then both are created with born-current §5.3 indexes (`a`'s listing `b` under `## Subdirectories`, `b`'s listing the document under `## Files`), and only the nearest pre-existing ancestor's index (`raw/sources/index.md`) is regenerated. |
-| AC27 | Given `--dest api` where `raw/sources/api/` already exists with its index, then only `raw/sources/api/index.md` is regenerated (`updated`); `raw/sources/index.md` is untouched. |
-| AC28 | Given `--dest /abs` (case a) and `--dest ../escape` (case b), then exit 2 with `E_INGEST_DEST_INVALID` naming the value, nothing written. |
-| AC29 | Given `--class feedback --about synthetic/specs/webhook.md` where that document carries id `KB-000007`, then the stored frontmatter is `about: KB-000007` (canonical id, not the path). |
-| AC30 | Given `--class feedback --about KB-999999` (no such id), then exit 1 with `E_INGEST_ABOUT_UNRESOLVED` and nothing written. |
-| AC31 | Given `--class feedback --about index.md` (resolves to a document without an id), then exit 1 with `E_INGEST_ABOUT_UNRESOLVED` and nothing written. |
-| AC32 | Given `--class feedback` without `--about` (case a) and `--class source --about KB-000001` (case b), then exit 2 with `E_INGEST_USAGE` and a case-specific message, nothing written. |
-| AC33 | Given `--from file` without `SOURCE` (case a) and `--from stdin SOURCE.md` (case b), then exit 2 with `E_INGEST_USAGE`, nothing written. |
-| AC34 | Given `--from file /nonexistent` (case a) and `--from file <a directory>` (case b), then exit 2 with `E_INGEST_SOURCE_NOT_FOUND`, nothing written. |
-| AC35 | Given a directory with no `kb-config.json` in it or any ancestor, when `kb ingest` runs there, then exit 2 with `E_NO_KB` and the 00-shared §1 message. |
-| AC36 | Given a failing pre-flight run (AC30's setup), then afterwards every file in the KB is byte-identical to before — no document, no index change, no log line (pre-flight atomicity). |
-| AC37 | Given `--actor pm-skill`, then the log line's actor column is `pm-skill`. |
-| AC38 | Given a KB whose `log.md` was deleted, when an ingest runs, then `log.md` exists afterwards with the kb-init §5.3 scaffold (frontmatter `type: log`, header comment, heading), no `initialized` line, and exactly one `ingested` line. |
-| AC39 | Given `--json` on a successful non-text `--dest` run (AC22+AC25 setup), then stdout parses as JSON with exactly the fields `ok` (true), `id`, `path`, `original` (string), `created`/`updated` (alphabetically sorted arrays of relative paths, excluding `log.md`), and nothing else on stdout; a text ingest yields `original: null`. |
-| AC40 | Given `--json` on a failing run (AC30's setup), then stdout is exactly the envelope `{"error": {"code": "E_INGEST_ABOUT_UNRESOLVED", "message": …}}` and exit is 1. |
-| AC41 | When `kb ingest --help` runs, then exit 0 and the output contains every normative string from §3 — each description sentence, each option help string, each example line. |
-| AC42 | Given AC1's run, then no `git` subprocess was invoked (PATH shim or subprocess spy) and no `.git/` directory exists (Git-agnostic). |
+| AC12 | Given case (a) `--from file --origin https://example.com/post`, then the document's frontmatter reads exactly `origin: https://example.com/post` (the URL overrides the file-path default), YAML-parsing the document returns that identical string, and the log note ends `from https://example.com/post`; case (b) `--from stdin --origin "meeting recording"`, then `origin` is `meeting recording` (a label overriding `stdin`). |
+| AC13 | Given `--title "Meeting Notes!"`, then the document is `meeting-notes.md` (slugified) and frontmatter `title` is the verbatim `Meeting Notes!`. |
+| AC14 | Given a source file named `q3_planning-notes.md` and no `--title`, then the filename is `q3-planning-notes.md` and the title is `q3 planning notes` (stem with `-`/`_` → spaces, no case change). |
+| AC15 | Given `raw/sources/notes.md` already exists, when a source that slugs to `notes` is ingested and receives id `RAW-000002`, then the new document is `raw/sources/notes-raw-000002.md` and the pre-existing file is byte-identical afterwards. |
+| AC16 | Given `--title "!!!"` (slugifies to empty), then the document filename falls back to the lowercased id (`raw-000001.md`). |
+| AC17 | Given `--title "Résumé Über 2026"`, then the document filename is `resume-uber-2026.md` (NFKD → ASCII fold, lowercase, hyphen runs collapsed) and frontmatter `title` is the verbatim `Résumé Über 2026`. |
+| AC18 | Given the same file ingested twice, then two documents exist with distinct ids, the second collision-suffixed, the first byte-identical afterwards, and both runs exit 0 (no de-duplication, E14). |
+| AC19 | Given text piped to `--from stdin` with no `--title`, then `origin == stdin`, the filename is the lowercased id, and `title` is the id string. |
+| AC20 | Given a PATH shim providing a fake clipboard tool that prints known text, when `--from clipboard` runs, then the document body is that text and `origin == clipboard`. |
+| AC21 | Given case (a) a PATH with no clipboard tool and case (b) a shimmed clipboard tool that exits non-zero, when `--from clipboard` runs, then exit 2 with `E_INGEST_CLIPBOARD` and nothing written. |
+| AC22 | Given non-UTF-8 bytes from case (a) piped stdin and case (b) a shimmed clipboard tool, then exit 1 with `E_INGEST_NOT_TEXT` and nothing written (a non-text **file** takes the §5.2 stub path instead, AC24). |
+| AC23 | Given case (a) a file containing only whitespace and case (b) zero-byte piped stdin, when ingested, then exit 1 with `E_INGEST_EMPTY` and nothing written. |
+| AC24 | Given a binary file `Q3 Report.pdf` (invalid UTF-8) and `--title "Q3 Report"`, when it is ingested, then `q3-report.pdf` is a byte-identical copy, `q3-report.md` matches §5.2 exactly (frontmatter + the pinned one-line stub body linking `q3-report.pdf`), and both appear as `created` in the output. |
+| AC25 | Given `q3-report.md` already exists in the target directory, when the AC24 ingest runs and receives id `RAW-000002`, then **both** new files are suffixed (`q3-report-raw-000002.md`, `q3-report-raw-000002.pdf`) and the stub links the suffixed original. |
+| AC26 | Given AC24's run, then the target directory's `index.md` `## Files` lists the stub `q3-report.md` and does **not** list `q3-report.pdf`. |
+| AC27 | Given case (a) a binary file `Photo.JPG`, then the original is copied as `photo.jpg` (extension lowercased) with stub `photo.md` linking `photo.jpg`; case (b) an extensionless binary file `dump`, then the original is copied as `dump` (bare slug) with stub `dump.md` linking `dump`. |
+| AC28 | Given `--dest api` where `raw/sources/api/` does not exist, then the directory is created with an `index.md` byte-matching §5.3 (description `Documents under raw/sources/api/.`, title `api`, listing the new document), `raw/sources/index.md` is regenerated with `* [api](api/index.md) - Documents under raw/sources/api/.` under `## Subdirectories`, and the root and `raw/` indexes are untouched. |
+| AC29 | Given `--dest a/b` where neither directory exists, then both are created with born-current §5.3 indexes (`a`'s listing `b` under `## Subdirectories`, `b`'s listing the document under `## Files`), and only the nearest pre-existing ancestor's index (`raw/sources/index.md`) is regenerated. |
+| AC30 | Given `--dest api` where `raw/sources/api/` already exists with its index, then only `raw/sources/api/index.md` is regenerated (`updated`); `raw/sources/index.md` is untouched. |
+| AC31 | Given `--dest api/` (trailing slash), then behavior is identical to `--dest api`: the document lands in `raw/sources/api/` and exit is 0. |
+| AC32 | Given `--dest /abs` (case a) and `--dest ../escape` (case b), then exit 2 with `E_INGEST_DEST_INVALID` naming the value, nothing written. |
+| AC33 | Given `--class feedback --about synthetic/specs/webhook.md` where that document carries id `KB-000007`, then the stored frontmatter is `about: KB-000007` (canonical id, not the path). |
+| AC34 | Given `--class feedback --about KB-999999` (no such id), then exit 1 with `E_INGEST_ABOUT_UNRESOLVED` and nothing written. |
+| AC35 | Given `--class feedback --about index.md` (resolves to a document without an id), then exit 1 with `E_INGEST_ABOUT_UNRESOLVED` and nothing written. |
+| AC36 | Given `--class feedback` without `--about` (case a) and `--class source --about KB-000001` (case b), then exit 2 with `E_INGEST_USAGE` and a case-specific message, nothing written. |
+| AC37 | Given `--from file` without `SOURCE` (case a) and `--from stdin SOURCE.md` (case b), then exit 2 with `E_INGEST_USAGE`, nothing written. |
+| AC38 | Given `--from file /nonexistent` (case a) and `--from file <a directory>` (case b), then exit 2 with `E_INGEST_SOURCE_NOT_FOUND`, nothing written. |
+| AC39 | Given `--class bogus` (case a), `--from bogus` (case b), and an unknown option `--bogus-flag` (case c), then exit 2 with a usage error on stderr and nothing written (E13). |
+| AC40 | Given case (a) `kb ingest` run in a directory with no `kb-config.json` in it or any ancestor, and case (b) `--kb` pointing at an existing directory that contains no `kb-config.json`, then exit 2 with `E_NO_KB` and the 00-shared §1 message; nothing written. |
+| AC41 | Given a KB whose `kb-config.json` contains invalid JSON, when an ingest runs, then exit 2 with `E_CONFIG_INVALID` and nothing written. |
+| AC42 | Given a KB whose `kb-config.json` has `schema` newer than the CLI knows (e.g. `999`), when an ingest runs, then exit 2 with `E_SCHEMA_UNSUPPORTED` and nothing written. |
+| AC43 | Given a failing pre-flight run (AC34's setup), then afterwards every file in the KB is byte-identical to before — no document, no index change, no log line (pre-flight atomicity). |
+| AC44 | Given a target class directory made unwritable so that pre-flight passes but the write phase fails, when an ingest runs, then exit 2 with `E_INGEST_IO` and the OS message (E12; partial state permitted, not rolled back; skipif on platforms without POSIX permissions). |
+| AC45 | Given `--actor pm-skill`, then the log line's actor column is `pm-skill`. |
+| AC46 | Given a KB whose `log.md` was deleted, when an ingest runs, then `log.md` exists afterwards with the kb-init §5.3 scaffold (frontmatter `type: log`, header comment, heading), no `initialized` line, and exactly one `ingested` line. |
+| AC47 | Given `--json` on a successful non-text `--dest` run (AC24+AC28 setup), then stdout parses as JSON with exactly the fields `ok` (true), `id`, `path`, `original` (string), `created`/`updated` (alphabetically sorted arrays of relative paths, excluding `log.md`), and nothing else on stdout; a text ingest yields `original: null`. |
+| AC48 | Given `--json` on a failing run (AC34's setup), then stdout is exactly the envelope `{"error": {"code": "E_INGEST_ABOUT_UNRESOLVED", "message": …}}` and exit is 1. |
+| AC49 | When `kb ingest --help` runs, then exit 0 and the output contains every normative string from §3 — each description sentence, each option help string, each example line. |
+| AC50 | Given AC1's run, then no `git` subprocess was invoked (PATH shim or subprocess spy) and no `.git/` directory exists (Git-agnostic). |
 
 ## 9. Out of scope
 
