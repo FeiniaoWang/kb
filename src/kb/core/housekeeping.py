@@ -203,16 +203,39 @@ def _manifest(timestamp: str) -> dict[str, ScaffoldEntry]:
     }
 
 
+def _ensure_initialized_log(path: Path, timestamp: str) -> None:
+    existing = path.read_text(encoding="utf-8")
+    if " | initialized | " in existing:
+        return
+    entry = format_log_entry(
+        LogEntry(
+            at=timestamp,
+            action="initialized",
+            actor="kb-cli",
+            doc_ids=[],
+            note="KB scaffolded by kb init",
+        )
+    )
+    separator = "" if not existing or existing.endswith("\n") else "\n"
+    with path.open("a", encoding="utf-8", newline="\n") as stream:
+        stream.write(f"{separator}{entry}\n")
+
+
 def init_kb(root: Path, *, force: bool = False) -> InitResult:
     resolved = root.expanduser().resolve()
     resolved.mkdir(parents=True, exist_ok=True)
+    timestamp = _utc_now()
     result = InitResult(root=resolved)
-    for relative_path, entry in sorted(_manifest(_utc_now()).items()):
+    for relative_path, entry in sorted(_manifest(timestamp).items()):
         target = resolved / relative_path
         target.parent.mkdir(parents=True, exist_ok=True)
-        if target.exists():
+        if not target.exists():
+            target.write_text(entry.content, encoding="utf-8", newline="\n")
+            result.created.append(relative_path)
+        elif force and entry.cli_owned:
+            target.write_text(entry.content, encoding="utf-8", newline="\n")
+            result.overwritten.append(relative_path)
+        else:
             result.skipped.append(relative_path)
-            continue
-        target.write_text(entry.content, encoding="utf-8", newline="\n")
-        result.created.append(relative_path)
+    _ensure_initialized_log(resolved / "log.md", timestamp)
     return result
