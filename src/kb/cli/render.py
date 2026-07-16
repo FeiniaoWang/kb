@@ -1,4 +1,4 @@
-from kb.core.housekeeping import InitResult
+from kb.core.housekeeping import InitFailure, InitResult
 
 
 def render_init_text(result: InitResult) -> str:
@@ -11,3 +11,7 @@ def render_init_text(result: InitResult) -> str:
         f"{len(result.overwritten)} overwritten, {len(result.skipped)} skipped"
     )
     return "\n".join(lines)
+
+
+def render_error_text(error: InitFailure) -> str:
+    return f"{error.code}: {error.message}"

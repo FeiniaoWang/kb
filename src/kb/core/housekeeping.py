@@ -26,6 +26,19 @@ class InitResult(BaseModel):
     skipped: list[str] = Field(default_factory=list)
 
 
+class InitFailure(Exception):
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code = code
+        self.message = message
+
+
+def _io_failure(error: OSError, fallback: Path) -> InitFailure:
+    offending = Path(error.filename).resolve() if error.filename else fallback.resolve()
+    os_message = error.strerror or str(error)
+    return InitFailure("E_INIT_IO", f"{offending}: {os_message}")
+
+
 def format_log_entry(entry: LogEntry) -> str:
     ids = ",".join(entry.doc_ids) if entry.doc_ids else "-"
     return f"- {entry.at} | {entry.action} | {entry.actor} | {ids} | {entry.note}"
@@ -229,20 +242,42 @@ def _ensure_initialized_log(path: Path, timestamp: str) -> None:
 
 
 def init_kb(root: Path, *, force: bool = False) -> InitResult:
-    resolved = root.expanduser().resolve()
-    resolved.mkdir(parents=True, exist_ok=True)
+    try:
+        resolved = root.expanduser().resolve()
+    except OSError as error:
+        raise _io_failure(error, root) from error
+    if resolved.exists() and not resolved.is_dir():
+        raise InitFailure(
+            "E_INIT_NOT_DIR",
+            f"target exists and is not a directory: {resolved}",
+        )
+    try:
+        resolved.mkdir(parents=True, exist_ok=True)
+    except OSError as error:
+        raise _io_failure(error, resolved) from error
+
     timestamp = _utc_now()
     result = InitResult(root=resolved)
     for relative_path, entry in sorted(_manifest(timestamp).items()):
         target = resolved / relative_path
-        target.parent.mkdir(parents=True, exist_ok=True)
-        if not target.exists():
-            target.write_text(entry.content, encoding="utf-8", newline="\n")
-            result.created.append(relative_path)
-        elif force and entry.cli_owned:
-            target.write_text(entry.content, encoding="utf-8", newline="\n")
-            result.overwritten.append(relative_path)
-        else:
-            result.skipped.append(relative_path)
-    _ensure_initialized_log(resolved / "log.md", timestamp)
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            if target.exists() and not target.is_file():
+                raise InitFailure("E_INIT_IO", f"manifest path is not a file: {target}")
+            if not target.exists():
+                target.write_text(entry.content, encoding="utf-8", newline="\n")
+                result.created.append(relative_path)
+            elif force and entry.cli_owned:
+                target.write_text(entry.content, encoding="utf-8", newline="\n")
+                result.overwritten.append(relative_path)
+            else:
+                result.skipped.append(relative_path)
+        except InitFailure:
+            raise
+        except OSError as error:
+            raise _io_failure(error, target) from error
+    try:
+        _ensure_initialized_log(resolved / "log.md", timestamp)
+    except OSError as error:
+        raise _io_failure(error, resolved / "log.md") from error
     return result

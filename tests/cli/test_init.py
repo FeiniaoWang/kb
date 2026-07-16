@@ -280,3 +280,85 @@ def test_ac17_force_never_writes_non_manifest_document(tmp_path, invoke_init) ->
     result = invoke_init(tmp_path, "--force")
     assert result.exit_code == 0
     assert document.read_bytes() == before
+
+
+def test_ac18_relative_nested_root_is_created_and_reported_absolute(tmp_path, invoke_init) -> None:
+    result = invoke_init(tmp_path, "--root", "x/y/z")
+    root = (tmp_path / "x/y/z").resolve()
+    assert result.exit_code == 0
+    assert files_under(root) == set(expected_manifest(timestamp_from_log(root)))
+    assert result.stdout.splitlines()[-1].startswith(f"KB ready at {root} —")
+
+
+def test_ac19_default_root_is_resolved_cwd(tmp_path, invoke_init) -> None:
+    result = invoke_init(tmp_path)
+    assert result.exit_code == 0
+    assert (tmp_path / "kb-config.json").is_file()
+    assert result.stdout.splitlines()[-1].startswith(f"KB ready at {tmp_path.resolve()} —")
+
+
+def test_ac20_file_target_reports_not_directory(tmp_path, invoke_init) -> None:
+    target = tmp_path / "target"
+    target.write_text("occupied", encoding="utf-8")
+    result = invoke_init(tmp_path, "--root", str(target))
+    assert result.exit_code == 2
+    assert result.stdout == ""
+    assert result.stderr.strip() == f"E_INIT_NOT_DIR: target exists and is not a directory: {target.resolve()}"
+    assert files_under(tmp_path) == {"target"}
+
+
+def test_ac21_nested_kb_root_is_allowed(tmp_path, invoke_init) -> None:
+    outer = tmp_path / "a"
+    outer.mkdir()
+    assert invoke_init(outer).exit_code == 0
+    inner = outer / "b"
+    result = invoke_init(outer, "--root", str(inner))
+    assert result.exit_code == 0
+    assert (outer / "kb-config.json").is_file()
+    assert (inner / "kb-config.json").is_file()
+    assert files_under(inner) == set(expected_manifest(timestamp_from_log(inner)))
+
+
+def test_ac22_wrong_kind_manifest_paths_report_io_error(tmp_path, invoke_init) -> None:
+    directory_case = tmp_path / "directory-case"
+    directory_case.mkdir()
+    (directory_case / "kb-config.json").mkdir()
+    first = invoke_init(directory_case)
+    assert first.exit_code == 2
+    assert "E_INIT_IO" in first.stderr
+    assert str(directory_case / "kb-config.json") in first.stderr
+    assert (directory_case / "kb-config.json").is_dir()
+
+    file_case = tmp_path / "file-case"
+    file_case.mkdir()
+    (file_case / "raw").write_text("occupied", encoding="utf-8")
+    second = invoke_init(file_case)
+    assert second.exit_code == 2
+    assert "E_INIT_IO" in second.stderr
+    assert str(file_case / "raw") in second.stderr
+    assert (file_case / "raw").read_text(encoding="utf-8") == "occupied"
+
+
+@pytest.mark.skipif(
+    os.name != "posix" or os.geteuid() == 0,
+    reason="requires enforceable POSIX directory permissions",
+)
+def test_ac23_unwritable_target_reports_io_error(tmp_path, invoke_init) -> None:
+    target = tmp_path / "unwritable"
+    target.mkdir()
+    target.chmod(stat.S_IRUSR | stat.S_IXUSR)
+    try:
+        result = invoke_init(tmp_path, "--root", str(target))
+        assert result.exit_code == 2
+        assert "E_INIT_IO" in result.stderr
+        assert str(target) in result.stderr
+    finally:
+        target.chmod(stat.S_IRWXU)
+
+
+def test_ac24_unknown_option_is_usage_error_without_files(tmp_path, invoke_init) -> None:
+    result = invoke_init(tmp_path, "--bogus-flag")
+    assert result.exit_code == 2
+    assert "No such option: --bogus-flag" in result.stderr
+    assert result.stdout == ""
+    assert files_under(tmp_path) == set()
