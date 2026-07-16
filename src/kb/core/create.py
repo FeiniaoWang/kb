@@ -6,12 +6,18 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
-from kb.core.frontmatter import render_synthetic_document
+from kb.core.frontmatter import render_synthetic_document, replace_frontmatter_scalars
 from kb.core.housekeeping import LogEntry, append_log, utc_now
 from kb.core.ids import next_id
 from kb.core.indexing import regenerate_directory_index
 from kb.core.ingest import slug
-from kb.core.model import ConfigLoadError, SyntheticFrontmatter, load_config
+from kb.core.model import (
+    ConfigLoadError,
+    DocClass,
+    Document,
+    SyntheticFrontmatter,
+    load_config,
+)
 from kb.core.scan import KB, RootDiscoveryError, discover_root, resolve_ref, scan
 
 CreateStatus = Literal["draft", "current"]
@@ -108,6 +114,42 @@ def _require_parents(parents: list[str]) -> None:
         )
 
 
+def _resolve_supersedes(kb: KB, ref: str | None) -> Document | None:
+    if ref is None:
+        return None
+    document = resolve_ref(kb, ref)
+    if document is None or document.id is None:
+        raise CreateFailure(
+            "E_CREATE_SUPERSEDES_UNRESOLVED",
+            f"supersedes target cannot be resolved to a document id: {ref}",
+            1,
+        )
+    status = document.frontmatter.root.get("status")
+    if document.doc_class is not DocClass.SYNTHETIC or status not in {
+        "draft",
+        "current",
+    }:
+        raise CreateFailure(
+            "E_CREATE_SUPERSEDES_INVALID",
+            f"supersedes target is not a live synthetic document: {ref} "
+            f"(status={status!r})",
+            1,
+        )
+    return document
+
+
+def _superseded_bytes(root: Path, document: Document, timestamp: str) -> bytes:
+    return replace_frontmatter_scalars(
+        (root / document.path).read_bytes(),
+        {
+            "status": "superseded",
+            "timestamp": timestamp,
+            "last_human_touch": timestamp,
+        },
+        append_missing=("timestamp", "last_human_touch"),
+    )
+
+
 def create(request: CreateRequest) -> CreateResult:
     try:
         root = discover_root(request.kb_root)
@@ -131,11 +173,16 @@ def create(request: CreateRequest) -> CreateResult:
         )
     body = _body(request)
     parents = _parents(kb, request.derived_from)
+    superseded_document = _resolve_supersedes(kb, request.supersedes)
+    if superseded_document is not None and superseded_document.id not in parents:
+        parents.append(superseded_document.id)
     _require_parents(parents)
     doc_id = next_id(kb, config.id_prefixes["synthetic"]).format()
     stem = slug(request.title, doc_id)
     target_dir = root / "synthetic"
     path = target_dir / f"{stem}.md"
+    if path.exists():
+        path = target_dir / f"{stem}-{doc_id.lower()}.md"
     timestamp = utc_now()
     frontmatter = SyntheticFrontmatter(
         id=doc_id,
@@ -146,35 +193,60 @@ def create(request: CreateRequest) -> CreateResult:
         derived_from=parents,
         timestamp=timestamp,
         last_human_touch=timestamp,
+        tags=_stable_unique(request.tags) or None,
+        supersedes=superseded_document.id if superseded_document else None,
+        instructions=request.instructions,
     )
     relative = path.relative_to(root).as_posix()
     index = target_dir / "index.md"
+    try:
+        superseded_content = (
+            _superseded_bytes(root, superseded_document, timestamp)
+            if superseded_document is not None
+            else None
+        )
+    except OSError as error:
+        raise CreateFailure("E_CREATE_IO", str(error), 2) from error
+    except ValueError as error:
+        raise CreateFailure(
+            "E_CREATE_SUPERSEDES_INVALID",
+            f"supersedes target cannot be updated safely: {request.supersedes}: "
+            f"{error}",
+            1,
+        ) from error
     try:
         path.write_text(
             render_synthetic_document(frontmatter, body),
             encoding="utf-8",
             newline="\n",
         )
+        if superseded_document is not None and superseded_content is not None:
+            (root / superseded_document.path).write_bytes(superseded_content)
         index.write_text(
             regenerate_directory_index(root, target_dir),
             encoding="utf-8",
             newline="\n",
         )
+        old_id = superseded_document.id if superseded_document else None
         append_log(
             root,
             LogEntry(
                 at=timestamp,
                 action="created",
                 actor=request.actor,
-                doc_ids=[doc_id],
-                note=relative,
+                doc_ids=[doc_id] + ([old_id] if old_id else []),
+                note=relative + (f" supersedes {old_id}" if old_id else ""),
             ),
         )
     except OSError as error:
         raise CreateFailure("E_CREATE_IO", str(error), 2) from error
+    updated = [index.relative_to(root).as_posix()]
+    if superseded_document is not None:
+        updated.append(superseded_document.path.as_posix())
     return CreateResult(
         id=doc_id,
         path=relative,
+        superseded=superseded_document.id if superseded_document else None,
         created=[relative],
-        updated=[index.relative_to(root).as_posix()],
+        updated=sorted(updated),
     )

@@ -356,3 +356,259 @@ def test_ac18_no_parent_is_usage_failure_without_writes(
     assert result.exit_code == 2
     assert "E_CREATE_NO_PARENTS" in result.stderr
     assert snapshot(initialized_kb) == before
+
+
+def add_synthetic(
+    root: Path,
+    *,
+    relative: str = "synthetic/old.md",
+    doc_id: str = "KB-000001",
+    status: str | None = "current",
+    extra: str = "",
+    body: str = "Old body\n",
+) -> Path:
+    status_line = "" if status is None else f"status: {status}\n"
+    return write_doc(
+        root,
+        relative,
+        f"id: {doc_id}\ntype: spec\ntitle: Old\ndescription: Old.\n"
+        f"{status_line}derived_from:\n  - CHAT-000001\n"
+        "timestamp: 2026-06-02T14:11:08Z\n"
+        "last_human_touch: 2026-06-02T14:11:08Z\n"
+        f"{extra}",
+        body,
+    )
+
+
+def supersede(invoke_create, root: Path, *extra: str):
+    return invoke_create(
+        root,
+        "--type", "spec", "--title", "Replacement", "--description", "Replacement.",
+        "--supersedes", "KB-000001", *extra,
+    )
+
+
+def test_ac19_superseded_id_is_appended_after_explicit_parent(
+    initialized_kb, invoke_create
+) -> None:
+    add_chat(initialized_kb, "CHAT-000002")
+    add_synthetic(initialized_kb)
+    assert supersede(
+        invoke_create, initialized_kb, "--derived-from", "CHAT-000002"
+    ).exit_code == 0
+    assert split_document(initialized_kb / "synthetic/replacement.md")[0]["derived_from"] == [
+        "CHAT-000002", "KB-000001"
+    ]
+
+
+def test_ac20_supersedes_alone_satisfies_parent_rule(
+    initialized_kb, invoke_create
+) -> None:
+    add_chat(initialized_kb)
+    add_synthetic(initialized_kb)
+    assert supersede(invoke_create, initialized_kb).exit_code == 0
+    assert split_document(initialized_kb / "synthetic/replacement.md")[0]["derived_from"] == ["KB-000001"]
+
+
+def test_ac21_explicit_superseded_parent_keeps_its_position_without_duplicate(
+    initialized_kb, invoke_create
+) -> None:
+    add_chat(initialized_kb, "CHAT-000002")
+    add_synthetic(initialized_kb)
+    result = supersede(
+        invoke_create, initialized_kb,
+        "--derived-from", "KB-000001", "--derived-from", "CHAT-000002",
+    )
+    assert result.exit_code == 0
+    assert split_document(initialized_kb / "synthetic/replacement.md")[0]["derived_from"] == [
+        "KB-000001", "CHAT-000002"
+    ]
+
+
+def test_ac22_supersession_changes_exactly_three_values_and_preserves_bytes(
+    initialized_kb, invoke_create
+) -> None:
+    add_chat(initialized_kb)
+    target = write_doc(
+        initialized_kb,
+        "synthetic/old.md",
+        "unknown: {style: flow}\ntitle: Old\nstatus: 'current' # lifecycle\n"
+        "type: spec\nid: KB-000001\nlast_human_touch: '2026-06-02T14:11:08Z'\n"
+        "description: Old.\ntimestamp: 2026-06-02T14:11:08Z\n"
+        "derived_from: [CHAT-000001]\n",
+        "Old body  \n",
+        newline="\r\n",
+    )
+    before = target.read_bytes()
+    result = supersede(invoke_create, initialized_kb)
+    after = target.read_bytes()
+    _, _, new_yaml = split_document(initialized_kb / "synthetic/replacement.md")
+    timestamp = re.search(rf"(?m)^timestamp: ({TIMESTAMP})$", new_yaml)
+    assert result.exit_code == 0
+    assert timestamp is not None
+    updated_frontmatter, _, updated_yaml = split_document(target)
+    assert updated_frontmatter["status"] == "superseded"
+    target_timestamp = re.search(
+        rf"(?m)^timestamp: '?({TIMESTAMP})'?(?:\r)?$", updated_yaml
+    )
+    target_touched = re.search(
+        rf"(?m)^last_human_touch: '?({TIMESTAMP})'?(?:\r)?$", updated_yaml
+    )
+    assert target_timestamp is not None and target_touched is not None
+    assert target_timestamp.group(1) == timestamp.group(1)
+    assert target_touched.group(1) == timestamp.group(1)
+    assert b"status: 'superseded' # lifecycle" in after
+    assert timestamp.group(1).encode() in after
+    restored = after.replace(b"superseded", b"current")
+    restored = restored.replace(timestamp.group(1).encode(), b"2026-06-02T14:11:08Z")
+    assert restored == before
+
+
+def test_ac23_new_document_and_log_record_supersession(
+    tmp_path, initialized_kb, invoke_create
+) -> None:
+    add_chat(initialized_kb, "CHAT-000040")
+    write_doc(
+        initialized_kb,
+        "synthetic/webhook-retry-policy.md",
+        "id: KB-000031\ntype: spec\ntitle: Webhook Retry Policy\n"
+        "description: Defines retry and backoff behavior for outbound webhooks.\n"
+        "status: current\nderived_from:\n  - CHAT-000040\n"
+        "timestamp: 2026-06-02T14:11:08Z\n"
+        "last_human_touch: 2026-06-02T14:11:08Z\n",
+    )
+    add_synthetic(
+        initialized_kb,
+        relative="synthetic/highest.md",
+        doc_id="KB-000041",
+    )
+    draft = tmp_path / "draft.md"
+    draft.write_text("Replacement body\n", encoding="utf-8")
+    result = invoke_create(
+        initialized_kb,
+        "--type", "spec",
+        "--title", "Webhook Retry Policy",
+        "--description", "Defines retry and backoff behavior for outbound webhooks.",
+        "--derived-from", "CHAT-000040",
+        "--supersedes", "KB-000031",
+        "--status", "current",
+        "--tag", "api",
+        "--tag", "reliability",
+        "--instructions", "Keep the examples runnable.",
+        "--body-file", str(draft),
+    )
+    replacement = initialized_kb / "synthetic/webhook-retry-policy-kb-000042.md"
+    frontmatter = split_document(replacement)[0]
+    assert result.exit_code == 0
+    assert frontmatter["supersedes"] == "KB-000031"
+    assert split_document(
+        initialized_kb / "synthetic/webhook-retry-policy.md"
+    )[0]["status"] == "superseded"
+    assert (initialized_kb / "log.md").read_text(encoding="utf-8").splitlines()[-1].endswith(
+        "| KB-000042,KB-000031 | synthetic/webhook-retry-policy-kb-000042.md supersedes KB-000031"
+    )
+
+
+def test_ac24_unknown_supersedes_ref_is_finding_without_writes(
+    initialized_kb, invoke_create
+) -> None:
+    before = snapshot(initialized_kb)
+    result = invoke_create(
+        initialized_kb,
+        "--type", "spec", "--title", "Replacement", "--description", "Replacement.",
+        "--supersedes", "KB-999999",
+    )
+    assert result.exit_code == 1
+    assert "E_CREATE_SUPERSEDES_UNRESOLVED" in result.stderr
+    assert snapshot(initialized_kb) == before
+
+
+def test_ac25_raw_supersedes_target_is_invalid(
+    initialized_kb, invoke_create
+) -> None:
+    write_doc(initialized_kb, "raw/sources/source.md", "id: RAW-000001\ntype: raw-source\n")
+    before = snapshot(initialized_kb)
+    result = invoke_create(
+        initialized_kb,
+        "--type", "spec", "--title", "Replacement", "--description", "Replacement.",
+        "--supersedes", "RAW-000001",
+    )
+    assert result.exit_code == 1
+    assert "E_CREATE_SUPERSEDES_INVALID" in result.stderr
+    assert snapshot(initialized_kb) == before
+
+
+def test_ac26_non_live_or_missing_supersedes_status_is_invalid(
+    initialized_kb, invoke_create
+) -> None:
+    add_chat(initialized_kb)
+    for index, status in enumerate(["superseded", "retired", None], start=1):
+        target = add_synthetic(initialized_kb, status=status)
+        before = snapshot(initialized_kb)
+        result = supersede(invoke_create, initialized_kb)
+        assert result.exit_code == 1
+        assert "E_CREATE_SUPERSEDES_INVALID" in result.stderr
+        assert snapshot(initialized_kb) == before
+        target.unlink()
+
+
+def test_ac27_superseded_directory_index_is_not_regenerated(
+    initialized_kb, invoke_create
+) -> None:
+    add_chat(initialized_kb)
+    archive = initialized_kb / "synthetic/archive"
+    archive.mkdir()
+    (archive / "index.md").write_text(
+        "---\ntype: index\ndescription: Archive.\n---\n# Archive\n\ncustom body\n",
+        encoding="utf-8",
+    )
+    target = add_synthetic(initialized_kb, relative="synthetic/archive/old.md")
+    index_before = (archive / "index.md").read_bytes()
+    result = supersede(invoke_create, initialized_kb)
+    assert result.exit_code == 0
+    assert "updated  synthetic/archive/old.md" in result.stdout
+    assert target.read_text(encoding="utf-8").find("status: superseded") >= 0
+    assert (archive / "index.md").read_bytes() == index_before
+
+
+def test_supersedes_preparation_oserror_is_structured_without_writes(
+    monkeypatch, initialized_kb, invoke_create
+) -> None:
+    add_chat(initialized_kb)
+    target = add_synthetic(initialized_kb)
+    before = snapshot(initialized_kb)
+    read_bytes = Path.read_bytes
+
+    def fail_target(path: Path) -> bytes:
+        if path == target:
+            raise OSError("target became unreadable")
+        return read_bytes(path)
+
+    with monkeypatch.context() as context:
+        context.setattr(Path, "read_bytes", fail_target)
+        result = supersede(invoke_create, initialized_kb)
+
+    assert result.exit_code == 2
+    assert "E_CREATE_IO" in result.stderr
+    assert "target became unreadable" in result.stderr
+    assert snapshot(initialized_kb) == before
+
+
+def test_supersedes_alias_lifecycle_is_structured_invalid_without_writes(
+    initialized_kb, invoke_create
+) -> None:
+    add_chat(initialized_kb)
+    write_doc(
+        initialized_kb,
+        "synthetic/old.md",
+        "lifecycle: &lifecycle current\nid: KB-000001\ntype: spec\ntitle: Old\n"
+        "description: Old.\nstatus: *lifecycle\nderived_from:\n  - CHAT-000001\n"
+        "timestamp: 2026-06-02T14:11:08Z\n"
+        "last_human_touch: 2026-06-02T14:11:08Z\n",
+    )
+    before = snapshot(initialized_kb)
+    result = supersede(invoke_create, initialized_kb)
+    assert result.exit_code == 1
+    assert "E_CREATE_SUPERSEDES_INVALID" in result.stderr
+    assert "not directly editable" in result.stderr
+    assert snapshot(initialized_kb) == before
