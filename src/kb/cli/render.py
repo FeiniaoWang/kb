@@ -1,3 +1,5 @@
+import json
+
 from kb.core.housekeeping import InitFailure, InitResult
 
 
@@ -13,5 +15,25 @@ def render_init_text(result: InitResult) -> str:
     return "\n".join(lines)
 
 
+def render_init_json(result: InitResult) -> str:
+    return json.dumps(
+        {
+            "ok": True,
+            "root": str(result.root),
+            "created": result.created,
+            "overwritten": result.overwritten,
+            "skipped": result.skipped,
+        },
+        ensure_ascii=False,
+    )
+
+
 def render_error_text(error: InitFailure) -> str:
     return f"{error.code}: {error.message}"
+
+
+def render_error_json(error: InitFailure) -> str:
+    return json.dumps(
+        {"error": {"code": error.code, "message": error.message}},
+        ensure_ascii=False,
+    )

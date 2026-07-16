@@ -393,3 +393,91 @@ def test_init_reports_first_non_directory_manifest_parent(tmp_path, invoke_init)
         f"E_INIT_IO: manifest path parent is not a directory: {blocker}"
     )
     assert blocker.read_text(encoding="utf-8") == "occupied"
+
+
+def test_ac25_json_success_has_exact_sorted_schema(tmp_path, invoke_init) -> None:
+    result = invoke_init(tmp_path, "--json")
+    payload = json.loads(result.stdout)
+    assert result.exit_code == 0
+    assert result.stdout == json.dumps(payload, ensure_ascii=False) + "\n"
+    assert set(payload) == {"ok", "root", "created", "overwritten", "skipped"}
+    assert payload["ok"] is True
+    assert payload["root"] == str(tmp_path.resolve())
+    assert payload["created"] == sorted(expected_manifest("unused"))
+    assert payload["overwritten"] == []
+    assert payload["skipped"] == []
+    assert set(payload["created"] + payload["overwritten"] + payload["skipped"]) == set(
+        expected_manifest("unused")
+    )
+
+
+def test_ac26_json_not_directory_error_is_exact_envelope(tmp_path, invoke_init) -> None:
+    target = tmp_path / "target"
+    target.write_text("occupied", encoding="utf-8")
+    result = invoke_init(tmp_path, "--json", "--root", str(target))
+    expected = {
+        "error": {
+            "code": "E_INIT_NOT_DIR",
+            "message": f"target exists and is not a directory: {target.resolve()}",
+        }
+    }
+    assert result.exit_code == 2
+    assert json.loads(result.stdout) == expected
+    assert result.stdout == json.dumps(expected, ensure_ascii=False) + "\n"
+    assert result.stderr == ""
+
+
+def test_ac27_text_error_uses_stderr_only(tmp_path, invoke_init) -> None:
+    target = tmp_path / "target"
+    target.write_text("occupied", encoding="utf-8")
+    result = invoke_init(tmp_path, "--root", str(target))
+    assert result.exit_code == 2
+    assert result.stdout == ""
+    assert "E_INIT_NOT_DIR" in result.stderr
+
+
+def test_ac28_help_contains_normative_copy_and_examples(runner) -> None:
+    result = runner.invoke(app, ["init", "--help"])
+    normalized = " ".join(result.stdout.split())
+    required = [
+        "Scaffold a new knowledge base, or repair an existing one.",
+        "Run this from the folder you want to become the KB root; it scaffolds the current directory by default (pass --root to target a different folder). Creates the standard KB layout (raw/, synthetic/, governance/), the root index.md and log.md, and kb-config.json — the file at the KB root that holds project configuration and marks the root for every other command. Safe to re-run: existing files are never touched; --force restores pristine kb-config.json and index.md files, but documents and log.md are never overwritten. Does not touch Git — putting the KB under version control is up to you.",
+        "Folder to become the KB root. Resolved to an absolute path and created if it does not exist. [default: current directory]",
+        "Restore pristine kb-config.json and index.md files. Documents and log.md are never touched.",
+        "Emit results as JSON.",
+        "Examples:",
+        "kb init Scaffold a KB in the current directory (the KB root)",
+        "kb init --root ~/team-kb Scaffold a KB at the given path",
+        "kb init --force Restore pristine kb-config.json and index.md files",
+        "kb init --json Machine-readable scaffold output",
+    ]
+    assert result.exit_code == 0
+    for text in required:
+        assert " ".join(text.split()) in normalized
+    lowered = normalized.lower()
+    assert "git init" not in lowered
+    assert "git status" not in lowered
+    assert "git add" not in lowered
+    assert "git commit" not in lowered
+
+
+def test_ac29_init_is_git_agnostic(tmp_path, invoke_init, monkeypatch) -> None:
+    def forbidden(*args, **kwargs):
+        raise AssertionError(f"subprocess invocation is forbidden: {args!r} {kwargs!r}")
+
+    monkeypatch.setattr(subprocess, "run", forbidden)
+    monkeypatch.setattr(subprocess, "Popen", forbidden)
+    monkeypatch.setattr(subprocess, "check_call", forbidden)
+    monkeypatch.setattr(subprocess, "check_output", forbidden)
+    result = invoke_init(tmp_path, "--json")
+    payload = json.loads(result.stdout)
+    assert result.exit_code == 0
+    assert not (tmp_path / ".git").exists()
+    assert "git" not in payload
+
+
+@pytest.mark.xfail(reason="kb validate is not implemented yet", strict=True)
+def test_ac30_fresh_scaffold_is_born_valid(tmp_path, invoke_init, runner) -> None:
+    assert invoke_init(tmp_path).exit_code == 0
+    result = runner.invoke(app, ["validate", "--kb", str(tmp_path)])
+    assert result.exit_code == 0
