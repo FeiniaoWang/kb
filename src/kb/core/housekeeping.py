@@ -33,10 +33,25 @@ class InitFailure(Exception):
         self.message = message
 
 
-def _io_failure(error: OSError, fallback: Path) -> InitFailure:
-    offending = Path(error.filename).resolve() if error.filename else fallback.resolve()
+def _io_failure(error: OSError, fallback: Path | None) -> InitFailure:
     os_message = error.strerror or str(error)
+    source = Path(error.filename) if error.filename else fallback
+    if source is None:
+        return InitFailure("E_INIT_IO", os_message)
+    try:
+        offending = source.resolve()
+    except OSError:
+        offending = source
     return InitFailure("E_INIT_IO", f"{offending}: {os_message}")
+
+
+def _first_non_directory_parent(root: Path, target: Path) -> Path | None:
+    current = root
+    for part in target.relative_to(root).parts[:-1]:
+        current /= part
+        if current.exists() and not current.is_dir():
+            return current
+    return None
 
 
 def format_log_entry(entry: LogEntry) -> str:
@@ -241,9 +256,10 @@ def _ensure_initialized_log(path: Path, timestamp: str) -> None:
         stream.write(f"{separator}{entry}\n")
 
 
-def init_kb(root: Path, *, force: bool = False) -> InitResult:
+def init_kb(root: Path | None, *, force: bool = False) -> InitResult:
     try:
-        resolved = root.expanduser().resolve()
+        requested = root if root is not None else Path.cwd()
+        resolved = requested.expanduser().resolve()
     except OSError as error:
         raise _io_failure(error, root) from error
     if resolved.exists() and not resolved.is_dir():
@@ -261,6 +277,12 @@ def init_kb(root: Path, *, force: bool = False) -> InitResult:
     for relative_path, entry in sorted(_manifest(timestamp).items()):
         target = resolved / relative_path
         try:
+            blocking_parent = _first_non_directory_parent(resolved, target)
+            if blocking_parent is not None:
+                raise InitFailure(
+                    "E_INIT_IO",
+                    f"manifest path parent is not a directory: {blocking_parent}",
+                )
             target.parent.mkdir(parents=True, exist_ok=True)
             if target.exists() and not target.is_file():
                 raise InitFailure("E_INIT_IO", f"manifest path is not a file: {target}")

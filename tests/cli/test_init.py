@@ -362,3 +362,34 @@ def test_ac24_unknown_option_is_usage_error_without_files(tmp_path, invoke_init)
     assert "No such option: --bogus-flag" in result.stderr
     assert result.stdout == ""
     assert files_under(tmp_path) == set()
+
+
+def test_init_default_cwd_failure_reports_typed_io_error(
+    tmp_path, runner, monkeypatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+
+    def raise_cwd_failure(cls) -> Path:
+        raise FileNotFoundError(2, "No such file or directory")
+
+    monkeypatch.setattr(Path, "cwd", classmethod(raise_cwd_failure))
+    result = runner.invoke(app, ["init"])
+
+    assert result.exit_code == 2
+    assert result.stdout == ""
+    assert result.stderr.strip() == "E_INIT_IO: No such file or directory"
+    assert files_under(tmp_path) == set()
+
+
+def test_init_reports_first_non_directory_manifest_parent(tmp_path, invoke_init) -> None:
+    blocker = tmp_path / "raw"
+    blocker.write_text("occupied", encoding="utf-8")
+
+    result = invoke_init(tmp_path)
+
+    assert result.exit_code == 2
+    assert result.stdout == ""
+    assert result.stderr.strip() == (
+        f"E_INIT_IO: manifest path parent is not a directory: {blocker}"
+    )
+    assert blocker.read_text(encoding="utf-8") == "occupied"

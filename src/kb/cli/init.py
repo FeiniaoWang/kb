@@ -12,7 +12,7 @@ def init_command(
     force: Annotated[bool, typer.Option("--force")] = False,
 ) -> None:
     try:
-        result = init_kb(root if root is not None else Path.cwd(), force=force)
+        result = init_kb(root, force=force)
     except InitFailure as error:
         typer.echo(render_error_text(error), err=True)
         raise typer.Exit(code=2) from error
