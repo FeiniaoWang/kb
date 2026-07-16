@@ -951,6 +951,97 @@ def test_ac48_missing_log_is_recreated_without_initialized_entry(
     assert b"| initialized |" not in content
 
 
+def test_ac49_success_json_has_exact_fields_and_sorted_paths(
+    initialized_kb, invoke_create
+) -> None:
+    add_chat(initialized_kb)
+    add_synthetic(initialized_kb)
+    superseded = supersede(invoke_create, initialized_kb, "--json")
+    payload = json.loads(superseded.stdout)
+    assert superseded.exit_code == 0
+    assert set(payload) == {"ok", "id", "path", "superseded", "created", "updated"}
+    assert payload == {
+        "ok": True,
+        "id": "KB-000002",
+        "path": "synthetic/replacement.md",
+        "superseded": "KB-000001",
+        "created": ["synthetic/replacement.md"],
+        "updated": ["synthetic/index.md", "synthetic/old.md"],
+    }
+    plain_root = initialized_kb.parent / "plain-kb"
+    from typer.testing import CliRunner
+    from kb.cli.app import app
+    assert CliRunner().invoke(app, ["init", "--root", str(plain_root)]).exit_code == 0
+    add_chat(plain_root)
+    plain = invoke_valid(invoke_create, plain_root, "--json")
+    assert json.loads(plain.stdout)["superseded"] is None
+
+
+def test_ac50_error_json_is_exact_shared_envelope(
+    initialized_kb, invoke_create
+) -> None:
+    result = invoke_create(
+        initialized_kb,
+        "--type", "spec", "--title", "Bad", "--description", "Bad.",
+        "--derived-from", "KB-999999", "--json",
+    )
+    payload = json.loads(result.stdout)
+    assert result.exit_code == 1
+    assert set(payload) == {"error"}
+    assert set(payload["error"]) == {"code", "message"}
+    assert payload["error"]["code"] == "E_CREATE_PARENT_UNRESOLVED"
+    assert "KB-999999" in payload["error"]["message"]
+    assert result.stderr == ""
+
+
+def test_ac51_help_contains_all_normative_create_strings(runner) -> None:
+    result = runner.invoke(__import__("kb.cli.app", fromlist=["app"]).app, ["create", "--help"])
+    assert result.exit_code == 0
+    required = [
+        "Create a synthetic document in the knowledge base.",
+        "The deterministic write path for synthetic/ — the counterpart to kb ingest for raw evidence.",
+        "Allocates the next sequential id, emits the full synthetic frontmatter, and files one Markdown document under synthetic/.",
+        "At least one parent is required: every synthetic document derives from prior evidence, named via --derived-from (--supersedes also counts as a parent).",
+        "--supersedes marks the replaced document superseded in the same atomic write.",
+        "Updates the affected index.md listings and appends a created entry to log.md.",
+        "Agents never hand-write synthetic files — id allocation and frontmatter stay CLI-authoritative.",
+        "Does not touch Git.",
+        "Synthetic document type (open vocabulary; reserved types rejected).",
+        "Document title; also drives the target filename.",
+        "One-to-two-sentence summary, shown in index.md listings.",
+        "Parent document (id or KB-relative path); repeatable. At least one parent is required.",
+        "Document this one replaces; marked superseded in the same write and counted as a parent.",
+        "Lifecycle status at birth: draft or current. [default: draft]",
+        "Tag for the tags frontmatter list; repeatable (a tag missing from the vocabulary warns).",
+        "Standing guidance for the document's consumers, stored in the instructions field.",
+        "File to read the body from, or - for stdin. [default: empty body]",
+        "Subdirectory under synthetic/ (e.g. specs → synthetic/specs/). Created with its index.md if missing.",
+        "Actor recorded in the log entry. [default: kb-cli]",
+        "KB root. [default: discovered upward from the current directory]",
+        "Emit results as JSON.",
+        "kb create --type spec --title \"Retry Policy\" --description \"Retry rules.\" --derived-from CHAT-000027 --body-file draft.md    Draft from a body file",
+        "kb create --type outcome --title \"Q3 Outcomes\" --description \"Q3 results.\" --derived-from CHAT-000012 --derived-from RAW-000004 --status current    Accepted at creation",
+        "kb create --type spec --title \"Retry Policy\" --description \"Retry rules.\" --supersedes KB-000031 --derived-from CHAT-000040 --body-file -    Replace KB-000031, body from stdin",
+        "kb create --type note --title \"Cache Sizing\" --description \"Sizing note.\" --derived-from RAW-000004 --dest notes    File under synthetic/notes/",
+    ]
+    for text in required:
+        assert text in result.stdout
+
+
+def test_ac52_create_never_invokes_git_or_creates_git_directory(
+    initialized_kb, invoke_create, monkeypatch
+) -> None:
+    add_chat(initialized_kb)
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError(f"subprocess invoked: {args!r} {kwargs!r}")
+
+    monkeypatch.setattr("subprocess.run", forbidden)
+    result = invoke_valid(invoke_create, initialized_kb)
+    assert result.exit_code == 0
+    assert not (initialized_kb / ".git").exists()
+
+
 def test_destination_with_yaml_sensitive_text_writes_parseable_indexes(
     initialized_kb, invoke_create
 ) -> None:
