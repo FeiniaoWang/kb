@@ -1,6 +1,7 @@
 import json
 from typing import Protocol
 
+from kb.core.create import CreateResult
 from kb.core.housekeeping import InitFailure, InitResult
 from kb.core.ingest import IngestResult
 
@@ -51,6 +52,28 @@ def render_ingest_json(result: IngestResult) -> str:
             "original": result.original,
             "created": result.created,
             "updated": result.updated,
+        },
+        ensure_ascii=False,
+    )
+
+
+def render_create_text(result: CreateResult) -> str:
+    changes = [(path, "created") for path in result.created]
+    changes.extend((path, "updated") for path in result.updated)
+    lines = [f"{action}  {path}" for path, action in sorted(changes)]
+    lines.append(f"created {result.id} as {result.path}")
+    return "\n".join(lines)
+
+
+def render_create_json(result: CreateResult) -> str:
+    return json.dumps(
+        {
+            "ok": True,
+            "id": result.id,
+            "path": result.path,
+            "superseded": result.superseded,
+            "created": sorted(result.created),
+            "updated": sorted(result.updated),
         },
         ensure_ascii=False,
     )

@@ -1,5 +1,6 @@
 import typer
 
+from kb.cli.create import CREATE_DESCRIPTION, CREATE_EXAMPLES, create_command
 from kb.cli.ingest import INGEST_DESCRIPTION, INGEST_EXAMPLES, ingest_command
 from kb.cli.init import INIT_DESCRIPTION, INIT_EXAMPLES, init_command
 
@@ -23,3 +24,9 @@ app.command(
     help=INGEST_DESCRIPTION.replace("\n\n", "\n\n\b\n", 1),
     epilog=INGEST_EXAMPLES,
 )(ingest_command)
+
+app.command(
+    name="create",
+    help=CREATE_DESCRIPTION.replace("\n\n", "\n\n\b\n", 1),
+    epilog=CREATE_EXAMPLES,
+)(create_command)
