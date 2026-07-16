@@ -158,6 +158,28 @@ def test_ac10_three_runs_keep_one_initialized_entry(tmp_path, invoke_init) -> No
     assert len(LOG_PATTERN.findall((tmp_path / "log.md").read_text(encoding="utf-8"))) == 1
 
 
+def test_log_repair_ignores_initialized_marker_in_other_action_note(
+    tmp_path, invoke_init
+) -> None:
+    assert invoke_init(tmp_path).exit_code == 0
+    log_path = tmp_path / "log.md"
+    misleading_entry = (
+        "- 2026-07-15T12:00:00Z | ingested | kb-cli | - | "
+        "note includes | initialized | marker"
+    )
+    log_path.write_text(
+        LOG_PATTERN.sub(misleading_entry, log_path.read_text(encoding="utf-8")),
+        encoding="utf-8",
+    )
+
+    result = invoke_init(tmp_path)
+
+    repaired = log_path.read_text(encoding="utf-8")
+    assert result.exit_code == 0
+    assert misleading_entry in repaired
+    assert len(LOG_PATTERN.findall(repaired)) == 1
+
+
 def test_ac11_partial_scaffold_recreates_only_missing_entries(tmp_path, invoke_init) -> None:
     assert invoke_init(tmp_path).exit_code == 0
     (tmp_path / "log.md").unlink()

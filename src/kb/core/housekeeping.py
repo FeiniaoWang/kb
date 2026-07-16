@@ -205,8 +205,15 @@ def _manifest(timestamp: str) -> dict[str, ScaffoldEntry]:
 
 def _ensure_initialized_log(path: Path, timestamp: str) -> None:
     existing = path.read_text(encoding="utf-8")
-    if " | initialized | " in existing:
-        return
+    for line in existing.splitlines():
+        fields = line.split(" | ", 4)
+        is_initialized = (
+            len(fields) == 5
+            and fields[0].startswith("- ")
+            and fields[1] == "initialized"
+        )
+        if is_initialized:
+            return
     entry = format_log_entry(
         LogEntry(
             at=timestamp,
