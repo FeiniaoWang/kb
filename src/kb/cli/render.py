@@ -1,6 +1,13 @@
 import json
+from typing import Protocol
 
 from kb.core.housekeeping import InitFailure, InitResult
+from kb.core.ingest import IngestResult
+
+
+class CommandError(Protocol):
+    code: str
+    message: str
 
 
 def render_init_text(result: InitResult) -> str:
@@ -28,11 +35,32 @@ def render_init_json(result: InitResult) -> str:
     )
 
 
-def render_error_text(error: InitFailure) -> str:
+def render_ingest_text(result: IngestResult) -> str:
+    lines = [f"created  {path}" for path in sorted(result.created)]
+    lines.extend(f"updated  {path}" for path in sorted(result.updated))
+    lines.append(f"ingested {result.id} as {result.path}")
+    return "\n".join(lines)
+
+
+def render_ingest_json(result: IngestResult) -> str:
+    return json.dumps(
+        {
+            "ok": True,
+            "id": result.id,
+            "path": result.path,
+            "original": result.original,
+            "created": result.created,
+            "updated": result.updated,
+        },
+        ensure_ascii=False,
+    )
+
+
+def render_error_text(error: CommandError) -> str:
     return f"{error.code}: {error.message}"
 
 
-def render_error_json(error: InitFailure) -> str:
+def render_error_json(error: CommandError) -> str:
     return json.dumps(
         {"error": {"code": error.code, "message": error.message}},
         ensure_ascii=False,

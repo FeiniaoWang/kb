@@ -23,6 +23,27 @@ def invoke_init(runner: CliRunner, monkeypatch) -> Callable[..., object]:
     return invoke
 
 
+@pytest.fixture
+def initialized_kb(tmp_path: Path, runner: CliRunner) -> Path:
+    root = tmp_path / "kb"
+    result = runner.invoke(app, ["init", "--root", str(root)])
+    assert result.exit_code == 0
+    return root
+
+
+@pytest.fixture
+def invoke_ingest(runner: CliRunner, monkeypatch) -> Callable[..., object]:
+    def invoke(
+        cwd: Path,
+        *arguments: str,
+        input: str | bytes | None = None,
+    ):
+        monkeypatch.chdir(cwd)
+        return runner.invoke(app, ["ingest", *arguments], input=input)
+
+    return invoke
+
+
 def expected_index(title: str, description: str, listing: str = "") -> str:
     content = (
         f"---\ntype: index\ndescription: {description}\n---\n"

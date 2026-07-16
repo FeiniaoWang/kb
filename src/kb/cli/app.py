@@ -1,5 +1,6 @@
 import typer
 
+from kb.cli.ingest import INGEST_DESCRIPTION, INGEST_EXAMPLES, ingest_command
 from kb.cli.init import INIT_DESCRIPTION, INIT_EXAMPLES, init_command
 
 
@@ -16,3 +17,9 @@ app.command(
     help=INIT_DESCRIPTION.replace("\n\n", "\n\n\b\n", 1),
     epilog=INIT_EXAMPLES,
 )(init_command)
+
+app.command(
+    name="ingest",
+    help=INGEST_DESCRIPTION.replace("\n\n", "\n\n\b\n", 1),
+    epilog=INGEST_EXAMPLES,
+)(ingest_command)
