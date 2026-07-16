@@ -931,14 +931,24 @@ def test_ac48_missing_log_is_recreated_without_initialized_entry(
     add_chat(initialized_kb)
     (initialized_kb / "log.md").unlink()
     result = invoke_valid(invoke_create, initialized_kb)
-    text = (initialized_kb / "log.md").read_text(encoding="utf-8")
+    content = (initialized_kb / "log.md").read_bytes()
+    scaffold = (
+        "---\ntype: log\n---\n"
+        "<!-- KB history — append-only; written by `kb log`. Format: "
+        "- <UTC ISO> | <action> | <actor> | <ids or -> | <note> -->\n"
+        "# Knowledge Base Log\n\n"
+    ).encode("utf-8")
     assert result.exit_code == 0
-    assert text.startswith(
-        "---\ntype: log\n---\n<!-- KB history — append-only; written by `kb log`."
+    assert content.startswith(scaffold)
+    row = content[len(scaffold) :].decode("utf-8")
+    match = re.fullmatch(
+        rf"- ({TIMESTAMP}) \| created \| kb-cli \| KB-000001 \| "
+        r"synthetic/webhook-retry-policy\.md\n",
+        row,
     )
-    assert "# Knowledge Base Log\n\n" in text
-    assert "| initialized |" not in text
-    assert text.count("| created |") == 1
+    assert match is not None
+    datetime.fromisoformat(match.group(1).replace("Z", "+00:00"))
+    assert b"| initialized |" not in content
 
 
 def test_destination_with_yaml_sensitive_text_writes_parseable_indexes(
