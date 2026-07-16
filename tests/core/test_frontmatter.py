@@ -88,3 +88,79 @@ last_human_touch: 2026-07-16T10:00:00Z\r
 ---\r
 Body  \r
 """
+
+
+def test_replace_frontmatter_scalars_preserves_block_headers_and_boundaries() -> None:
+    source = b"""---\r
+status: |-\r
+  current\r
+timestamp: >-\r
+  2026-06-02T14:11:08Z\r
+last_human_touch: |-\r
+  2026-06-02T14:11:08Z\r
+unknown: {style: flow}\r
+---\r
+Body  \r
+"""
+    changed = replace_frontmatter_scalars(
+        source,
+        {
+            "status": "superseded",
+            "timestamp": "2026-07-16T10:00:00Z",
+            "last_human_touch": "2026-07-16T10:00:00Z",
+        },
+    )
+    assert changed == b"""---\r
+status: |-\r
+  superseded\r
+timestamp: >-\r
+  2026-07-16T10:00:00Z\r
+last_human_touch: |-\r
+  2026-07-16T10:00:00Z\r
+unknown: {style: flow}\r
+---\r
+Body  \r
+"""
+    parsed = yaml.safe_load(changed.split(b"---", 2)[1])
+    assert parsed["status"] == "superseded"
+    assert parsed["timestamp"] == "2026-07-16T10:00:00Z"
+    assert parsed["last_human_touch"] == "2026-07-16T10:00:00Z"
+
+
+def test_replace_frontmatter_scalars_preserves_tags_anchors_and_aliases() -> None:
+    source = b"""---
+status: &lifecycle !!str 'current' # lifecycle
+status_alias: *lifecycle
+timestamp: !!str &created "2026-06-02T14:11:08Z"
+timestamp_alias: *created
+last_human_touch: &touch !!str 2026-06-02T14:11:08Z
+touch_alias: *touch
+---
+Body
+"""
+    changed = replace_frontmatter_scalars(
+        source,
+        {
+            "status": "superseded",
+            "timestamp": "2026-07-16T10:00:00Z",
+            "last_human_touch": "2026-07-16T10:00:00Z",
+        },
+    )
+    assert changed == b"""---
+status: &lifecycle !!str 'superseded' # lifecycle
+status_alias: *lifecycle
+timestamp: !!str &created "2026-07-16T10:00:00Z"
+timestamp_alias: *created
+last_human_touch: &touch !!str 2026-07-16T10:00:00Z
+touch_alias: *touch
+---
+Body
+"""
+    parsed = yaml.safe_load(changed.split(b"---", 2)[1])
+    assert parsed["status"] == parsed["status_alias"] == "superseded"
+    assert parsed["timestamp"] == parsed["timestamp_alias"] == (
+        "2026-07-16T10:00:00Z"
+    )
+    assert parsed["last_human_touch"] == parsed["touch_alias"] == (
+        "2026-07-16T10:00:00Z"
+    )
