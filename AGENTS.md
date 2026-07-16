@@ -13,29 +13,22 @@ This repo builds the **`kb` CLI**: the deterministic toolset of the KB Skill Sui
 
 Precedence when documents disagree: command spec > 00-shared.md > master design > PRD. If you must deviate from a spec, update the spec in the same change and say so — specs are normative, not descriptive.
 
-## Package layout (fixed — do not restructure)
+## Package layout
+
+The top-level layout is fixed — do not restructure:
 
 ```
 kb/                       (this repo; package name `kb`, console script `kb`)
 ├── pyproject.toml        entry point: kb = "kb.cli.app:app"
 ├── src/kb/
-│   ├── core/
-│   │   ├── model.py      all data models (Document, Frontmatter, KB, Config, …) built with Pydantic; id patterns
-│   │   ├── scan.py       repo discovery + frontmatter scan → KB object
-│   │   ├── query.py      filter / search / frontmatter extraction
-│   │   ├── graph.py      links, transitive closure, depth, cycle detection
-│   │   ├── validate.py   all FM/DG/LS mechanical checks → list of Findings
-│   │   ├── ids.py        id allocation (max+1 per prefix), id↔path resolution
-│   │   ├── ingest.py     adapters (file/stdin/clipboard) → raw/ documents
-│   │   ├── housekeeping.py  index.md generation, log.md append, scaffold
-│   │   └── mv.py         move/rename + body-link rewriting
-│   └── cli/
-│       ├── app.py        Typer app; one thin command module per group
-│       └── render.py     text and JSON renderers for core's return types
+│   ├── core/             pure logic: scan, query, graph, validate, ids, ingest, models, …
+│   └── cli/              Typer app + renderers; thin layer over core
 └── tests/                pytest; fixtures build throwaway KBs in tmp_path
 ```
 
-Layering rule: `core/` is pure logic — no Typer, no printing, no `sys.exit`. `cli/` only parses arguments, calls core, renders output, and maps results to exit codes. New modules require updating the master design spec first.
+The internal file/folder structure **within** `src/kb/core/` and `src/kb/cli/` is **not fixed** — organize modules however makes the most sense as the implementation grows (split, merge, or rename files freely).
+
+Layering rule: `core/` is pure logic — no Typer, no printing, no `sys.exit`. `cli/` only parses arguments, calls core, renders output, and maps results to exit codes. This layering boundary is normative; the module breakdown inside each layer is a developer decision.
 
 ## Invariants (never violate)
 
