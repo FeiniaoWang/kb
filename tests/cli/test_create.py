@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import stat
 from datetime import datetime
 from pathlib import Path
 
@@ -775,6 +776,169 @@ def test_ac38_absolute_or_parent_dest_is_rejected_without_writes(
     assert result.exit_code == 2
     assert "E_CREATE_DEST_INVALID" in result.stderr and dest in result.stderr
     assert snapshot(initialized_kb) == before
+
+
+def test_ac39_missing_or_directory_body_file_is_environment_error(
+    tmp_path, initialized_kb, invoke_create
+) -> None:
+    add_chat(initialized_kb)
+    before = snapshot(initialized_kb)
+    missing = invoke_valid(
+        invoke_create, initialized_kb, "--body-file", str(tmp_path / "missing.md")
+    )
+    directory = invoke_valid(
+        invoke_create, initialized_kb, "--body-file", str(tmp_path)
+    )
+    assert missing.exit_code == directory.exit_code == 2
+    assert "E_CREATE_BODY_NOT_FOUND" in missing.stderr
+    assert "E_CREATE_BODY_NOT_FOUND" in directory.stderr
+    assert snapshot(initialized_kb) == before
+
+
+def test_ac40_non_utf8_file_or_stdin_is_finding_without_writes(
+    tmp_path, initialized_kb, invoke_create
+) -> None:
+    add_chat(initialized_kb)
+    body = tmp_path / "binary.md"
+    body.write_bytes(b"\xff")
+    before = snapshot(initialized_kb)
+    file_result = invoke_valid(
+        invoke_create, initialized_kb, "--body-file", str(body)
+    )
+    stdin_result = invoke_valid(
+        invoke_create, initialized_kb, "--body-file", "-", input=b"\xff"
+    )
+    assert file_result.exit_code == stdin_result.exit_code == 1
+    assert "E_CREATE_BODY_NOT_TEXT" in file_result.stderr
+    assert "E_CREATE_BODY_NOT_TEXT" in stdin_result.stderr
+    assert snapshot(initialized_kb) == before
+
+
+def test_ac41_discovered_or_explicit_configless_root_reports_shared_error(
+    tmp_path, initialized_kb, invoke_create
+) -> None:
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    before = snapshot(outside)
+    implicit = invoke_create(
+        outside,
+        "--type", "spec", "--title", "No root", "--description", "No root.",
+        "--derived-from", "CHAT-000001",
+    )
+    explicit = invoke_create(
+        outside,
+        "--type", "spec", "--title", "No root", "--description", "No root.",
+        "--derived-from", "CHAT-000001", "--kb", str(outside),
+    )
+    for result in [implicit, explicit]:
+        assert result.exit_code == 2
+        assert "E_NO_KB" in result.stderr
+        assert "not inside a knowledge base" in result.stderr
+    assert snapshot(outside) == before
+
+
+def test_ac42_invalid_config_is_environment_error_without_writes(
+    initialized_kb, invoke_create
+) -> None:
+    (initialized_kb / "kb-config.json").write_text("{", encoding="utf-8")
+    before = snapshot(initialized_kb)
+    result = invoke_valid(invoke_create, initialized_kb)
+    assert result.exit_code == 2
+    assert "E_CONFIG_INVALID" in result.stderr
+    assert snapshot(initialized_kb) == before
+
+
+def test_ac43_newer_schema_is_environment_error_without_writes(
+    initialized_kb, invoke_create
+) -> None:
+    config_path = initialized_kb / "kb-config.json"
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    config["schema"] = 999
+    config_path.write_text(json.dumps(config), encoding="utf-8")
+    before = snapshot(initialized_kb)
+    result = invoke_valid(invoke_create, initialized_kb)
+    assert result.exit_code == 2
+    assert "E_SCHEMA_UNSUPPORTED" in result.stderr
+    assert snapshot(initialized_kb) == before
+
+
+def test_ac44_missing_type_bad_status_and_unknown_option_are_typer_usage_errors(
+    initialized_kb, invoke_create
+) -> None:
+    add_chat(initialized_kb)
+    before = snapshot(initialized_kb)
+    missing = invoke_create(
+        initialized_kb,
+        "--title", "Missing", "--description", "Missing.",
+        "--derived-from", "CHAT-000001",
+    )
+    bad_status = invoke_valid(invoke_create, initialized_kb, "--status", "bogus")
+    unknown = invoke_valid(invoke_create, initialized_kb, "--bogus-flag")
+    assert missing.exit_code == bad_status.exit_code == unknown.exit_code == 2
+    assert "Missing option" in missing.stderr
+    assert "bogus" in bad_status.stderr
+    assert "--bogus-flag" in unknown.stderr
+    assert snapshot(initialized_kb) == before
+
+
+def test_ac45_failed_reference_preflight_is_byte_atomic(
+    initialized_kb, invoke_create
+) -> None:
+    before = snapshot(initialized_kb)
+    result = invoke_create(
+        initialized_kb,
+        "--type", "spec", "--title", "Bad", "--description", "Bad.",
+        "--derived-from", "KB-999999",
+    )
+    assert result.exit_code == 1
+    assert snapshot(initialized_kb) == before
+
+
+@pytest.mark.skipif(
+    os.name != "posix" or os.geteuid() == 0,
+    reason="requires POSIX permissions",
+)
+def test_ac46_write_phase_os_error_is_typed_and_may_leave_partial_state(
+    initialized_kb, invoke_create
+) -> None:
+    add_chat(initialized_kb)
+    target = initialized_kb / "synthetic"
+    original_mode = stat.S_IMODE(target.stat().st_mode)
+    target.chmod(0o555)
+    try:
+        result = invoke_valid(invoke_create, initialized_kb)
+    finally:
+        target.chmod(original_mode)
+    assert result.exit_code == 2
+    assert "E_CREATE_IO" in result.stderr
+    assert result.stderr.strip() != "E_CREATE_IO:"
+
+
+def test_ac47_actor_option_is_recorded_in_log(
+    initialized_kb, invoke_create
+) -> None:
+    add_chat(initialized_kb)
+    result = invoke_valid(invoke_create, initialized_kb, "--actor", "kb-author")
+    assert result.exit_code == 0
+    assert "| created | kb-author | KB-000001 |" in (
+        initialized_kb / "log.md"
+    ).read_text(encoding="utf-8").splitlines()[-1]
+
+
+def test_ac48_missing_log_is_recreated_without_initialized_entry(
+    initialized_kb, invoke_create
+) -> None:
+    add_chat(initialized_kb)
+    (initialized_kb / "log.md").unlink()
+    result = invoke_valid(invoke_create, initialized_kb)
+    text = (initialized_kb / "log.md").read_text(encoding="utf-8")
+    assert result.exit_code == 0
+    assert text.startswith(
+        "---\ntype: log\n---\n<!-- KB history — append-only; written by `kb log`."
+    )
+    assert "# Knowledge Base Log\n\n" in text
+    assert "| initialized |" not in text
+    assert text.count("| created |") == 1
 
 
 def test_destination_with_yaml_sensitive_text_writes_parseable_indexes(
