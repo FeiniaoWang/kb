@@ -216,3 +216,143 @@ def test_ac09_current_status_is_accepted_at_creation(
     assert split_document(
         initialized_kb / "synthetic/webhook-retry-policy.md"
     )[0]["status"] == "current"
+
+
+def test_ac10_synthetic_id_is_max_plus_one_without_gap_reuse(
+    initialized_kb, invoke_create
+) -> None:
+    add_chat(initialized_kb)
+    write_doc(initialized_kb, "synthetic/one.md", "id: KB-000001\ntype: spec\nstatus: draft\n")
+    write_doc(initialized_kb, "synthetic/five.md", "id: KB-000005\ntype: spec\nstatus: current\n")
+    assert invoke_valid(invoke_create, initialized_kb).exit_code == 0
+    assert split_document(
+        initialized_kb / "synthetic/webhook-retry-policy.md"
+    )[0]["id"] == "KB-000006"
+
+
+def test_ac11_custom_and_missing_synthetic_prefix_use_config_contract(
+    initialized_kb, invoke_create
+) -> None:
+    add_chat(initialized_kb)
+    config_path = initialized_kb / "kb-config.json"
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    config["id_prefixes"]["synthetic"] = "SYN"
+    config_path.write_text(json.dumps(config), encoding="utf-8")
+    assert invoke_valid(invoke_create, initialized_kb).exit_code == 0
+    assert split_document(initialized_kb / "synthetic/webhook-retry-policy.md")[0]["id"] == "SYN-000001"
+    (initialized_kb / "synthetic/webhook-retry-policy.md").unlink()
+    config.pop("id_prefixes")
+    config_path.write_text(json.dumps(config), encoding="utf-8")
+    assert invoke_create(
+        initialized_kb,
+        "--type", "spec", "--title", "Default", "--description", "Default.",
+        "--derived-from", "CHAT-000001",
+    ).exit_code == 0
+    assert split_document(initialized_kb / "synthetic/default.md")[0]["id"] == "KB-000001"
+
+
+def test_ac12_malformed_scan_blocks_all_writes(
+    initialized_kb, invoke_create
+) -> None:
+    add_chat(initialized_kb)
+    write_doc(initialized_kb, "synthetic/bad.md", "type: [\n")
+    before = snapshot(initialized_kb)
+    result = invoke_valid(invoke_create, initialized_kb)
+    assert result.exit_code == 2
+    assert "E_CREATE_MALFORMED" in result.stderr
+    assert "synthetic/bad.md" in result.stderr
+    assert "kb validate" in result.stderr
+    assert snapshot(initialized_kb) == before
+
+
+def test_ac13_parent_order_is_preserved_across_document_classes(
+    initialized_kb, invoke_create
+) -> None:
+    add_chat(initialized_kb)
+    write_doc(initialized_kb, "raw/sources/source.md", "id: RAW-000002\ntype: raw-source\n")
+    write_doc(initialized_kb, "synthetic/old.md", "id: KB-000001\ntype: spec\nstatus: current\n")
+    result = invoke_create(
+        initialized_kb,
+        "--type", "spec", "--title", "Ordered", "--description", "Ordered.",
+        "--derived-from", "RAW-000002", "--derived-from", "CHAT-000001",
+        "--derived-from", "KB-000001",
+    )
+    assert result.exit_code == 0
+    assert split_document(initialized_kb / "synthetic/ordered.md")[0]["derived_from"] == [
+        "RAW-000002", "CHAT-000001", "KB-000001"
+    ]
+
+
+def test_ac14_duplicate_parents_keep_first_occurrence(
+    initialized_kb, invoke_create
+) -> None:
+    add_chat(initialized_kb)
+    write_doc(initialized_kb, "raw/sources/source.md", "id: RAW-000002\ntype: raw-source\n")
+    result = invoke_create(
+        initialized_kb,
+        "--type", "spec", "--title", "Unique", "--description", "Unique.",
+        "--derived-from", "CHAT-000001", "--derived-from", "RAW-000002",
+        "--derived-from", "CHAT-000001",
+    )
+    assert result.exit_code == 0
+    assert split_document(initialized_kb / "synthetic/unique.md")[0]["derived_from"] == [
+        "CHAT-000001", "RAW-000002"
+    ]
+
+
+def test_ac15_path_and_reserved_slug_parents_store_canonical_ids(
+    initialized_kb, invoke_create
+) -> None:
+    add_chat(initialized_kb)
+    first = invoke_create(
+        initialized_kb,
+        "--type", "spec", "--title", "Paths", "--description", "Paths.",
+        "--derived-from", "raw/chats/planning.md",
+        "--derived-from", "governance/conventions.md",
+    )
+    assert first.exit_code == 0
+    assert split_document(initialized_kb / "synthetic/paths.md")[0]["derived_from"] == [
+        "CHAT-000001", "GOVERNANCE-CONVENTIONS"
+    ]
+
+
+def test_ac16_unknown_parent_id_is_reference_finding_without_writes(
+    initialized_kb, invoke_create
+) -> None:
+    before = snapshot(initialized_kb)
+    result = invoke_create(
+        initialized_kb,
+        "--type", "spec", "--title", "Bad", "--description", "Bad.",
+        "--derived-from", "KB-999999",
+    )
+    assert result.exit_code == 1
+    assert "E_CREATE_PARENT_UNRESOLVED" in result.stderr
+    assert "KB-999999" in result.stderr
+    assert snapshot(initialized_kb) == before
+
+
+def test_ac17_index_parent_without_id_is_reference_finding(
+    initialized_kb, invoke_create
+) -> None:
+    before = snapshot(initialized_kb)
+    result = invoke_create(
+        initialized_kb,
+        "--type", "spec", "--title", "Bad", "--description", "Bad.",
+        "--derived-from", "index.md",
+    )
+    assert result.exit_code == 1
+    assert "E_CREATE_PARENT_UNRESOLVED" in result.stderr
+    assert snapshot(initialized_kb) == before
+
+
+def test_ac18_no_parent_is_usage_failure_without_writes(
+    initialized_kb, invoke_create
+) -> None:
+    before = snapshot(initialized_kb)
+    result = invoke_create(
+        initialized_kb,
+        "--type", "spec", "--title", "Orphan", "--description", "Orphan.",
+    )
+    assert result.exit_code == 2
+    assert "E_CREATE_NO_PARENTS" in result.stderr
+    assert snapshot(initialized_kb) == before

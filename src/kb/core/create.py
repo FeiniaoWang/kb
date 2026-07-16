@@ -86,7 +86,7 @@ def _body(request: CreateRequest) -> str:
 
 
 def _parents(kb: KB, refs: list[str]) -> list[str]:
-    parents: list[str] = []
+    canonical: list[str] = []
     for ref in refs:
         document = resolve_ref(kb, ref)
         if document is None or document.id is None:
@@ -95,15 +95,17 @@ def _parents(kb: KB, refs: list[str]) -> list[str]:
                 f"parent cannot be resolved to a document id: {ref}",
                 1,
             )
-        parents.append(document.id)
-    parents = _stable_unique(parents)
+        canonical.append(document.id)
+    return _stable_unique(canonical)
+
+
+def _require_parents(parents: list[str]) -> None:
     if not parents:
         raise CreateFailure(
             "E_CREATE_NO_PARENTS",
             "at least one --derived-from or --supersedes parent is required",
             2,
         )
-    return parents
 
 
 def create(request: CreateRequest) -> CreateResult:
@@ -129,6 +131,7 @@ def create(request: CreateRequest) -> CreateResult:
         )
     body = _body(request)
     parents = _parents(kb, request.derived_from)
+    _require_parents(parents)
     doc_id = next_id(kb, config.id_prefixes["synthetic"]).format()
     stem = slug(request.title, doc_id)
     target_dir = root / "synthetic"
