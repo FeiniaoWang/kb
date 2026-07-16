@@ -91,7 +91,15 @@ def test_ac04_governance_documents_have_reserved_ids(tmp_path, invoke_init) -> N
     config_reference = read_frontmatter(tmp_path / "governance/kb-config.md")
     assert conventions["id"] == "GOVERNANCE-CONVENTIONS"
     assert config_reference["id"] == "GOVERNANCE-KB-CONFIG"
-    pytest.xfail("scan and id resolution are introduced by kb ingest")
+    from kb.core.scan import resolve_ref, scan
+
+    kb = scan(tmp_path)
+    assert resolve_ref(kb, "GOVERNANCE-CONVENTIONS").path == Path(
+        "governance/conventions.md"
+    )
+    assert resolve_ref(kb, "GOVERNANCE-KB-CONFIG").path == Path(
+        "governance/kb-config.md"
+    )
 
 
 def test_ac05_indexes_have_exact_frontmatter_and_bodies(tmp_path, invoke_init) -> None:

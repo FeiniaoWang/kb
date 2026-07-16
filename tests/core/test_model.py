@@ -16,6 +16,7 @@ from kb.core.model import (
     RawClass,
     load_config,
 )
+from kb.core.model import RawFrontmatter
 
 
 def test_shared_enums_have_pinned_values() -> None:
@@ -122,3 +123,19 @@ def test_config_model_definition_emits_no_warnings() -> None:
             spec.loader.exec_module(isolated_module)
     finally:
         del sys.modules[module_name]
+
+
+def test_raw_frontmatter_accepts_unknown_keys_and_feedback_about() -> None:
+    raw = RawFrontmatter.model_validate(
+        {
+            "id": "FEED-000001",
+            "type": "feedback",
+            "ingested_at": "2026-07-16T12:00:00Z",
+            "origin": "stdin",
+            "title": "FEED-000001",
+            "about": "KB-000007",
+            "future": True,
+        }
+    )
+    assert raw.about == "KB-000007"
+    assert raw.model_extra == {"future": True}

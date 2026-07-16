@@ -5,7 +5,7 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, RootModel, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, RootModel, ValidationError
 
 CURRENT_SCHEMA = 1
 
@@ -42,6 +42,52 @@ class IndexFrontmatter(BaseModel):
     type: Literal["index"]
     description: str
     title: str | None = None
+
+
+class RawFrontmatter(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    id: str
+    type: Literal["raw-source", "chat", "feedback"]
+    ingested_at: str
+    origin: str
+    title: str
+    about: str | None = None
+
+
+class Document(BaseModel):
+    id: str | None
+    path: Path
+    doc_class: DocClass
+    frontmatter: Frontmatter
+    _source_path: Path = PrivateAttr()
+
+    @classmethod
+    def from_scan(
+        cls,
+        *,
+        source_path: Path,
+        relative_path: Path,
+        doc_class: DocClass,
+        frontmatter: Frontmatter,
+    ) -> Document:
+        document = cls(
+            id=frontmatter.root.get("id"),
+            path=relative_path,
+            doc_class=doc_class,
+            frontmatter=frontmatter,
+        )
+        document._source_path = source_path
+        return document
+
+    @property
+    def body(self) -> str:
+        text = self._source_path.read_text(encoding="utf-8")
+        lines = text.splitlines(keepends=True)
+        for index, line in enumerate(lines[1:], start=1):
+            if line.rstrip("\r\n") == "---":
+                return "".join(lines[index + 1 :])
+        raise ValueError(f"missing closing frontmatter delimiter: {self.path}")
 
 
 def _default_prefixes() -> dict[str, str]:
