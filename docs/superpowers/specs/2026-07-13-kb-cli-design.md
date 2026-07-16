@@ -1,14 +1,14 @@
 # Design: `kb` CLI — deterministic toolset for the KB Skill Suite
 
 **Date:** 2026-07-13
-**Source:** [docs/prd.md](../../prd.md) §7.1 (CLI-1…CLI-12), §6 information model
+**Source:** [docs/prd.md](../../prd.md) §7.1 (CLI-1…CLI-13), §6 information model
 **Status:** Approved design, pre-implementation
 
 ## Decisions made during brainstorming
 
 | Question | Decision |
 |---|---|
-| Scope of first build | Full CLI including ingest (all of PRD §7.1), not just PRD Phase 1 groups. The whole deterministic layer ships before skill work begins. |
+| Scope of first build | Full CLI including ingest and `kb create` (all of PRD §7.1), not just PRD Phase 1 groups. The whole deterministic layer ships before skill work begins — `kb create` is built with the core even though its driving skill (`kb-author`) is PRD Phase 3. |
 | Id allocation | Sequential per prefix (`KB-000042` style, 6-digit zero-pad), assigned max+1 at creation. Merge collisions from parallel branches are caught by `kb validate` in CI; fix-up happens before merge. |
 | Id↔path index | No stored index. Every invocation scans the KB and reads frontmatter; ids live in the files. Zero staleness, zero merge conflicts, honors NFR-1. A gitignored cache may be added later only if scanning ever becomes slow. |
 | Output rendering | Compact plain text by default (YAML-ish frontmatter blocks, path lists); `--json` on every command for structured output with stable schemas. |
@@ -35,6 +35,7 @@ kb/                       (this repo; package name `kb`, console script `kb`)
 │   │   ├── validate.py   all FM/DG/LS mechanical checks → list of Findings
 │   │   ├── ids.py        id allocation (max+1 per prefix), id↔path resolution
 │   │   ├── ingest.py     adapters (file/stdin/clipboard) → raw/ documents
+│   │   ├── create.py     synthetic document creation (id alloc + frontmatter emit + file)
 │   │   ├── housekeeping.py  index.md listing maintenance, log.md append, scaffold
 │   │   └── mv.py         move/rename + body-link rewriting
 │   └── cli/
@@ -189,6 +190,33 @@ kb ingest --class source|chat|feedback --from file|stdin|clipboard [SOURCE]
 - Appends an `ingested` entry to `log.md`.
 - Adapters register in a small registry (name → callable returning raw bytes + origin metadata) so later adapters (Slack, mail, ticketing) are additive and require no skill changes.
 
+## Command group: Authoring
+
+### `kb create` (CLI-13 — CLI-only synthetic write path)
+
+```
+kb create --type T --title TITLE --description DESC
+          [--dest SUBDIR] [--derived-from REF]... [--status draft|current]
+          [--tag G]... [--supersedes REF] [--instructions TEXT]
+          [--body-file FILE|-] [--actor NAME] [--json]
+```
+
+`kb create` is the deterministic **write path for synthetic documents** — exactly what `kb ingest` is to `raw/`. It closes the gap where synthetic id allocation and frontmatter emission had no command and would otherwise fall to skill judgment, violating CLI-12/NFR-3 and §5.2. Agents never hand-write synthetic files; content and metadata come in as arguments, and id allocation plus the frontmatter schema stay CLI-authoritative (mirrors the CLI-only *read* discipline in 00-shared §5).
+
+- **Id.** Assigns the next sequential id with the synthetic prefix (`KB-` by default; configurable in `kb-config.json`) via the same `next_id` allocator `kb ingest` uses. The malformed-file guard applies (00-shared §6): it refuses to allocate while `KB.malformed` is non-empty (exit 2), so an invisible id can never be reallocated.
+- **Frontmatter.** Writes the full synthetic schema (FM1): `id`, `type`, `title`, `description`, `status`, `derived_from`, `timestamp`, `last_human_touch`, plus optional `tags`, `supersedes`, `instructions`. `timestamp` and `last_human_touch` are both set to the creation instant (ISO-8601 UTC) — creation is a human-confirmed act, so the two coincide at birth (LS2).
+- **`--status`** defaults to `draft`; the `kb-author` skill passes `--status current` when the human accepts at creation (LS1). Only `draft` and `current` are legal birth states; `superseded`/`retired` are lifecycle transitions, not creation values.
+- **`--derived-from`** (repeatable) — **at least one is required** (DG1); each REF resolves through the scan and is stored as the canonical id. An unresolved parent aborts before any write (`E_REF_UNRESOLVED`, exit 2). **DG5 (a `raw/chats/` session-record parent) is deliberately *not* enforced here:** the session record is typically archived while finalizing the document, and the recommended flow ingests it first, then supplies its id among `--derived-from` (`kb ingest --class chat …` → `kb create … --derived-from CHAT-000027`). DG5 stays a `kb validate` check — the single authoritative enforcement point.
+- **`--type`** must be a synthetic type. A reserved type (`index`, `log`, `raw-source`, `chat`, `feedback`, `conventions`, `kb-config`, `health`) is rejected (`E_TYPE_RESERVED`, exit 2). A type absent from `kb-config.json`'s `types` is **allowed** — the vocabulary is open (INIT-2) and authors may name new types (AUT-1) — but emits a stderr warning so the steward can add it.
+- **`--description`** over two sentences → stderr warning only (never blocks), matching `kb validate`'s heuristic severity.
+- **`--supersedes REF`** (optional) records the replacement link and, in the same atomic write, flips the superseded document's `status` to `superseded` and updates its `timestamp`/`last_human_touch` — so the KB never lands in the LS-invalid state "a `supersedes` target is not marked `superseded`". Transitive propagation to that document's descendants is a skill concern (CS3/`kb-ingest`/`kb-author`), not this command's.
+- **Body.** Read from `--body-file FILE` (or `-` for stdin); omitted → an empty body, a legitimate `draft` stub the author fills. The body is written verbatim with the ingest normalization (LF line endings, exactly one trailing newline). In-place body edits after creation are a revision concern (see Out of scope).
+- **Filename.** Slugified `--title`, else the lowercased id; collision → `-<lowercased id>` suffix; nothing existing is ever overwritten. `--dest SUBDIR` files under `synthetic/<subdir>/`; a missing subdirectory is created together with its `index.md` (directory invariant). A `--dest` that escapes `synthetic/` → `E_DEST_INVALID` (exit 2).
+- **Pre-flight, then write** (as `kb ingest`): every check — malformed guard, flag pairing, type legality, ref resolution, id/filename computation — completes before the first byte is written; a failed `kb create` leaves the KB untouched. The write is atomic across every touched file (the new document, any superseded document, `index.md`, `log.md`).
+- Refreshes the target directory's `index.md` (and any created ancestors'); global freshness stays `kb index`'s job. Appends a `created` entry to `log.md` (including the superseded id when `--supersedes` is used).
+
+Error codes: `E_TYPE_RESERVED`, `E_NO_PARENTS` (zero `--derived-from`), `E_REF_UNRESOLVED`, `E_DEST_INVALID`, plus the shared `E_NO_KB` / `E_CONFIG_INVALID` and the malformed-file guard (00-shared §6).
+
 ## Command group: Housekeeping
 
 ### `kb init` (CLI-11)
@@ -240,3 +268,4 @@ kb log --show [--limit N] [--json]
 - Retrieval indexes, embeddings (NG6); access-control enforcement hooks (NFR-8) — the query layer will grow these later.
 - Additional ingest adapters (Slack, mail, ticketing) — Phase 4.
 - `kb renumber` or automated id-collision repair: v1 detects collisions via `validate`; repair is manual.
+- A synthetic **mutation** command (in-place revision write path). `kb create` covers document *birth*; editorial edits to an existing synthetic document's body/frontmatter, adding a session-record parent after creation (AUT-8), and status changes short of supersession have no deterministic command yet. v1 expresses semantic revision as supersession (`kb create --supersedes`); a dedicated `kb set`/`kb revise` is deferred (PRD OQ6).
