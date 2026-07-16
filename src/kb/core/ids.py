@@ -36,6 +36,8 @@ class DocId(BaseModel):
 
 
 def next_id(kb: KB, prefix: str) -> DocId:
+    if prefix == "GOVERNANCE":
+        raise ValueError(f"cannot allocate reserved id prefix: {prefix}")
     maximum = 0
     for document in kb.documents:
         if document.id is None:

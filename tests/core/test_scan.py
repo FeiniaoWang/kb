@@ -63,6 +63,19 @@ def test_scan_collects_bad_yaml_and_missing_type(tmp_path) -> None:
     ]
 
 
+def test_scan_collects_document_validation_errors_in_path_order(tmp_path) -> None:
+    write_doc(tmp_path, "z-invalid.md", "id: [RAW-000009]\ntype: raw-source\n")
+    write_doc(tmp_path, "a-invalid.md", "id: 7\ntype: raw-source\n")
+    write_doc(tmp_path, "middle.md", "id: RAW-000005\ntype: raw-source\n")
+    kb = scan(tmp_path)
+    assert [document.path.as_posix() for document in kb.documents] == ["middle.md"]
+    assert [path.as_posix() for path, _ in kb.malformed] == [
+        "a-invalid.md",
+        "z-invalid.md",
+    ]
+    assert all("id" in error for _, error in kb.malformed)
+
+
 def test_document_body_is_loaded_lazily(tmp_path, monkeypatch) -> None:
     path = write_doc(tmp_path, "raw/sources/a.md", "id: RAW-000001\ntype: raw-source\n", "one\n")
     kb = scan(tmp_path)
@@ -79,6 +92,14 @@ def test_resolve_ref_prefers_ids_and_accepts_extensionless_paths(tmp_path) -> No
     assert resolve_ref(kb, "KB-999999") is None
 
 
+def test_resolve_ref_appends_md_without_replacing_existing_suffix(tmp_path) -> None:
+    write_doc(tmp_path, "synthetic/specs/release.v2.md", "id: KB-000008\ntype: coding-spec\n")
+    write_doc(tmp_path, "synthetic/specs/wrong.md", "id: KB-000009\ntype: coding-spec\n")
+    kb = scan(tmp_path)
+    assert resolve_ref(kb, "synthetic/specs/release.v2").id == "KB-000008"
+    assert resolve_ref(kb, "synthetic/specs/wrong.txt") is None
+
+
 def test_next_id_uses_max_numeric_id_for_prefix(tmp_path) -> None:
     write_doc(tmp_path, "raw/sources/a.md", "id: RAW-000001\ntype: raw-source\n")
     write_doc(tmp_path, "raw/sources/b.md", "id: RAW-000005\ntype: raw-source\n")
@@ -86,3 +107,9 @@ def test_next_id_uses_max_numeric_id_for_prefix(tmp_path) -> None:
     kb = scan(tmp_path)
     assert next_id(kb, "RAW").format() == "RAW-000006"
     assert next_id(kb, "CHAT").format() == "CHAT-000001"
+
+
+def test_next_id_refuses_reserved_governance_prefix(tmp_path) -> None:
+    kb = scan(tmp_path)
+    with pytest.raises(ValueError, match="reserved id prefix: GOVERNANCE"):
+        next_id(kb, "GOVERNANCE")

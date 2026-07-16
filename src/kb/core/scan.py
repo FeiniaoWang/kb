@@ -81,18 +81,18 @@ def scan(root: Path) -> KB:
         relative = source_path.relative_to(resolved)
         try:
             frontmatter = read_frontmatter(source_path)
+            doc_class = _doc_class(frontmatter.root["type"])
+            if doc_class is None:
+                continue
+            document = Document.from_scan(
+                source_path=source_path,
+                relative_path=relative,
+                doc_class=doc_class,
+                frontmatter=frontmatter,
+            )
         except (OSError, UnicodeError, ValueError, yaml.YAMLError) as error:
             kb.malformed.append((relative, str(error)))
             continue
-        doc_class = _doc_class(frontmatter.root["type"])
-        if doc_class is None:
-            continue
-        document = Document.from_scan(
-            source_path=source_path,
-            relative_path=relative,
-            doc_class=doc_class,
-            frontmatter=frontmatter,
-        )
         kb.documents.append(document)
         if document.id is not None:
             kb.by_id.setdefault(document.id, document)
@@ -105,7 +105,7 @@ def resolve_ref(kb: KB, ref: str) -> Document | None:
     candidate = PurePosixPath(ref)
     if candidate.is_absolute() or ".." in candidate.parts or "." in candidate.parts:
         return None
-    if candidate.suffix != ".md":
-        candidate = candidate.with_suffix(".md")
+    if not str(candidate).endswith(".md"):
+        candidate = PurePosixPath(f"{candidate}.md")
     path = Path(*candidate.parts)
     return next((document for document in kb.documents if document.path == path), None)
