@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import platform
 import re
+import shutil
+import subprocess
 import sys
 import unicodedata
 from collections.abc import Callable
@@ -99,7 +102,55 @@ def _stdin_adapter(source: str | None) -> AdapterPayload:
     return AdapterPayload(data=data, default_origin="stdin", source_filename=None)
 
 
-ADAPTERS: dict[str, Adapter] = {"file": _file_adapter, "stdin": _stdin_adapter}
+def _clipboard_adapter(source: str | None) -> AdapterPayload:
+    if source is not None:
+        raise IngestFailure(
+            "E_INGEST_USAGE", "SOURCE is forbidden with --from clipboard", 2
+        )
+    system = platform.system()
+    candidates: list[list[str]]
+    if system == "Darwin":
+        candidates = [["pbpaste"]]
+    elif system == "Windows":
+        candidates = [["powershell", "-NoProfile", "-Command", "Get-Clipboard"]]
+    else:
+        candidates = [["wl-paste"], ["xclip", "-selection", "clipboard", "-o"]]
+    command = next(
+        (candidate for candidate in candidates if shutil.which(candidate[0])), None
+    )
+    if command is None:
+        raise IngestFailure(
+            "E_INGEST_CLIPBOARD", "no supported clipboard tool found on PATH", 2
+        )
+    try:
+        completed = subprocess.run(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+    except OSError as error:
+        raise IngestFailure("E_INGEST_CLIPBOARD", str(error), 2) from error
+    if completed.returncode != 0:
+        message = completed.stderr.decode("utf-8", errors="replace").strip()
+        raise IngestFailure(
+            "E_INGEST_CLIPBOARD",
+            f"clipboard tool exited {completed.returncode}"
+            + (f": {message}" if message else ""),
+            2,
+        )
+    return AdapterPayload(
+        data=completed.stdout,
+        default_origin="clipboard",
+        source_filename=None,
+    )
+
+
+ADAPTERS: dict[str, Adapter] = {
+    "file": _file_adapter,
+    "stdin": _stdin_adapter,
+    "clipboard": _clipboard_adapter,
+}
 
 
 def slug(value: str, fallback: str) -> str:

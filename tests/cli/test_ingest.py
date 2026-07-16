@@ -262,3 +262,238 @@ def test_ac11_malformed_scan_blocks_all_writes(
     assert "raw/sources/bad.md" in result.stderr
     assert "kb validate" in result.stderr
     assert snapshot(initialized_kb) == before
+
+
+def test_ac12_origin_override_accepts_url_and_label(
+    initialized_kb, tmp_path, invoke_ingest
+) -> None:
+    source = tmp_path / "page.html"
+    source.write_text("page", encoding="utf-8")
+    first = ingest_file(
+        invoke_ingest,
+        initialized_kb,
+        source,
+        "--origin",
+        "https://example.com/post",
+    )
+    parsed = split_document(initialized_kb / "raw/sources/page.md")[0]
+    assert first.exit_code == 0
+    assert parsed["origin"] == "https://example.com/post"
+    assert (
+        initialized_kb / "log.md"
+    ).read_text(encoding="utf-8").splitlines()[-1].endswith(
+        "from https://example.com/post"
+    )
+    second = invoke_ingest(
+        initialized_kb,
+        "--class",
+        "chat",
+        "--from",
+        "stdin",
+        "--origin",
+        "meeting recording",
+        input="chat",
+    )
+    assert second.exit_code == 0
+    assert split_document(initialized_kb / "raw/chats/chat-000001.md")[0][
+        "origin"
+    ] == "meeting recording"
+
+
+def test_ac13_explicit_title_is_verbatim_and_drives_slug(
+    initialized_kb, tmp_path, invoke_ingest
+) -> None:
+    source = tmp_path / "x.md"
+    source.write_text("x", encoding="utf-8")
+    result = ingest_file(
+        invoke_ingest, initialized_kb, source, "--title", "Meeting Notes!"
+    )
+    assert result.exit_code == 0
+    assert split_document(initialized_kb / "raw/sources/meeting-notes.md")[0][
+        "title"
+    ] == "Meeting Notes!"
+
+
+def test_ac14_file_stem_derives_slug_and_title(
+    initialized_kb, tmp_path, invoke_ingest
+) -> None:
+    source = tmp_path / "q3_planning-notes.md"
+    source.write_text("x", encoding="utf-8")
+    assert ingest_file(invoke_ingest, initialized_kb, source).exit_code == 0
+    assert split_document(initialized_kb / "raw/sources/q3-planning-notes.md")[0][
+        "title"
+    ] == "q3 planning notes"
+
+
+def test_ac15_collision_suffixes_without_overwrite(
+    initialized_kb, tmp_path, invoke_ingest
+) -> None:
+    existing = write_existing(
+        initialized_kb,
+        "raw/sources/notes.md",
+        "id: RAW-000001\ntype: raw-source\ntitle: Notes\n",
+    )
+    before = existing.read_bytes()
+    source = tmp_path / "notes.md"
+    source.write_text("new", encoding="utf-8")
+    result = ingest_file(invoke_ingest, initialized_kb, source)
+    assert result.exit_code == 0
+    assert (initialized_kb / "raw/sources/notes-raw-000002.md").is_file()
+    assert existing.read_bytes() == before
+
+
+def test_ac16_empty_slug_falls_back_to_lowercase_id(
+    initialized_kb, tmp_path, invoke_ingest
+) -> None:
+    source = tmp_path / "x.md"
+    source.write_text("x", encoding="utf-8")
+    assert (
+        ingest_file(invoke_ingest, initialized_kb, source, "--title", "!!!").exit_code
+        == 0
+    )
+    assert (initialized_kb / "raw/sources/raw-000001.md").is_file()
+
+
+def test_ac17_unicode_title_ascii_folds_for_filename(
+    initialized_kb, tmp_path, invoke_ingest
+) -> None:
+    source = tmp_path / "x.md"
+    source.write_text("x", encoding="utf-8")
+    assert (
+        ingest_file(
+            invoke_ingest,
+            initialized_kb,
+            source,
+            "--title",
+            "Résumé Über 2026",
+        ).exit_code
+        == 0
+    )
+    assert (initialized_kb / "raw/sources/resume-uber-2026.md").is_file()
+    assert split_document(initialized_kb / "raw/sources/resume-uber-2026.md")[0][
+        "title"
+    ] == "Résumé Über 2026"
+
+
+def test_ac18_identical_reingest_allocates_and_suffixes(
+    initialized_kb, tmp_path, invoke_ingest
+) -> None:
+    source = tmp_path / "same.md"
+    source.write_text("same", encoding="utf-8")
+    assert ingest_file(invoke_ingest, initialized_kb, source).exit_code == 0
+    first = (initialized_kb / "raw/sources/same.md").read_bytes()
+    assert ingest_file(invoke_ingest, initialized_kb, source).exit_code == 0
+    assert split_document(initialized_kb / "raw/sources/same.md")[0]["id"] == (
+        "RAW-000001"
+    )
+    assert split_document(initialized_kb / "raw/sources/same-raw-000002.md")[0][
+        "id"
+    ] == "RAW-000002"
+    assert (initialized_kb / "raw/sources/same.md").read_bytes() == first
+
+
+def test_ac19_stdin_defaults_to_id_name_title_and_origin(
+    initialized_kb, invoke_ingest
+) -> None:
+    result = invoke_ingest(
+        initialized_kb, "--class", "source", "--from", "stdin", input="piped"
+    )
+    frontmatter, body, _ = split_document(
+        initialized_kb / "raw/sources/raw-000001.md"
+    )
+    assert result.exit_code == 0
+    assert frontmatter["origin"] == "stdin"
+    assert frontmatter["title"] == "RAW-000001"
+    assert body == "piped\n"
+
+
+def clipboard_tool(directory: Path, body: str, *, exit_code: int = 0) -> Path:
+    tool = directory / "pbpaste"
+    tool.write_text(
+        f"#!/bin/sh\nprintf '%s' '{body}'\nexit {exit_code}\n", encoding="utf-8"
+    )
+    tool.chmod(0o755)
+    return tool
+
+
+def test_ac20_clipboard_adapter_reads_tool_stdout(
+    initialized_kb, tmp_path, invoke_ingest, monkeypatch
+) -> None:
+    clipboard_tool(tmp_path, "clipboard text")
+    monkeypatch.setenv("PATH", str(tmp_path))
+    monkeypatch.setattr("kb.core.ingest.platform.system", lambda: "Darwin")
+    result = invoke_ingest(
+        initialized_kb, "--class", "chat", "--from", "clipboard"
+    )
+    frontmatter, body, _ = split_document(
+        initialized_kb / "raw/chats/chat-000001.md"
+    )
+    assert result.exit_code == 0
+    assert frontmatter["origin"] == "clipboard"
+    assert body == "clipboard text\n"
+
+
+def test_ac21_clipboard_missing_or_nonzero_is_environment_error(
+    initialized_kb, tmp_path, invoke_ingest, monkeypatch
+) -> None:
+    monkeypatch.setattr("kb.core.ingest.platform.system", lambda: "Darwin")
+    monkeypatch.setenv("PATH", "")
+    before = snapshot(initialized_kb)
+    missing = invoke_ingest(
+        initialized_kb, "--class", "chat", "--from", "clipboard"
+    )
+    assert missing.exit_code == 2 and "E_INGEST_CLIPBOARD" in missing.stderr
+    clipboard_tool(tmp_path, "", exit_code=9)
+    monkeypatch.setenv("PATH", str(tmp_path))
+    nonzero = invoke_ingest(
+        initialized_kb, "--class", "chat", "--from", "clipboard"
+    )
+    assert nonzero.exit_code == 2 and "E_INGEST_CLIPBOARD" in nonzero.stderr
+    assert snapshot(initialized_kb) == before
+
+
+def test_ac22_non_utf8_stdin_and_clipboard_are_findings(
+    initialized_kb, tmp_path, invoke_ingest, monkeypatch
+) -> None:
+    before = snapshot(initialized_kb)
+    stdin = invoke_ingest(
+        initialized_kb,
+        "--class",
+        "source",
+        "--from",
+        "stdin",
+        input=b"\xff",
+    )
+    assert stdin.exit_code == 1 and "E_INGEST_NOT_TEXT" in stdin.stderr
+    monkeypatch.setattr(
+        "kb.core.ingest.ADAPTERS",
+        {
+            **__import__("kb.core.ingest", fromlist=["ADAPTERS"]).ADAPTERS,
+            "clipboard": lambda _: __import__(
+                "kb.core.ingest", fromlist=["AdapterPayload"]
+            ).AdapterPayload(
+                data=b"\xff", default_origin="clipboard", source_filename=None
+            ),
+        },
+    )
+    clipboard = invoke_ingest(
+        initialized_kb, "--class", "chat", "--from", "clipboard"
+    )
+    assert clipboard.exit_code == 1 and "E_INGEST_NOT_TEXT" in clipboard.stderr
+    assert snapshot(initialized_kb) == before
+
+
+def test_ac23_whitespace_file_and_empty_stdin_are_findings(
+    initialized_kb, tmp_path, invoke_ingest
+) -> None:
+    source = tmp_path / "blank.md"
+    source.write_text(" \t\r\n", encoding="utf-8")
+    before = snapshot(initialized_kb)
+    file_result = ingest_file(invoke_ingest, initialized_kb, source)
+    stdin_result = invoke_ingest(
+        initialized_kb, "--class", "source", "--from", "stdin", input=""
+    )
+    assert file_result.exit_code == stdin_result.exit_code == 1
+    assert "E_INGEST_EMPTY" in file_result.stderr
+    assert "E_INGEST_EMPTY" in stdin_result.stderr
+    assert snapshot(initialized_kb) == before
