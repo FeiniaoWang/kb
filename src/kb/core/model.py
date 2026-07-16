@@ -55,6 +55,22 @@ class RawFrontmatter(BaseModel):
     about: str | None = None
 
 
+class SyntheticFrontmatter(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    id: str
+    type: str
+    title: str
+    description: str
+    status: Literal["draft", "current", "superseded", "retired"]
+    derived_from: list[str]
+    timestamp: str
+    last_human_touch: str
+    tags: list[str] | None = None
+    supersedes: str | None = None
+    instructions: str | None = None
+
+
 class Document(BaseModel):
     id: str | None
     path: Path

@@ -4,6 +4,7 @@ import sys
 import warnings
 
 import pytest
+from pydantic import ValidationError
 
 import kb.core.model as model_module
 from kb.core.ids import DocId
@@ -17,6 +18,7 @@ from kb.core.model import (
     load_config,
 )
 from kb.core.model import RawFrontmatter
+from kb.core.model import SyntheticFrontmatter
 
 
 def test_shared_enums_have_pinned_values() -> None:
@@ -139,3 +141,38 @@ def test_raw_frontmatter_accepts_unknown_keys_and_feedback_about() -> None:
     )
     assert raw.about == "KB-000007"
     assert raw.model_extra == {"future": True}
+
+
+def test_synthetic_frontmatter_preserves_unknown_keys_and_optional_fields() -> None:
+    frontmatter = SyntheticFrontmatter.model_validate(
+        {
+            "id": "KB-000001",
+            "type": "spec",
+            "title": "Retry Policy",
+            "description": "Retry rules.",
+            "status": "current",
+            "derived_from": ["CHAT-000001"],
+            "timestamp": "2026-07-16T10:00:00Z",
+            "last_human_touch": "2026-07-16T10:00:00Z",
+            "tags": ["api"],
+            "supersedes": "KB-000000",
+            "instructions": "Keep examples runnable.",
+            "future": True,
+        }
+    )
+    assert frontmatter.tags == ["api"]
+    assert frontmatter.model_extra == {"future": True}
+
+
+def test_synthetic_frontmatter_rejects_non_lifecycle_status() -> None:
+    with pytest.raises(ValidationError):
+        SyntheticFrontmatter(
+            id="KB-000001",
+            type="spec",
+            title="Retry Policy",
+            description="Retry rules.",
+            status="unknown",
+            derived_from=["CHAT-000001"],
+            timestamp="2026-07-16T10:00:00Z",
+            last_human_touch="2026-07-16T10:00:00Z",
+        )
