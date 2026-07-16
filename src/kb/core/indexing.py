@@ -15,8 +15,18 @@ def render_index(title: str, description: str, listing: str = "") -> str:
     return content if not listing else f"{content}\n{listing}\n"
 
 
+def _frontmatter_closing(lines: list[str]) -> int:
+    return next(
+        index
+        for index, line in enumerate(lines[1:], start=1)
+        if line.rstrip("\r\n") == "---"
+    )
+
+
 def _heading(path: Path) -> str:
-    for line in path.read_text(encoding="utf-8").splitlines():
+    lines = path.read_text(encoding="utf-8").splitlines()
+    closing = _frontmatter_closing(lines)
+    for line in lines[closing + 1 :]:
         if line.startswith("# "):
             return line[2:]
     return path.parent.name
@@ -77,11 +87,7 @@ def regenerate_directory_index(root: Path, directory: Path) -> str:
     path = directory / "index.md"
     text = path.read_text(encoding="utf-8")
     lines = text.splitlines(keepends=True)
-    closing = next(
-        index
-        for index, line in enumerate(lines[1:], start=1)
-        if line.rstrip("\r\n") == "---"
-    )
+    closing = _frontmatter_closing(lines)
     frontmatter_block = "".join(lines[: closing + 1])
     if not frontmatter_block.endswith("\n"):
         frontmatter_block += "\n"
