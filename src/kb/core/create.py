@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+import re
 import sys
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Literal
 
 from pydantic import BaseModel, Field
@@ -9,9 +10,15 @@ from pydantic import BaseModel, Field
 from kb.core.frontmatter import render_synthetic_document, replace_frontmatter_scalars
 from kb.core.housekeeping import LogEntry, append_log, utc_now
 from kb.core.ids import next_id
-from kb.core.indexing import regenerate_directory_index
+from kb.core.indexing import (
+    file_listing_line,
+    regenerate_directory_index,
+    render_index,
+    subdirectory_listing_line,
+)
 from kb.core.ingest import slug
 from kb.core.model import (
+    Config,
     ConfigLoadError,
     DocClass,
     Document,
@@ -21,6 +28,18 @@ from kb.core.model import (
 from kb.core.scan import KB, RootDiscoveryError, discover_root, resolve_ref, scan
 
 CreateStatus = Literal["draft", "current"]
+
+RESERVED_TYPES = {
+    "index",
+    "log",
+    "raw-source",
+    "chat",
+    "feedback",
+    "conventions",
+    "kb-config",
+    "health",
+}
+SENTENCE_END = re.compile(r"[.!?](?:\s|$)")
 
 
 class CreateRequest(BaseModel):
@@ -57,6 +76,80 @@ class CreateFailure(Exception):
 
 def _stable_unique(values: list[str]) -> list[str]:
     return list(dict.fromkeys(values))
+
+
+def _target_directory(root: Path, dest: str | None) -> tuple[Path, list[Path]]:
+    base = root / "synthetic"
+    if dest is None:
+        return base, []
+    normalized = dest.rstrip("/")
+    raw_parts = normalized.split("/")
+    candidate = PurePosixPath(normalized)
+    if (
+        not normalized
+        or candidate.is_absolute()
+        or any(part in {".", ".."} for part in raw_parts)
+    ):
+        raise CreateFailure("E_CREATE_DEST_INVALID", f"invalid --dest: {dest}", 2)
+    target = base.joinpath(*candidate.parts)
+    missing: list[Path] = []
+    current = base
+    for part in candidate.parts:
+        current /= part
+        if not current.exists():
+            missing.append(current)
+    return target, missing
+
+
+def _warnings(config: Config, request: CreateRequest, tags: list[str]) -> list[str]:
+    if request.type_name in RESERVED_TYPES:
+        raise CreateFailure(
+            "E_CREATE_TYPE_RESERVED",
+            f"reserved synthetic document type: {request.type_name}",
+            2,
+        )
+    warnings: list[str] = []
+    if request.type_name not in config.types:
+        warnings.append(
+            f"warning: type is not declared in kb-config.json: {request.type_name}"
+        )
+    warnings.extend(
+        f"warning: tag is not declared in kb-config.json: {tag}"
+        for tag in tags
+        if tag not in config.tags
+    )
+    if len(SENTENCE_END.findall(request.description)) > 2:
+        warnings.append("warning: description is longer than two sentences")
+    return warnings
+
+
+def _new_index_contents(
+    root: Path,
+    missing: list[Path],
+    *,
+    filename: str,
+    doc_id: str,
+    title: str,
+    description: str,
+) -> dict[Path, str]:
+    contents: dict[Path, str] = {}
+    for offset, directory in enumerate(reversed(missing)):
+        relative = directory.relative_to(root).as_posix()
+        index_description = f"Documents under {relative}/."
+        if offset == 0:
+            listing = "## Files\n" + file_listing_line(
+                filename, doc_id, title, description
+            )
+        else:
+            child = missing[len(missing) - offset]
+            child_relative = child.relative_to(root).as_posix()
+            listing = "## Subdirectories\n" + subdirectory_listing_line(
+                child.name, f"Documents under {child_relative}/."
+            )
+        contents[directory / "index.md"] = render_index(
+            directory.name, index_description, listing
+        )
+    return contents
 
 
 def _body(request: CreateRequest) -> str:
@@ -167,10 +260,9 @@ def create(request: CreateRequest) -> CreateResult:
             f"malformed documents block id allocation: {paths}; run kb validate",
             2,
         )
-    if request.dest is not None:
-        raise CreateFailure(
-            "E_CREATE_DEST_INVALID", f"invalid --dest: {request.dest}", 2
-        )
+    target_dir, missing_directories = _target_directory(root, request.dest)
+    tags = _stable_unique(request.tags)
+    warnings = _warnings(config, request, tags)
     body = _body(request)
     parents = _parents(kb, request.derived_from)
     superseded_document = _resolve_supersedes(kb, request.supersedes)
@@ -179,7 +271,6 @@ def create(request: CreateRequest) -> CreateResult:
     _require_parents(parents)
     doc_id = next_id(kb, config.id_prefixes["synthetic"]).format()
     stem = slug(request.title, doc_id)
-    target_dir = root / "synthetic"
     path = target_dir / f"{stem}.md"
     superseded_path = (
         root / superseded_document.path if superseded_document is not None else None
@@ -198,12 +289,23 @@ def create(request: CreateRequest) -> CreateResult:
         derived_from=parents,
         timestamp=timestamp,
         last_human_touch=timestamp,
-        tags=_stable_unique(request.tags) or None,
+        tags=tags or None,
         supersedes=superseded_document.id if superseded_document else None,
         instructions=request.instructions,
     )
     relative = path.relative_to(root).as_posix()
-    index = target_dir / "index.md"
+    new_indexes = _new_index_contents(
+        root,
+        missing_directories,
+        filename=path.name,
+        doc_id=doc_id,
+        title=request.title,
+        description=request.description,
+    )
+    existing_index_dir = (
+        missing_directories[0].parent if missing_directories else target_dir
+    )
+    existing_index = existing_index_dir / "index.md"
     try:
         superseded_content = (
             _superseded_bytes(root, superseded_document, timestamp)
@@ -220,6 +322,12 @@ def create(request: CreateRequest) -> CreateResult:
             1,
         ) from error
     try:
+        for directory in missing_directories:
+            directory.mkdir()
+            index_path = directory / "index.md"
+            index_path.write_text(
+                new_indexes[index_path], encoding="utf-8", newline="\n"
+            )
         path.write_text(
             render_synthetic_document(frontmatter, body),
             encoding="utf-8",
@@ -227,8 +335,8 @@ def create(request: CreateRequest) -> CreateResult:
         )
         if superseded_document is not None and superseded_content is not None:
             (root / superseded_document.path).write_bytes(superseded_content)
-        index.write_text(
-            regenerate_directory_index(root, target_dir),
+        existing_index.write_text(
+            regenerate_directory_index(root, existing_index_dir),
             encoding="utf-8",
             newline="\n",
         )
@@ -245,13 +353,17 @@ def create(request: CreateRequest) -> CreateResult:
         )
     except OSError as error:
         raise CreateFailure("E_CREATE_IO", str(error), 2) from error
-    updated = [index.relative_to(root).as_posix()]
+    created = [relative] + [
+        path.relative_to(root).as_posix() for path in new_indexes
+    ]
+    updated = [existing_index.relative_to(root).as_posix()]
     if superseded_document is not None:
         updated.append(superseded_document.path.as_posix())
     return CreateResult(
         id=doc_id,
         path=relative,
         superseded=superseded_document.id if superseded_document else None,
-        created=[relative],
+        created=sorted(created),
         updated=sorted(updated),
+        warnings=warnings,
     )

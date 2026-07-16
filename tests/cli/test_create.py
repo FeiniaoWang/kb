@@ -571,6 +571,228 @@ def test_ac27_superseded_directory_index_is_not_regenerated(
     assert (archive / "index.md").read_bytes() == index_before
 
 
+@pytest.mark.parametrize("reserved", ["index", "chat", "health"])
+def test_ac28_reserved_synthetic_types_are_rejected_verbatim(
+    reserved, initialized_kb, invoke_create
+) -> None:
+    add_chat(initialized_kb)
+    before = snapshot(initialized_kb)
+    result = invoke_create(
+        initialized_kb,
+        "--type", reserved, "--title", "Bad", "--description", "Bad.",
+        "--derived-from", "CHAT-000001",
+    )
+    assert result.exit_code == 2
+    assert "E_CREATE_TYPE_RESERVED" in result.stderr and reserved in result.stderr
+    assert snapshot(initialized_kb) == before
+
+
+def test_ac29_unknown_type_warns_once_and_declared_type_does_not(
+    initialized_kb, invoke_create
+) -> None:
+    add_chat(initialized_kb)
+    config_path = initialized_kb / "kb-config.json"
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    config["types"] = ["spec"]
+    config_path.write_text(json.dumps(config), encoding="utf-8")
+    unknown = invoke_create(
+        initialized_kb,
+        "--type", "retro", "--title", "Retro", "--description", "Retro.",
+        "--derived-from", "CHAT-000001",
+    )
+    declared = invoke_create(
+        initialized_kb,
+        "--type", "spec", "--title", "Spec", "--description", "Spec.",
+        "--derived-from", "CHAT-000001",
+    )
+    assert unknown.exit_code == declared.exit_code == 0
+    assert unknown.stderr.lower().count("retro") == 1
+    assert "type" not in declared.stderr.lower()
+    assert split_document(initialized_kb / "synthetic/retro.md")[0]["type"] == "retro"
+
+
+def test_ac30_unknown_tags_warn_once_and_tags_keep_first_order(
+    initialized_kb, invoke_create
+) -> None:
+    add_chat(initialized_kb)
+    config_path = initialized_kb / "kb-config.json"
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    config["tags"] = ["api"]
+    config_path.write_text(json.dumps(config), encoding="utf-8")
+    result = invoke_valid(
+        invoke_create, initialized_kb,
+        "--tag", "api", "--tag", "internal", "--tag", "internal",
+    )
+    assert result.exit_code == 0
+    assert split_document(initialized_kb / "synthetic/webhook-retry-policy.md")[0]["tags"] == ["api", "internal"]
+    assert result.stderr.lower().count("internal") == 1
+    assert "api" not in result.stderr.lower()
+
+
+def test_ac31_description_warns_only_above_two_sentences(
+    initialized_kb, invoke_create
+) -> None:
+    add_chat(initialized_kb)
+    config_path = initialized_kb / "kb-config.json"
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    config["types"] = ["spec"]
+    config_path.write_text(json.dumps(config), encoding="utf-8")
+    long = invoke_create(
+        initialized_kb,
+        "--type", "spec", "--title", "Long", "--description", "One. Two! Three?",
+        "--derived-from", "CHAT-000001",
+    )
+    short = invoke_create(
+        initialized_kb,
+        "--type", "spec", "--title", "Short", "--description", "One. Two!",
+        "--derived-from", "CHAT-000001",
+    )
+    assert long.exit_code == short.exit_code == 0
+    assert long.stderr.lower().count("description") == 1
+    assert short.stderr == ""
+    assert split_document(initialized_kb / "synthetic/long.md")[0]["description"] == "One. Two! Three?"
+
+
+def test_ac32_unicode_title_ascii_folds_filename_but_stays_verbatim(
+    initialized_kb, invoke_create
+) -> None:
+    add_chat(initialized_kb)
+    result = invoke_create(
+        initialized_kb,
+        "--type", "spec", "--title", "Résumé Über 2026!", "--description", "Title.",
+        "--derived-from", "CHAT-000001",
+    )
+    path = initialized_kb / "synthetic/resume-uber-2026.md"
+    assert result.exit_code == 0 and path.is_file()
+    assert split_document(path)[0]["title"] == "Résumé Über 2026!"
+
+
+def test_ac33_empty_slug_uses_lowercase_id_filename(
+    initialized_kb, invoke_create
+) -> None:
+    add_chat(initialized_kb)
+    result = invoke_create(
+        initialized_kb,
+        "--type", "spec", "--title", "!!!", "--description", "Title.",
+        "--derived-from", "CHAT-000001",
+    )
+    assert result.exit_code == 0
+    assert (initialized_kb / "synthetic/kb-000001.md").is_file()
+
+
+def test_ac34_collision_suffixes_id_without_overwriting_existing_file(
+    initialized_kb, invoke_create
+) -> None:
+    add_chat(initialized_kb)
+    existing = add_synthetic(initialized_kb, relative="synthetic/notes.md")
+    before = existing.read_bytes()
+    result = invoke_create(
+        initialized_kb,
+        "--type", "spec", "--title", "Notes", "--description", "New notes.",
+        "--derived-from", "CHAT-000001",
+    )
+    assert result.exit_code == 0
+    assert (initialized_kb / "synthetic/notes-kb-000002.md").is_file()
+    assert existing.read_bytes() == before
+
+
+def test_ac35_new_dest_gets_exact_index_and_updates_synthetic_index_only(
+    initialized_kb, invoke_create
+) -> None:
+    add_chat(initialized_kb)
+    root_index = (initialized_kb / "index.md").read_bytes()
+    result = invoke_valid(invoke_create, initialized_kb, "--dest", "specs")
+    expected = """---
+type: index
+description: Documents under synthetic/specs/.
+---
+# specs
+
+<!-- Generated by kb — do not edit; run `kb index` to regenerate. -->
+
+## Files
+* [KB-000001][Webhook Retry Policy](webhook-retry-policy.md) - Defines retry and backoff behavior for outbound webhooks.
+"""
+    assert result.exit_code == 0
+    assert (initialized_kb / "synthetic/specs/index.md").read_text(encoding="utf-8") == expected
+    assert "* [specs](specs/index.md) - Documents under synthetic/specs/." in (
+        initialized_kb / "synthetic/index.md"
+    ).read_text(encoding="utf-8")
+    assert (initialized_kb / "index.md").read_bytes() == root_index
+    assert result.stdout.splitlines() == [
+        "updated  synthetic/index.md",
+        "created  synthetic/specs/index.md",
+        "created  synthetic/specs/webhook-retry-policy.md",
+        "created KB-000001 as synthetic/specs/webhook-retry-policy.md",
+    ]
+
+
+def test_ac36_nested_dest_indexes_are_born_current_bottom_up(
+    initialized_kb, invoke_create
+) -> None:
+    add_chat(initialized_kb)
+    result = invoke_valid(invoke_create, initialized_kb, "--dest", "a/b")
+    assert result.exit_code == 0
+    assert "## Subdirectories\n* [b](b/index.md) - Documents under synthetic/a/b/." in (
+        initialized_kb / "synthetic/a/index.md"
+    ).read_text(encoding="utf-8")
+    assert "## Files\n* [KB-000001][Webhook Retry Policy](webhook-retry-policy.md)" in (
+        initialized_kb / "synthetic/a/b/index.md"
+    ).read_text(encoding="utf-8")
+    assert result.stdout.splitlines() == [
+        "created  synthetic/a/b/index.md",
+        "created  synthetic/a/b/webhook-retry-policy.md",
+        "created  synthetic/a/index.md",
+        "updated  synthetic/index.md",
+        "created KB-000001 as synthetic/a/b/webhook-retry-policy.md",
+    ]
+
+
+def test_ac37_existing_dest_updates_only_its_own_index(
+    initialized_kb, invoke_create
+) -> None:
+    add_chat(initialized_kb)
+    specs = initialized_kb / "synthetic/specs"
+    specs.mkdir()
+    (specs / "index.md").write_text(
+        "---\ntype: index\ndescription: Specs.\n---\n# specs\n\n",
+        encoding="utf-8",
+    )
+    parent_before = (initialized_kb / "synthetic/index.md").read_bytes()
+    result = invoke_valid(invoke_create, initialized_kb, "--dest", "specs")
+    assert result.exit_code == 0
+    assert "updated  synthetic/specs/index.md" in result.stdout
+    assert (initialized_kb / "synthetic/index.md").read_bytes() == parent_before
+
+
+@pytest.mark.parametrize("dest", ["/abs", "../escape"])
+def test_ac38_absolute_or_parent_dest_is_rejected_without_writes(
+    dest, initialized_kb, invoke_create
+) -> None:
+    add_chat(initialized_kb)
+    before = snapshot(initialized_kb)
+    result = invoke_valid(invoke_create, initialized_kb, "--dest", dest)
+    assert result.exit_code == 2
+    assert "E_CREATE_DEST_INVALID" in result.stderr and dest in result.stderr
+    assert snapshot(initialized_kb) == before
+
+
+def test_destination_with_yaml_sensitive_text_writes_parseable_indexes(
+    initialized_kb, invoke_create
+) -> None:
+    add_chat(initialized_kb)
+
+    result = invoke_valid(invoke_create, initialized_kb, "--dest", "foo: bar")
+
+    index = initialized_kb / "synthetic/foo: bar/index.md"
+    assert result.exit_code == 0
+    assert split_document(index)[0]["description"] == (
+        "Documents under synthetic/foo: bar/."
+    )
+    assert "created  synthetic/foo: bar/index.md" in result.stdout
+    assert "updated  synthetic/index.md" in result.stdout
+
+
 def test_supersedes_preparation_oserror_is_structured_without_writes(
     monkeypatch, initialized_kb, invoke_create
 ) -> None:

@@ -1,5 +1,20 @@
 from kb.core.housekeeping import init_kb
-from kb.core.indexing import regenerate_directory_index, render_index
+from kb.core.indexing import (
+    file_listing_line,
+    regenerate_directory_index,
+    render_index,
+    subdirectory_listing_line,
+)
+
+
+def test_listing_line_helpers_match_directory_listing_grammar() -> None:
+    assert file_listing_line(
+        "retry.md", "KB-000001", "Retry Policy", "Retry rules."
+    ) == "* [KB-000001][Retry Policy](retry.md) - Retry rules."
+    assert file_listing_line("notes.md", None, "Notes", None) == "* [Notes](notes.md)"
+    assert subdirectory_listing_line(
+        "specs", "Documents under synthetic/specs/."
+    ) == "* [specs](specs/index.md) - Documents under synthetic/specs/."
 
 
 def test_render_index_remains_byte_identical_to_init_template(tmp_path) -> None:
@@ -40,3 +55,13 @@ def test_regeneration_ignores_frontmatter_comments_when_preserving_heading(
 
     assert body.startswith("\n# Sources\n")
     assert "\n# metadata note\n" not in body
+
+
+def test_regeneration_keeps_subdirectory_heading_and_directory_link_distinct(
+    tmp_path,
+) -> None:
+    init_kb(tmp_path)
+
+    regenerated = regenerate_directory_index(tmp_path, tmp_path)
+
+    assert "* [Governance](governance/index.md)" in regenerated
