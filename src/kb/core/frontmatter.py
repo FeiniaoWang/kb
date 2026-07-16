@@ -99,12 +99,16 @@ def replace_frontmatter_scalars(
     spans: list[tuple[int, int, str]] = []
     found: set[str] = set()
     for key_node, value_node in node.value:
-        if not isinstance(key_node, ScalarNode) or not isinstance(value_node, ScalarNode):
+        if not isinstance(key_node, ScalarNode):
             continue
         key = key_node.value
         if key not in replacements:
             continue
+        if key in found:
+            raise ValueError(f"frontmatter key {key!r} must occur exactly once")
         found.add(key)
+        if not isinstance(value_node, ScalarNode):
+            raise ValueError(f"frontmatter value for {key!r} is not directly editable")
         matching_tokens = [
             token
             for token in scalar_tokens

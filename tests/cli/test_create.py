@@ -612,3 +612,77 @@ def test_supersedes_alias_lifecycle_is_structured_invalid_without_writes(
     assert "E_CREATE_SUPERSEDES_INVALID" in result.stderr
     assert "not directly editable" in result.stderr
     assert snapshot(initialized_kb) == before
+
+
+def test_supersedes_repeats_collision_suffix_without_overwriting_existing_files(
+    initialized_kb, invoke_create
+) -> None:
+    add_chat(initialized_kb)
+    target = add_synthetic(
+        initialized_kb,
+        relative="synthetic/replacement.md",
+    )
+    occupied = add_synthetic(
+        initialized_kb,
+        relative="synthetic/replacement-kb-000003.md",
+        doc_id="KB-000002",
+        body="Occupied body\n",
+    )
+    occupied_before = occupied.read_bytes()
+    result = supersede(invoke_create, initialized_kb)
+    created = initialized_kb / "synthetic/replacement-kb-000003-kb-000003.md"
+    assert result.exit_code == 0
+    assert split_document(created)[0]["id"] == "KB-000003"
+    assert occupied.read_bytes() == occupied_before
+    assert split_document(target)[0]["status"] == "superseded"
+
+
+def test_supersedes_duplicate_lifecycle_key_is_invalid_without_writes(
+    initialized_kb, invoke_create
+) -> None:
+    add_chat(initialized_kb)
+    duplicates = {
+        "status": "current",
+        "timestamp": "2026-06-02T14:11:08Z",
+        "last_human_touch": "2026-06-02T14:11:08Z",
+    }
+    for key, value in duplicates.items():
+        target = add_synthetic(initialized_kb, extra=f"{key}: {value}\n")
+        before = snapshot(initialized_kb)
+        result = supersede(invoke_create, initialized_kb)
+        assert result.exit_code == 1
+        assert "E_CREATE_SUPERSEDES_INVALID" in result.stderr
+        assert "exactly once" in result.stderr
+        assert snapshot(initialized_kb) == before
+        target.unlink()
+
+
+def test_supersedes_non_scalar_lifecycle_key_is_invalid_without_writes(
+    initialized_kb, invoke_create
+) -> None:
+    add_chat(initialized_kb)
+    for key in ("timestamp", "last_human_touch"):
+        timestamp = (
+            "timestamp:\n  nested: value\n"
+            if key == "timestamp"
+            else "timestamp: 2026-06-02T14:11:08Z\n"
+        )
+        touched = (
+            "last_human_touch:\n  nested: value\n"
+            if key == "last_human_touch"
+            else "last_human_touch: 2026-06-02T14:11:08Z\n"
+        )
+        target = write_doc(
+            initialized_kb,
+            "synthetic/old.md",
+            "id: KB-000001\ntype: spec\ntitle: Old\ndescription: Old.\n"
+            "status: current\nderived_from:\n  - CHAT-000001\n"
+            f"{timestamp}{touched}",
+        )
+        before = snapshot(initialized_kb)
+        result = supersede(invoke_create, initialized_kb)
+        assert result.exit_code == 1
+        assert "E_CREATE_SUPERSEDES_INVALID" in result.stderr
+        assert "not directly editable" in result.stderr
+        assert snapshot(initialized_kb) == before
+        target.unlink()

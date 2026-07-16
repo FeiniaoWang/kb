@@ -181,8 +181,13 @@ def create(request: CreateRequest) -> CreateResult:
     stem = slug(request.title, doc_id)
     target_dir = root / "synthetic"
     path = target_dir / f"{stem}.md"
-    if path.exists():
-        path = target_dir / f"{stem}-{doc_id.lower()}.md"
+    superseded_path = (
+        root / superseded_document.path if superseded_document is not None else None
+    )
+    suffix = f"-{doc_id.lower()}"
+    while path.exists() or path == superseded_path:
+        stem += suffix
+        path = target_dir / f"{stem}.md"
     timestamp = utc_now()
     frontmatter = SyntheticFrontmatter(
         id=doc_id,
