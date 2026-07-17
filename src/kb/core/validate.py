@@ -51,6 +51,7 @@ CANONICAL_NUMERIC_ID = re.compile(
     r"^(?P<prefix>[A-Z]+)-(?P<number>(?:[0-9]{6}|[1-9][0-9]{6,}))$"
 )
 RESERVED_SLUG_ID = re.compile(r"^GOVERNANCE-[A-Z][A-Z0-9-]*$")
+OCCURRENCE_SCALE = 10_000
 
 
 class Finding(BaseModel):
@@ -481,7 +482,9 @@ def _relationship_findings(file: ScannedMarkdown, kb: KB) -> list[Finding]:
     if doc_class is DocClass.SYNTHETIC:
         derived_from = values.get("derived_from")
         if _well_shaped_string_list(derived_from):
-            occurrence = list(values).index("derived_from")
+            occurrence = (
+                list(values).index("derived_from") * OCCURRENCE_SCALE
+            )
             for offset, parent in enumerate(derived_from):
                 if _resolved_document(kb, parent) is None:
                     findings.append(
@@ -490,7 +493,7 @@ def _relationship_findings(file: ScannedMarkdown, kb: KB) -> list[Finding]:
                             "LINK_UNRESOLVED",
                             "error",
                             f"derived_from reference '{parent}' does not resolve to a document id",
-                            occurrence * 10_000 + offset,
+                            occurrence + offset,
                         )
                     )
             if not derived_from:
@@ -531,7 +534,7 @@ def _relationship_findings(file: ScannedMarkdown, kb: KB) -> list[Finding]:
                     "LINK_UNRESOLVED",
                     "error",
                     f"supersedes reference '{supersedes}' does not resolve to a document id",
-                    list(values).index("supersedes"),
+                    list(values).index("supersedes") * OCCURRENCE_SCALE,
                 )
             )
     if type_name == "feedback":
@@ -547,7 +550,7 @@ def _relationship_findings(file: ScannedMarkdown, kb: KB) -> list[Finding]:
                     "LINK_UNRESOLVED",
                     "error",
                     f"about reference '{about}' does not resolve to a document id",
-                    list(values).index("about"),
+                    list(values).index("about") * OCCURRENCE_SCALE,
                 )
             )
     return findings
@@ -589,18 +592,26 @@ def _duplicate_id_findings(kb: KB) -> list[Finding]:
 
 
 def _cycle_from(start: str, graph: dict[str, list[str]]) -> list[str] | None:
-    def visit(current: str, path: list[str]) -> list[str] | None:
-        for target in graph.get(current, []):
-            if target == start:
-                return [*path, start]
-            if target in path:
-                continue
-            found = visit(target, [*path, target])
-            if found is not None:
-                return found
-        return None
-
-    return visit(start, [start])
+    path = [start]
+    path_members = {start}
+    stack = [(start, 0)]
+    while stack:
+        current, target_index = stack[-1]
+        targets = graph.get(current, [])
+        if target_index >= len(targets):
+            stack.pop()
+            path_members.remove(path.pop())
+            continue
+        target = targets[target_index]
+        stack[-1] = (current, target_index + 1)
+        if target == start:
+            return [*path, start]
+        if target in path_members:
+            continue
+        path.append(target)
+        path_members.add(target)
+        stack.append((target, 0))
+    return None
 
 
 def _derivation_graph(kb: KB) -> dict[str, list[str]]:

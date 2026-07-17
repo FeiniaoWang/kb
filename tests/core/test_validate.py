@@ -36,3 +36,13 @@ def test_cycle_from_starts_and_ends_at_the_anchor() -> None:
         "KB-000002",
     ]
     assert _cycle_from("KB-000099", graph) is None
+
+
+def test_cycle_from_handles_a_deep_acyclic_chain() -> None:
+    graph = {
+        f"KB-{number:06d}": [f"KB-{number + 1:06d}"]
+        for number in range(1, 1_202)
+    }
+    graph["KB-001202"] = []
+
+    assert _cycle_from("KB-000001", graph) is None

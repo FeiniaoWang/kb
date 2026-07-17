@@ -831,3 +831,35 @@ def test_derivation_cycles_use_the_first_document_for_duplicate_ids(
         "synthetic/a-first.md",
         "synthetic/b-second.md",
     ]
+
+
+def test_relationship_findings_follow_key_then_list_order(
+    tmp_path, invoke_validate
+) -> None:
+    root = make_kb(tmp_path / "kb")
+    make_doc(
+        root,
+        "synthetic/note.md",
+        valid_synthetic_values(
+            derived_from=["KB-999998", "KB-999999"],
+            supersedes="KB-999997",
+        ),
+    )
+
+    result = invoke_validate(root, "--json")
+
+    links = [
+        item
+        for item in payload_for(result, "synthetic/note.md")
+        if item["code"] == "LINK_UNRESOLVED"
+    ]
+    assert [item["message"].split()[0] for item in links] == [
+        "derived_from",
+        "derived_from",
+        "supersedes",
+    ]
+    assert [item["message"].split("'")[1] for item in links] == [
+        "KB-999998",
+        "KB-999999",
+        "KB-999997",
+    ]
