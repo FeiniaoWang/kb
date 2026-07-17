@@ -434,3 +434,104 @@ def test_ac28_unknown_extension_keys_are_never_flagged(tmp_path, invoke_validate
     result = invoke_validate(root, "--json")
     assert result.exit_code == 0
     assert finding_payload(result) == []
+
+
+def test_ac29_description_warning_uses_the_sentence_heuristic(tmp_path, invoke_validate) -> None:
+    root = make_kb(tmp_path / "kb")
+    chat(root)
+    make_doc(root, "synthetic/note.md", valid_synthetic_values(description="One. Two! Three?"))
+    make_doc(root, "index.md", {"type": "index", "description": "One. Two. Three."})
+    make_doc(root, "raw/sources/two.md", {"id": "RAW-000001", "type": "raw-source", "ingested_at": "2026-07-16T09:00:00Z", "origin": "file", "description": "One. Two."})
+    result = invoke_validate(root, "--json")
+    assert codes_for(result).count("FM1_DESCRIPTION_LONG") == 2
+
+
+def test_ac30_declared_synthetic_type_is_clean_and_undeclared_warns(tmp_path, invoke_validate) -> None:
+    root = make_kb(tmp_path / "kb", types=["spec"])
+    chat(root)
+    make_doc(root, "synthetic/retro.md", valid_synthetic_values(type="retro"))
+    make_doc(root, "synthetic/spec.md", valid_synthetic_values(id="KB-000002"))
+    result = invoke_validate(root, "--json")
+    warnings = [item for item in finding_payload(result) if item["code"] == "TYPE_UNDECLARED"]
+    assert len(warnings) == 1 and "retro" in warnings[0]["message"]
+
+
+def test_ac31_empty_type_vocabulary_is_unconstrained(tmp_path, invoke_validate) -> None:
+    root = make_kb(tmp_path / "kb", types=[])
+    synthetic(root, type="retro")
+    result = invoke_validate(root, "--json")
+    assert "TYPE_UNDECLARED" not in codes_for(result)
+
+
+def test_ac32_each_undeclared_tag_warns_in_list_order(tmp_path, invoke_validate) -> None:
+    root = make_kb(tmp_path / "kb", tags=["api"])
+    synthetic(root, tags=["api", "internal", "wip"])
+    result = invoke_validate(root, "--json")
+    warnings = [item for item in finding_payload(result) if item["code"] == "TAG_UNDECLARED"]
+    assert [item["message"].split("'")[1] for item in warnings] == ["internal", "wip"]
+
+
+def test_ac33_empty_tag_vocabulary_declares_no_tags(tmp_path, invoke_validate) -> None:
+    root = make_kb(tmp_path / "kb", tags=[])
+    synthetic(root, tags=["api"])
+    result = invoke_validate(root, "--json")
+    assert codes_for(result).count("TAG_UNDECLARED") == 1
+
+
+def test_ac34_noncanonical_synthetic_ids_are_invalid(tmp_path, invoke_validate) -> None:
+    for offset, doc_id in enumerate(["KB-42", "kb-000042", "KB-FOO"]):
+        root = make_kb(tmp_path / str(offset))
+        synthetic(root, doc_id)
+        result = invoke_validate(root, "--json")
+        assert "ID_INVALID" in codes_for(result, "synthetic/note.md")
+
+
+def test_ac35_seven_digit_id_with_leading_zero_is_invalid(tmp_path, invoke_validate) -> None:
+    root = make_kb(tmp_path / "kb")
+    synthetic(root, "KB-0000042")
+    result = invoke_validate(root, "--json")
+    assert "ID_INVALID" in codes_for(result, "synthetic/note.md")
+
+
+def test_ac36_governance_slug_and_numeric_growth_forms_are_class_specific(tmp_path, invoke_validate) -> None:
+    root = make_kb(tmp_path / "kb")
+    make_doc(root, "governance/a.md", {"id": "GOVERNANCE-000001", "type": "conventions", "title": "A", "description": "A."})
+    make_doc(root, "governance/b.md", {"id": "CONV-CONVENTIONS", "type": "conventions", "title": "B", "description": "B."})
+    make_doc(root, "governance/c.md", {"id": "GOVERNANCE-CONVENTIONS", "type": "conventions", "title": "C", "description": "C."})
+    chat(root)
+    make_doc(root, "synthetic/large.md", valid_synthetic_values(id="KB-1000001"))
+    result = invoke_validate(root, "--json")
+    assert codes_for(result, "governance/a.md") == ["ID_INVALID"]
+    assert codes_for(result, "governance/b.md") == ["ID_INVALID"]
+    assert "ID_INVALID" not in codes_for(result, "governance/c.md")
+    assert "ID_INVALID" not in codes_for(result, "synthetic/large.md")
+
+
+def test_ac37_cross_class_numeric_prefixes_are_mismatches(tmp_path, invoke_validate) -> None:
+    root = make_kb(tmp_path / "kb")
+    synthetic(root, "RAW-000009")
+    make_doc(root, "raw/chats/other.md", {"id": "FEED-000002", "type": "chat", "ingested_at": "2026-07-16T09:00:00Z", "origin": "stdin"})
+    result = invoke_validate(root, "--json")
+    assert codes_for(result).count("ID_PREFIX_MISMATCH") == 2
+
+
+def test_ac38_configured_prefix_wins(tmp_path, invoke_validate) -> None:
+    root = make_kb(tmp_path / "kb", id_prefixes={"synthetic": "SYN"})
+    chat(root)
+    make_doc(root, "synthetic/bad.md", valid_synthetic_values(id="KB-000001"))
+    make_doc(root, "synthetic/good.md", valid_synthetic_values(id="SYN-000001"))
+    result = invoke_validate(root, "--json")
+    assert "ID_PREFIX_MISMATCH" in codes_for(result, "synthetic/bad.md")
+    assert "ID_PREFIX_MISMATCH" not in codes_for(result, "synthetic/good.md")
+
+
+def test_ac39_duplicate_literal_id_emits_one_finding_per_participant(tmp_path, invoke_validate) -> None:
+    root = make_kb(tmp_path / "kb")
+    chat(root)
+    make_doc(root, "synthetic/a.md", valid_synthetic_values(id="KB-000007"))
+    make_doc(root, "synthetic/b.md", valid_synthetic_values(id="KB-000007"))
+    result = invoke_validate(root, "--json")
+    duplicates = [item for item in finding_payload(result) if item["code"] == "ID_DUPLICATE"]
+    assert [item["path"] for item in duplicates] == ["synthetic/a.md", "synthetic/b.md"]
+    assert "synthetic/b.md" in duplicates[0]["message"]
+    assert "synthetic/a.md" in duplicates[1]["message"]

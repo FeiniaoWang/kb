@@ -7,8 +7,15 @@ from typing import Literal
 
 from pydantic import BaseModel, Field, PrivateAttr
 
-from kb.core.model import Config, ConfigLoadError, load_config
-from kb.core.scan import KB, RootDiscoveryError, ScannedMarkdown, discover_root, scan
+from kb.core.model import Config, ConfigLoadError, DocClass, load_config
+from kb.core.scan import (
+    KB,
+    RootDiscoveryError,
+    ScannedMarkdown,
+    discover_root,
+    doc_class_from_type,
+    scan,
+)
 
 Severity = Literal["error", "warning"]
 
@@ -40,6 +47,10 @@ STRING_FIELDS = {
 TIMESTAMP_FIELDS = {"timestamp", "last_human_touch", "ingested_at"}
 STATUS_VALUES = {"draft", "current", "superseded", "retired"}
 SENTENCE_END = re.compile(r"[.!?](?:\s|$)")
+CANONICAL_NUMERIC_ID = re.compile(
+    r"^(?P<prefix>[A-Z]+)-(?P<number>(?:[0-9]{6}|[1-9][0-9]{6,}))$"
+)
+RESERVED_SLUG_ID = re.compile(r"^GOVERNANCE-[A-Z][A-Z0-9-]*$")
 
 
 class Finding(BaseModel):
@@ -145,6 +156,15 @@ def _type_name(file: ScannedMarkdown) -> str:
     value = file.frontmatter.root["type"]
     assert isinstance(value, str) and value
     return value
+
+
+def _canonical_numeric_id(value: str) -> tuple[str, str] | None:
+    match = CANONICAL_NUMERIC_ID.fullmatch(value)
+    return None if match is None else (match.group("prefix"), match.group("number"))
+
+
+def _reserved_slug_id(value: str) -> bool:
+    return RESERVED_SLUG_ID.fullmatch(value) is not None
 
 
 def _class_contract(type_name: str) -> tuple[str, tuple[str, ...], set[str]]:
@@ -346,6 +366,137 @@ def _schema_findings(file: ScannedMarkdown) -> list[Finding]:
     return findings
 
 
+def _vocabulary_findings(file: ScannedMarkdown, config: Config) -> list[Finding]:
+    assert file.frontmatter is not None
+    values = file.frontmatter.root
+    type_name = _type_name(file)
+    if doc_class_from_type(type_name) is not DocClass.SYNTHETIC:
+        return []
+    findings: list[Finding] = []
+    if config.types and type_name not in config.types:
+        findings.append(
+            _finding(
+                file,
+                "TYPE_UNDECLARED",
+                "warning",
+                f"type '{type_name}' is not declared in the kb-config.json types vocabulary",
+                list(values).index("type"),
+            )
+        )
+    tags = values.get("tags")
+    if isinstance(tags, list) and all(
+        isinstance(tag, str) and tag.strip() for tag in tags
+    ):
+        key_occurrence = list(values).index("tags") if "tags" in values else 0
+        for offset, tag in enumerate(tags):
+            if tag not in config.tags:
+                findings.append(
+                    _finding(
+                        file,
+                        "TAG_UNDECLARED",
+                        "warning",
+                        f"tag '{tag}' is not declared in the kb-config.json tags vocabulary",
+                        key_occurrence * 10_000 + offset,
+                    )
+                )
+    return findings
+
+
+def _prefix_contract(type_name: str) -> str | None:
+    if type_name == "raw-source":
+        return "source"
+    if type_name in {"chat", "feedback"}:
+        return type_name
+    if doc_class_from_type(type_name) is DocClass.SYNTHETIC:
+        return "synthetic"
+    return None
+
+
+def _id_findings(file: ScannedMarkdown, config: Config) -> list[Finding]:
+    assert file.frontmatter is not None
+    values = file.frontmatter.root
+    type_name = _type_name(file)
+    class_name, _, legal = _class_contract(type_name)
+    raw_id = values.get("id")
+    if "id" not in legal or not isinstance(raw_id, str):
+        return []
+    occurrence = list(values).index("id")
+    if class_name == "governance":
+        if _reserved_slug_id(raw_id):
+            return []
+        return [
+            _finding(
+                file,
+                "ID_INVALID",
+                "error",
+                f"id '{raw_id}' is not a valid governance id",
+                occurrence,
+            )
+        ]
+    parsed = _canonical_numeric_id(raw_id)
+    if parsed is None:
+        return [
+            _finding(
+                file,
+                "ID_INVALID",
+                "error",
+                f"id '{raw_id}' is not a valid {class_name} id",
+                occurrence,
+            )
+        ]
+    class_key = _prefix_contract(type_name)
+    if class_key is None:
+        return []
+    prefix, _ = parsed
+    expected = config.id_prefixes[class_key]
+    if prefix == expected:
+        return []
+    return [
+        _finding(
+            file,
+            "ID_PREFIX_MISMATCH",
+            "error",
+            f"id prefix '{prefix}' does not match the configured {class_key} prefix '{expected}'",
+            occurrence,
+        )
+    ]
+
+
+def _duplicate_id_findings(kb: KB) -> list[Finding]:
+    participants: dict[str, list[ScannedMarkdown]] = {}
+    for file in kb.files:
+        if file.frontmatter is None:
+            continue
+        type_name = file.frontmatter.root.get("type")
+        raw_id = file.frontmatter.root.get("id")
+        if (
+            isinstance(type_name, str)
+            and type_name
+            and type_name != "log"
+            and isinstance(raw_id, str)
+        ):
+            participants.setdefault(raw_id, []).append(file)
+    findings: list[Finding] = []
+    for raw_id, files in participants.items():
+        if len(files) < 2:
+            continue
+        for file in files:
+            others = sorted(
+                item.path.as_posix() for item in files if item.path != file.path
+            )
+            occurrence = list(file.frontmatter.root).index("id")
+            findings.append(
+                _finding(
+                    file,
+                    "ID_DUPLICATE",
+                    "error",
+                    f"id '{raw_id}' is also carried by {', '.join(others)}",
+                    occurrence,
+                )
+            )
+    return findings
+
+
 def _file_findings(file: ScannedMarkdown, config: Config, kb: KB) -> list[Finding]:
     fm0 = _fm0(file, kb.root)
     if fm0:
@@ -353,6 +504,8 @@ def _file_findings(file: ScannedMarkdown, config: Config, kb: KB) -> list[Findin
     findings = _location_findings(file)
     if _type_name(file) != "log":
         findings.extend(_schema_findings(file))
+        findings.extend(_vocabulary_findings(file, config))
+        findings.extend(_id_findings(file, config))
     return findings
 
 
@@ -360,6 +513,7 @@ def _all_findings(kb: KB, config: Config) -> list[Finding]:
     findings = [
         finding for file in kb.files for finding in _file_findings(file, config, kb)
     ]
+    findings.extend(_duplicate_id_findings(kb))
     return sorted(findings, key=lambda item: (item.path, item.code, item.occurrence))
 
 
