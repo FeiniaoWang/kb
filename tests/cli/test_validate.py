@@ -399,6 +399,7 @@ def test_ac26_reserved_keys_are_forbidden_outside_their_schema(tmp_path, invoke_
     make_doc(root, "governance/conventions.md", {"id": "GOVERNANCE-CONVENTIONS", "type": "conventions", "title": "Rules", "description": "Rules.", "derived_from": ["RAW-000001"]})
     result = invoke_validate(root, "--json")
     assert codes_for(result).count("FM1_KEY_FORBIDDEN") == 3
+    assert "LINK_UNRESOLVED" not in codes_for(result)
 
 
 def test_illegal_description_is_not_evaluated_for_length(
@@ -535,3 +536,298 @@ def test_ac39_duplicate_literal_id_emits_one_finding_per_participant(tmp_path, i
     assert [item["path"] for item in duplicates] == ["synthetic/a.md", "synthetic/b.md"]
     assert "synthetic/b.md" in duplicates[0]["message"]
     assert "synthetic/a.md" in duplicates[1]["message"]
+
+
+def test_ac40_each_unresolved_parent_is_reported_in_list_order(
+    tmp_path, invoke_validate
+) -> None:
+    root = make_kb(tmp_path / "kb")
+    chat(root)
+    make_doc(
+        root,
+        "synthetic/note.md",
+        valid_synthetic_values(
+            derived_from=["CHAT-000001", "KB-999999", "RAW-999999"]
+        ),
+    )
+    result = invoke_validate(root, "--json")
+    links = [
+        item
+        for item in payload_for(result, "synthetic/note.md")
+        if item["code"] == "LINK_UNRESOLVED"
+    ]
+    assert [item["message"].split("'")[1] for item in links] == [
+        "KB-999999",
+        "RAW-999999",
+    ]
+
+
+def test_ac41_supersedes_and_feedback_about_must_resolve(
+    tmp_path, invoke_validate
+) -> None:
+    root = make_kb(tmp_path / "kb")
+    synthetic(root, supersedes="KB-999999")
+    make_doc(
+        root,
+        "raw/feedback/f.md",
+        {
+            "id": "FEED-000001",
+            "type": "feedback",
+            "ingested_at": "2026-07-16T09:00:00Z",
+            "origin": "stdin",
+            "about": "KB-999999",
+        },
+    )
+    result = invoke_validate(root, "--json")
+    links = [
+        item
+        for item in finding_payload(result)
+        if item["code"] == "LINK_UNRESOLVED"
+    ]
+    assert {item["message"].split()[0] for item in links} == {
+        "about",
+        "supersedes",
+    }
+
+
+def test_ac42_link_values_never_resolve_as_paths(tmp_path, invoke_validate) -> None:
+    root = make_kb(tmp_path / "kb")
+    chat(root)
+    make_doc(
+        root,
+        "synthetic/note.md",
+        valid_synthetic_values(derived_from=["raw/chats/session.md"]),
+    )
+    result = invoke_validate(root, "--json")
+    assert "LINK_UNRESOLVED" in codes_for(result, "synthetic/note.md")
+
+
+def test_ac43_reserved_governance_slug_resolves_as_a_parent(
+    tmp_path, invoke_validate
+) -> None:
+    root = make_kb(tmp_path / "kb")
+    chat(root)
+    make_doc(
+        root,
+        "governance/conventions.md",
+        {
+            "id": "GOVERNANCE-CONVENTIONS",
+            "type": "conventions",
+            "title": "Rules",
+            "description": "Rules.",
+        },
+    )
+    make_doc(
+        root,
+        "synthetic/note.md",
+        valid_synthetic_values(
+            derived_from=["GOVERNANCE-CONVENTIONS", "CHAT-000001"]
+        ),
+    )
+    result = invoke_validate(root, "--json")
+    assert "LINK_UNRESOLVED" not in codes_for(result, "synthetic/note.md")
+
+
+def test_ac44_empty_parent_list_is_only_dg1(tmp_path, invoke_validate) -> None:
+    root = make_kb(tmp_path / "kb")
+    make_doc(
+        root,
+        "synthetic/note.md",
+        valid_synthetic_values(derived_from=[]),
+    )
+    result = invoke_validate(root, "--json")
+    anchored = codes_for(result, "synthetic/note.md")
+    assert anchored.count("DG1_NO_PARENTS") == 1
+    assert "FM1_FIELD_MISSING" not in anchored
+    assert "DG5_NO_SESSION_PARENT" not in anchored
+
+
+def test_ac45_two_document_cycle_anchors_once_to_each_participant(
+    tmp_path, invoke_validate
+) -> None:
+    root = make_kb(tmp_path / "kb")
+    chat(root)
+    make_doc(
+        root,
+        "synthetic/a.md",
+        valid_synthetic_values(
+            id="KB-000001", derived_from=["KB-000002", "CHAT-000001"]
+        ),
+    )
+    make_doc(
+        root,
+        "synthetic/b.md",
+        valid_synthetic_values(
+            id="KB-000002", derived_from=["KB-000001", "CHAT-000001"]
+        ),
+    )
+    result = invoke_validate(root, "--json")
+    cycles = [
+        item for item in finding_payload(result) if item["code"] == "DG2_CYCLE"
+    ]
+    assert [item["path"] for item in cycles] == [
+        "synthetic/a.md",
+        "synthetic/b.md",
+    ]
+    assert (
+        cycles[0]["message"]
+        == "derivation cycle: KB-000001 -> KB-000002 -> KB-000001"
+    )
+    assert (
+        cycles[1]["message"]
+        == "derivation cycle: KB-000002 -> KB-000001 -> KB-000002"
+    )
+
+
+def test_ac46_self_parent_is_a_one_node_cycle(tmp_path, invoke_validate) -> None:
+    root = make_kb(tmp_path / "kb")
+    chat(root)
+    make_doc(
+        root,
+        "synthetic/a.md",
+        valid_synthetic_values(
+            derived_from=["KB-000001", "CHAT-000001"]
+        ),
+    )
+    result = invoke_validate(root, "--json")
+    cycle = [
+        item
+        for item in payload_for(result, "synthetic/a.md")
+        if item["code"] == "DG2_CYCLE"
+    ]
+    assert len(cycle) == 1
+    assert cycle[0]["message"] == "derivation cycle: KB-000001 -> KB-000001"
+
+
+def test_ac47_diamond_derivation_is_acyclic(tmp_path, invoke_validate) -> None:
+    root = make_kb(tmp_path / "kb")
+    chat(root)
+    make_doc(
+        root,
+        "synthetic/one.md",
+        valid_synthetic_values(id="KB-000001"),
+    )
+    make_doc(
+        root,
+        "synthetic/two.md",
+        valid_synthetic_values(
+            id="KB-000002", derived_from=["KB-000001", "CHAT-000001"]
+        ),
+    )
+    make_doc(
+        root,
+        "synthetic/three.md",
+        valid_synthetic_values(
+            id="KB-000003", derived_from=["KB-000001", "CHAT-000001"]
+        ),
+    )
+    make_doc(
+        root,
+        "synthetic/four.md",
+        valid_synthetic_values(
+            id="KB-000004",
+            derived_from=[
+                "KB-000002",
+                "KB-000002",
+                "KB-000003",
+                "CHAT-000001",
+            ],
+        ),
+    )
+    result = invoke_validate(root, "--json")
+    assert "DG2_CYCLE" not in codes_for(result)
+
+
+def test_ac48_a_resolvable_chat_parent_is_required(
+    tmp_path, invoke_validate
+) -> None:
+    root = make_kb(tmp_path / "without-chat")
+    source(root)
+    chat(root)
+    make_doc(
+        root,
+        "synthetic/parent.md",
+        valid_synthetic_values(
+            id="KB-000002", derived_from=["CHAT-000001"]
+        ),
+    )
+    make_doc(
+        root,
+        "synthetic/note.md",
+        valid_synthetic_values(derived_from=["RAW-000001", "KB-000002"]),
+    )
+    result = invoke_validate(root, "--json")
+    assert "DG5_NO_SESSION_PARENT" in codes_for(result, "synthetic/note.md")
+    root = make_kb(tmp_path / "with-chat")
+    source(root)
+    chat(root)
+    make_doc(
+        root,
+        "synthetic/note.md",
+        valid_synthetic_values(derived_from=["RAW-000001", "CHAT-000001"]),
+    )
+    result = invoke_validate(root, "--json")
+    assert "DG5_NO_SESSION_PARENT" not in codes_for(
+        result, "synthetic/note.md"
+    )
+
+
+def test_ac49_dg5_uses_only_resolvable_parents(tmp_path, invoke_validate) -> None:
+    root = make_kb(tmp_path / "none")
+    make_doc(
+        root,
+        "synthetic/note.md",
+        valid_synthetic_values(derived_from=["CHAT-999999"]),
+    )
+    result = invoke_validate(root, "--json")
+    assert {"LINK_UNRESOLVED", "DG5_NO_SESSION_PARENT"}.issubset(
+        codes_for(result, "synthetic/note.md")
+    )
+    root = make_kb(tmp_path / "one")
+    chat(root)
+    make_doc(
+        root,
+        "synthetic/note.md",
+        valid_synthetic_values(derived_from=["KB-999999", "CHAT-000001"]),
+    )
+    result = invoke_validate(root, "--json")
+    assert "LINK_UNRESOLVED" in codes_for(result, "synthetic/note.md")
+    assert "DG5_NO_SESSION_PARENT" not in codes_for(result, "synthetic/note.md")
+
+
+def test_derivation_cycles_use_the_first_document_for_duplicate_ids(
+    tmp_path, invoke_validate
+) -> None:
+    root = make_kb(tmp_path / "kb")
+    chat(root)
+    make_doc(
+        root,
+        "synthetic/a-first.md",
+        valid_synthetic_values(
+            id="KB-000001", derived_from=["KB-000002", "CHAT-000001"]
+        ),
+    )
+    make_doc(
+        root,
+        "synthetic/b-second.md",
+        valid_synthetic_values(
+            id="KB-000002", derived_from=["KB-000001", "CHAT-000001"]
+        ),
+    )
+    make_doc(
+        root,
+        "synthetic/z-duplicate.md",
+        valid_synthetic_values(
+            id="KB-000001", derived_from=["CHAT-000001"]
+        ),
+    )
+
+    result = invoke_validate(root, "--json")
+
+    cycles = [
+        item for item in finding_payload(result) if item["code"] == "DG2_CYCLE"
+    ]
+    assert [item["path"] for item in cycles] == [
+        "synthetic/a-first.md",
+        "synthetic/b-second.md",
+    ]

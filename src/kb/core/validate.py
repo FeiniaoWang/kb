@@ -7,7 +7,7 @@ from typing import Literal
 
 from pydantic import BaseModel, Field, PrivateAttr
 
-from kb.core.model import Config, ConfigLoadError, DocClass, load_config
+from kb.core.model import Config, ConfigLoadError, DocClass, Document, load_config
 from kb.core.scan import (
     KB,
     RootDiscoveryError,
@@ -462,6 +462,97 @@ def _id_findings(file: ScannedMarkdown, config: Config) -> list[Finding]:
     ]
 
 
+def _resolved_document(kb: KB, value: str) -> Document | None:
+    return kb.by_id.get(value)
+
+
+def _well_shaped_string_list(value: object) -> bool:
+    return isinstance(value, list) and all(
+        isinstance(item, str) and item.strip() for item in value
+    )
+
+
+def _relationship_findings(file: ScannedMarkdown, kb: KB) -> list[Finding]:
+    assert file.frontmatter is not None
+    values = file.frontmatter.root
+    type_name = _type_name(file)
+    doc_class = doc_class_from_type(type_name)
+    findings: list[Finding] = []
+    if doc_class is DocClass.SYNTHETIC:
+        derived_from = values.get("derived_from")
+        if _well_shaped_string_list(derived_from):
+            occurrence = list(values).index("derived_from")
+            for offset, parent in enumerate(derived_from):
+                if _resolved_document(kb, parent) is None:
+                    findings.append(
+                        _finding(
+                            file,
+                            "LINK_UNRESOLVED",
+                            "error",
+                            f"derived_from reference '{parent}' does not resolve to a document id",
+                            occurrence * 10_000 + offset,
+                        )
+                    )
+            if not derived_from:
+                findings.append(
+                    _finding(
+                        file,
+                        "DG1_NO_PARENTS",
+                        "error",
+                        "derived_from is empty — every synthetic document declares at least one parent",
+                        occurrence,
+                    )
+                )
+            elif not any(
+                parent_doc is not None
+                and parent_doc.frontmatter.root.get("type") == "chat"
+                for parent_doc in (
+                    _resolved_document(kb, parent) for parent in derived_from
+                )
+            ):
+                findings.append(
+                    _finding(
+                        file,
+                        "DG5_NO_SESSION_PARENT",
+                        "error",
+                        "no session record (type chat) among derived_from parents",
+                        occurrence,
+                    )
+                )
+        supersedes = values.get("supersedes")
+        if (
+            isinstance(supersedes, str)
+            and supersedes.strip()
+            and _resolved_document(kb, supersedes) is None
+        ):
+            findings.append(
+                _finding(
+                    file,
+                    "LINK_UNRESOLVED",
+                    "error",
+                    f"supersedes reference '{supersedes}' does not resolve to a document id",
+                    list(values).index("supersedes"),
+                )
+            )
+    if type_name == "feedback":
+        about = values.get("about")
+        if (
+            isinstance(about, str)
+            and about.strip()
+            and _resolved_document(kb, about) is None
+        ):
+            findings.append(
+                _finding(
+                    file,
+                    "LINK_UNRESOLVED",
+                    "error",
+                    f"about reference '{about}' does not resolve to a document id",
+                    list(values).index("about"),
+                )
+            )
+    return findings
+
+
 def _duplicate_id_findings(kb: KB) -> list[Finding]:
     participants: dict[str, list[ScannedMarkdown]] = {}
     for file in kb.files:
@@ -497,6 +588,68 @@ def _duplicate_id_findings(kb: KB) -> list[Finding]:
     return findings
 
 
+def _cycle_from(start: str, graph: dict[str, list[str]]) -> list[str] | None:
+    def visit(current: str, path: list[str]) -> list[str] | None:
+        for target in graph.get(current, []):
+            if target == start:
+                return [*path, start]
+            if target in path:
+                continue
+            found = visit(target, [*path, target])
+            if found is not None:
+                return found
+        return None
+
+    return visit(start, [start])
+
+
+def _derivation_graph(kb: KB) -> dict[str, list[str]]:
+    graph: dict[str, list[str]] = {}
+    for document in kb.by_id.values():
+        if document.doc_class is not DocClass.SYNTHETIC or document.id is None:
+            continue
+        parents = document.frontmatter.root.get("derived_from")
+        if not _well_shaped_string_list(parents):
+            continue
+        synthetic_parents = [
+            parent
+            for parent in parents
+            if (resolved := kb.by_id.get(parent)) is not None
+            and resolved.doc_class is DocClass.SYNTHETIC
+        ]
+        graph[document.id] = list(dict.fromkeys(synthetic_parents))
+    return graph
+
+
+def _cycle_findings(kb: KB) -> list[Finding]:
+    graph = _derivation_graph(kb)
+    files_by_path = {file.path: file for file in kb.files}
+    findings: list[Finding] = []
+    for document in kb.by_id.values():
+        if document.doc_class is not DocClass.SYNTHETIC or document.id is None:
+            continue
+        cycle = _cycle_from(document.id, graph)
+        if cycle is None:
+            continue
+        file = files_by_path[document.path]
+        parents = file.frontmatter.root.get("derived_from")
+        occurrence = (
+            list(file.frontmatter.root).index("derived_from")
+            if _well_shaped_string_list(parents)
+            else 0
+        )
+        findings.append(
+            _finding(
+                file,
+                "DG2_CYCLE",
+                "error",
+                f"derivation cycle: {' -> '.join(cycle)}",
+                occurrence,
+            )
+        )
+    return findings
+
+
 def _file_findings(file: ScannedMarkdown, config: Config, kb: KB) -> list[Finding]:
     fm0 = _fm0(file, kb.root)
     if fm0:
@@ -506,6 +659,7 @@ def _file_findings(file: ScannedMarkdown, config: Config, kb: KB) -> list[Findin
         findings.extend(_schema_findings(file))
         findings.extend(_vocabulary_findings(file, config))
         findings.extend(_id_findings(file, config))
+        findings.extend(_relationship_findings(file, kb))
     return findings
 
 
@@ -514,6 +668,7 @@ def _all_findings(kb: KB, config: Config) -> list[Finding]:
         finding for file in kb.files for finding in _file_findings(file, config, kb)
     ]
     findings.extend(_duplicate_id_findings(kb))
+    findings.extend(_cycle_findings(kb))
     return sorted(findings, key=lambda item: (item.path, item.code, item.occurrence))
 
 
