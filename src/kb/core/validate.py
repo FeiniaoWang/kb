@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Literal
@@ -121,23 +122,25 @@ def _finding(
 
 def _fm0(file: ScannedMarkdown, root: Path) -> list[Finding]:
     if file.parse_error is not None:
+        reason = " ".join(file.parse_error.split())
         return [
             _finding(
                 file,
                 "FM0_UNPARSEABLE",
                 "error",
-                f"frontmatter cannot be parsed: {file.parse_error}",
+                f"frontmatter cannot be parsed: {reason}",
             )
         ]
     try:
         (root / file.path).read_text(encoding="utf-8")
     except (OSError, UnicodeError) as error:
+        reason = " ".join(str(error).split())
         return [
             _finding(
                 file,
                 "FM0_UNPARSEABLE",
                 "error",
-                f"frontmatter cannot be parsed: {error}",
+                f"frontmatter cannot be parsed: {reason}",
             )
         ]
     assert file.frontmatter is not None
@@ -275,7 +278,7 @@ def _parse_timestamp(value: object) -> datetime | None:
     if not isinstance(value, str):
         return None
     try:
-        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+        return datetime.fromisoformat(value)
     except ValueError:
         return None
 
@@ -661,27 +664,150 @@ def _duplicate_id_findings(kb: KB) -> list[Finding]:
     return findings
 
 
+def _finish_order(nodes: list[str], graph: dict[str, list[str]]) -> list[str]:
+    visited: set[str] = set()
+    finished: list[str] = []
+    for start in nodes:
+        if start in visited:
+            continue
+        visited.add(start)
+        stack = [(start, 0)]
+        while stack:
+            current, target_index = stack[-1]
+            targets = graph.get(current, [])
+            if target_index >= len(targets):
+                stack.pop()
+                finished.append(current)
+                continue
+            target = targets[target_index]
+            stack[-1] = (current, target_index + 1)
+            if target not in visited:
+                visited.add(target)
+                stack.append((target, 0))
+    return finished
+
+
+def _component_routes(
+    root: str,
+    members: set[str],
+    graph: dict[str, list[str]],
+    reverse: dict[str, list[str]],
+) -> tuple[dict[str, str | None], dict[str, str]]:
+    from_root: dict[str, str | None] = {root: None}
+    queue = deque([root])
+    while queue:
+        current = queue.popleft()
+        for target in graph.get(current, []):
+            if target in members and target not in from_root:
+                from_root[target] = current
+                queue.append(target)
+
+    to_root: dict[str, str] = {}
+    queue = deque([root])
+    reached = {root}
+    while queue:
+        current = queue.popleft()
+        for predecessor in reverse[current]:
+            if predecessor in members and predecessor not in reached:
+                reached.add(predecessor)
+                to_root[predecessor] = current
+                queue.append(predecessor)
+    return from_root, to_root
+
+
+def _route_from_root(target: str, predecessors: dict[str, str | None]) -> list[str]:
+    reversed_route = [target]
+    while (predecessor := predecessors[reversed_route[-1]]) is not None:
+        reversed_route.append(predecessor)
+    return list(reversed(reversed_route))
+
+
+def _simple_cycle(start: str, closed_walk: list[str]) -> list[str]:
+    cycle: list[str] = []
+    positions: dict[str, int] = {}
+    for node in closed_walk:
+        if node == start and cycle:
+            return [*cycle, start]
+        previous = positions.get(node)
+        if previous is None:
+            positions[node] = len(cycle)
+            cycle.append(node)
+            continue
+        for removed in cycle[previous + 1 :]:
+            positions.pop(removed)
+        cycle = cycle[: previous + 1]
+    raise AssertionError("cycle reconstruction did not return to its participant")
+
+
+def _component_cycle_paths(
+    component: list[str],
+    graph: dict[str, list[str]],
+    reverse: dict[str, list[str]],
+) -> dict[str, list[str]]:
+    members = set(component)
+    root = component[0]
+    from_root, to_root = _component_routes(root, members, graph, reverse)
+    paths: dict[str, list[str]] = {}
+    for participant in component:
+        next_node = next(
+            target for target in graph.get(participant, []) if target in members
+        )
+        if next_node == participant:
+            paths[participant] = [participant, participant]
+            continue
+        closed_walk = [participant, next_node]
+        while closed_walk[-1] != root:
+            closed_walk.append(to_root[closed_walk[-1]])
+        route_back = _route_from_root(participant, from_root)
+        closed_walk.extend(route_back[1:])
+        paths[participant] = _simple_cycle(participant, closed_walk)
+    return paths
+
+
+def _cycle_paths(graph: dict[str, list[str]]) -> dict[str, list[str]]:
+    """Return deterministic cycles after one iterative SCC discovery pass."""
+
+    nodes = list(graph)
+    reverse: dict[str, list[str]] = {node: [] for node in nodes}
+    self_loops: set[str] = set()
+    for source, targets in graph.items():
+        for target in targets:
+            if target not in reverse:
+                reverse[target] = []
+                nodes.append(target)
+            reverse[target].append(source)
+            if target == source:
+                self_loops.add(source)
+
+    finished = _finish_order(nodes, graph)
+    assigned: set[str] = set()
+    cyclic_components: list[list[str]] = []
+    node_order = {node: index for index, node in enumerate(nodes)}
+    for start in reversed(finished):
+        if start in assigned:
+            continue
+        assigned.add(start)
+        component: list[str] = []
+        stack = [start]
+        while stack:
+            current = stack.pop()
+            component.append(current)
+            for predecessor in reversed(reverse[current]):
+                if predecessor not in assigned:
+                    assigned.add(predecessor)
+                    stack.append(predecessor)
+        component.sort(key=node_order.__getitem__)
+        if len(component) > 1 or component[0] in self_loops:
+            cyclic_components.append(component)
+
+    paths: dict[str, list[str]] = {}
+    for component in cyclic_components:
+        paths.update(_component_cycle_paths(component, graph, reverse))
+    return {node: paths[node] for node in nodes if node in paths}
+
+
 def _cycle_from(start: str, graph: dict[str, list[str]]) -> list[str] | None:
-    path = [start]
-    path_members = {start}
-    stack = [(start, 0)]
-    while stack:
-        current, target_index = stack[-1]
-        targets = graph.get(current, [])
-        if target_index >= len(targets):
-            stack.pop()
-            path_members.remove(path.pop())
-            continue
-        target = targets[target_index]
-        stack[-1] = (current, target_index + 1)
-        if target == start:
-            return [*path, start]
-        if target in path_members:
-            continue
-        path.append(target)
-        path_members.add(target)
-        stack.append((target, 0))
-    return None
+    return _cycle_paths(graph).get(start)
 
 
 def _derivation_graph(kb: KB) -> dict[str, list[str]]:
@@ -704,12 +830,13 @@ def _derivation_graph(kb: KB) -> dict[str, list[str]]:
 
 def _cycle_findings(kb: KB) -> list[Finding]:
     graph = _derivation_graph(kb)
+    cycle_paths = _cycle_paths(graph)
     files_by_path = {file.path: file for file in kb.files}
     findings: list[Finding] = []
     for document in kb.by_id.values():
         if document.doc_class is not DocClass.SYNTHETIC or document.id is None:
             continue
-        cycle = _cycle_from(document.id, graph)
+        cycle = cycle_paths.get(document.id)
         if cycle is None:
             continue
         file = files_by_path[document.path]

@@ -8,6 +8,7 @@ from pathlib import Path
 import yaml
 
 from conftest import make_doc, make_kb
+from kb.cli.app import app
 from kb.core.validate import Finding
 
 
@@ -229,6 +230,84 @@ def test_ac10_stray_readme_is_in_the_check_universe(tmp_path, invoke_validate) -
     result = invoke_validate(root)
     assert result.exit_code == 1
     assert "error  README.md  FM0_UNPARSEABLE" in result.stdout
+
+
+def test_regression_invalid_yaml_finding_occupies_one_physical_line(
+    tmp_path, invoke_validate
+) -> None:
+    root = make_kb(tmp_path / "kb")
+    (root / "broken.md").write_text("---\ntype: [\n---\n", encoding="utf-8")
+
+    result = invoke_validate(root)
+
+    assert result.exit_code == 1
+    assert result.stdout.splitlines() == [
+        "error  broken.md  FM0_UNPARSEABLE  frontmatter cannot be parsed: "
+        "while parsing a flow node expected the node content, but found '<stream "
+        "end>' in \"<unicode string>\", line 2, column 1: ^",
+        "1 finding (1 error, 0 warnings) — checked 1 files",
+    ]
+
+
+def test_regression_real_write_commands_emit_a_kb_that_validates_cleanly(
+    tmp_path, runner
+) -> None:
+    root = tmp_path / "kb"
+    initialized = runner.invoke(app, ["init", "--root", str(root)])
+    ingested = runner.invoke(
+        app,
+        [
+            "ingest",
+            "--class",
+            "chat",
+            "--from",
+            "stdin",
+            "--title",
+            "Planning session",
+            "--kb",
+            str(root),
+        ],
+        input="Session evidence.",
+    )
+    created = runner.invoke(
+        app,
+        [
+            "create",
+            "--type",
+            "spec",
+            "--title",
+            "Validated output",
+            "--description",
+            "A document created by the official command.",
+            "--derived-from",
+            "CHAT-000001",
+            "--kb",
+            str(root),
+        ],
+    )
+
+    result = runner.invoke(app, ["validate", "--kb", str(root)])
+
+    assert initialized.exit_code == 0
+    assert ingested.exit_code == 0
+    assert created.exit_code == 0
+    assert result.exit_code == 0
+    assert result.stdout == "no findings — checked 13 files\n"
+
+
+def test_regression_date_with_trailing_z_is_not_an_iso_datetime(
+    tmp_path, invoke_validate
+) -> None:
+    root = make_kb(tmp_path / "kb")
+    synthetic(root, timestamp="2026-07-16Z")
+
+    result = invoke_validate(root, "--json")
+
+    assert result.exit_code == 1
+    assert codes_for(result, "synthetic/note.md") == ["FM1_FIELD_INVALID"]
+    assert payload_for(result, "synthetic/note.md")[0]["message"] == (
+        "field 'timestamp' is invalid: must be an ISO-8601 date-time string"
+    )
 
 
 def test_ac11_raw_subtypes_must_match_their_class_directories(tmp_path, invoke_validate) -> None:

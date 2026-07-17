@@ -14,6 +14,21 @@ NO_KB_MESSAGE = (
     "not inside a knowledge base (no kb-config.json found); "
     "run 'kb init' or pass --kb"
 )
+YAML_TIMESTAMP_TAG = "tag:yaml.org,2002:timestamp"
+
+
+class _FrontmatterSafeLoader(yaml.SafeLoader):
+    """Safe YAML loader that leaves timestamp-looking scalars as strings."""
+
+
+_FrontmatterSafeLoader.yaml_implicit_resolvers = {
+    initial: [
+        (tag, pattern)
+        for tag, pattern in resolvers
+        if tag != YAML_TIMESTAMP_TAG
+    ]
+    for initial, resolvers in yaml.SafeLoader.yaml_implicit_resolvers.items()
+}
 
 
 class ScannedMarkdown(BaseModel):
@@ -61,7 +76,7 @@ def read_frontmatter(path: Path) -> Frontmatter:
             yaml_lines.append(line)
         else:
             raise ValueError("missing closing frontmatter delimiter")
-    parsed: Any = yaml.safe_load("".join(yaml_lines))
+    parsed: Any = yaml.load("".join(yaml_lines), Loader=_FrontmatterSafeLoader)
     if not isinstance(parsed, dict):
         raise ValueError("frontmatter must be a YAML mapping")
     return Frontmatter.model_validate(parsed)
