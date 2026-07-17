@@ -863,3 +863,29 @@ def test_relationship_findings_follow_key_then_list_order(
         "KB-999999",
         "KB-999997",
     ]
+
+
+def test_relationship_occurrences_have_no_list_length_ceiling(
+    tmp_path, invoke_validate
+) -> None:
+    root = make_kb(tmp_path / "kb")
+    parents = [
+        f"KB-{number:06d}" for number in range(200_000, 210_002)
+    ]
+    base_values = valid_synthetic_values(derived_from=parents)
+    values: dict[str, object] = {}
+    for key, value in base_values.items():
+        values[key] = value
+        if key == "derived_from":
+            values["supersedes"] = "KB-999999"
+    make_doc(root, "synthetic/note.md", values)
+
+    result = invoke_validate(root, "--json")
+
+    links = [
+        item
+        for item in payload_for(result, "synthetic/note.md")
+        if item["code"] == "LINK_UNRESOLVED"
+    ]
+    assert [item["message"].split("'")[1] for item in links[:-1]] == parents
+    assert links[-1]["message"].startswith("supersedes reference")

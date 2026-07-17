@@ -51,7 +51,6 @@ CANONICAL_NUMERIC_ID = re.compile(
     r"^(?P<prefix>[A-Z]+)-(?P<number>(?:[0-9]{6}|[1-9][0-9]{6,}))$"
 )
 RESERVED_SLUG_ID = re.compile(r"^GOVERNANCE-[A-Z][A-Z0-9-]*$")
-OCCURRENCE_SCALE = 10_000
 
 
 class Finding(BaseModel):
@@ -60,10 +59,10 @@ class Finding(BaseModel):
     path: str
     id: str | None
     message: str
-    _occurrence: int = PrivateAttr(default=0)
+    _occurrence: tuple[int, int] = PrivateAttr(default=(0, 0))
 
     @property
-    def occurrence(self) -> int:
+    def occurrence(self) -> tuple[int, int]:
         return self._occurrence
 
 
@@ -104,7 +103,7 @@ def _finding(
     code: str,
     severity: Severity,
     message: str,
-    occurrence: int = 0,
+    occurrence: int | tuple[int, int] = 0,
 ) -> Finding:
     finding = Finding(
         code=code,
@@ -113,7 +112,9 @@ def _finding(
         id=_literal_id(file),
         message=message,
     )
-    finding._occurrence = occurrence
+    finding._occurrence = (
+        occurrence if isinstance(occurrence, tuple) else (occurrence, 0)
+    )
     return finding
 
 
@@ -397,7 +398,7 @@ def _vocabulary_findings(file: ScannedMarkdown, config: Config) -> list[Finding]
                         "TAG_UNDECLARED",
                         "warning",
                         f"tag '{tag}' is not declared in the kb-config.json tags vocabulary",
-                        key_occurrence * 10_000 + offset,
+                        (key_occurrence, offset),
                     )
                 )
     return findings
@@ -482,9 +483,7 @@ def _relationship_findings(file: ScannedMarkdown, kb: KB) -> list[Finding]:
     if doc_class is DocClass.SYNTHETIC:
         derived_from = values.get("derived_from")
         if _well_shaped_string_list(derived_from):
-            occurrence = (
-                list(values).index("derived_from") * OCCURRENCE_SCALE
-            )
+            occurrence = list(values).index("derived_from")
             for offset, parent in enumerate(derived_from):
                 if _resolved_document(kb, parent) is None:
                     findings.append(
@@ -493,7 +492,7 @@ def _relationship_findings(file: ScannedMarkdown, kb: KB) -> list[Finding]:
                             "LINK_UNRESOLVED",
                             "error",
                             f"derived_from reference '{parent}' does not resolve to a document id",
-                            occurrence + offset,
+                            (occurrence, offset),
                         )
                     )
             if not derived_from:
@@ -534,7 +533,7 @@ def _relationship_findings(file: ScannedMarkdown, kb: KB) -> list[Finding]:
                     "LINK_UNRESOLVED",
                     "error",
                     f"supersedes reference '{supersedes}' does not resolve to a document id",
-                    list(values).index("supersedes") * OCCURRENCE_SCALE,
+                    list(values).index("supersedes"),
                 )
             )
     if type_name == "feedback":
@@ -550,7 +549,7 @@ def _relationship_findings(file: ScannedMarkdown, kb: KB) -> list[Finding]:
                     "LINK_UNRESOLVED",
                     "error",
                     f"about reference '{about}' does not resolve to a document id",
-                    list(values).index("about") * OCCURRENCE_SCALE,
+                    list(values).index("about"),
                 )
             )
     return findings
