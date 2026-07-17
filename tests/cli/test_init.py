@@ -646,7 +646,6 @@ def test_ac29_init_is_git_agnostic(tmp_path, invoke_init, monkeypatch) -> None:
     assert "git" not in payload
 
 
-@pytest.mark.xfail(reason="kb validate is not implemented yet", strict=True)
 def test_ac30_fresh_scaffold_is_born_valid(tmp_path, invoke_init, runner) -> None:
     assert invoke_init(tmp_path).exit_code == 0
     result = runner.invoke(app, ["validate", "--kb", str(tmp_path)])

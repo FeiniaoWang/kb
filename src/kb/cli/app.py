@@ -3,6 +3,7 @@ import typer
 from kb.cli.create import CREATE_DESCRIPTION, CREATE_EXAMPLES, create_command
 from kb.cli.ingest import INGEST_DESCRIPTION, INGEST_EXAMPLES, ingest_command
 from kb.cli.init import INIT_DESCRIPTION, INIT_EXAMPLES, init_command
+from kb.cli.validate import VALIDATE_DESCRIPTION, VALIDATE_EXAMPLES, validate_command
 
 
 app = typer.Typer(no_args_is_help=True, rich_markup_mode=None)
@@ -30,3 +31,9 @@ app.command(
     help=CREATE_DESCRIPTION.replace("\n\n", "\n\n\b\n", 1),
     epilog=CREATE_EXAMPLES,
 )(create_command)
+
+app.command(
+    name="validate",
+    help=VALIDATE_DESCRIPTION.replace("\n\n", "\n\n\b\n", 1),
+    epilog=VALIDATE_EXAMPLES,
+)(validate_command)

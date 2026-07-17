@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import json
 from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 import pytest
+import yaml
 from typer.testing import CliRunner
 
 from kb.cli.app import app
@@ -53,6 +56,64 @@ def invoke_create(runner: CliRunner, monkeypatch) -> Callable[..., object]:
     ):
         monkeypatch.chdir(cwd)
         return runner.invoke(app, ["create", *arguments], input=input)
+
+    return invoke
+
+
+def make_kb(
+    root: Path,
+    *,
+    types: list[str] | None = None,
+    tags: list[str] | None = None,
+    id_prefixes: dict[str, str] | None = None,
+) -> Path:
+    root.mkdir(parents=True, exist_ok=True)
+    prefixes = {
+        "synthetic": "KB",
+        "source": "RAW",
+        "chat": "CHAT",
+        "feedback": "FEED",
+    }
+    if id_prefixes is not None:
+        prefixes.update(id_prefixes)
+    (root / "kb-config.json").write_text(
+        json.dumps(
+            {
+                "schema": 1,
+                "types": [] if types is None else types,
+                "tags": [] if tags is None else tags,
+                "id_prefixes": prefixes,
+                "propagation_auto_safe": [],
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    return root
+
+
+def make_doc(
+    root: Path,
+    relative: str,
+    frontmatter: dict[str, Any],
+    body: str = "body\n",
+) -> Path:
+    path = root / relative
+    path.parent.mkdir(parents=True, exist_ok=True)
+    yaml_text = yaml.safe_dump(frontmatter, sort_keys=False, allow_unicode=True)
+    path.write_text(f"---\n{yaml_text}---\n{body}", encoding="utf-8")
+    return path
+
+
+@pytest.fixture
+def invoke_validate(runner: CliRunner, monkeypatch) -> Callable[..., object]:
+    def invoke(
+        cwd: Path,
+        *arguments: str,
+        input: str | bytes | None = None,
+    ):
+        monkeypatch.chdir(cwd)
+        return runner.invoke(app, ["validate", *arguments], input=input)
 
     return invoke
 

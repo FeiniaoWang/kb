@@ -4,6 +4,7 @@ from typing import Protocol
 from kb.core.create import CreateResult
 from kb.core.housekeeping import InitFailure, InitResult
 from kb.core.ingest import IngestResult
+from kb.core.validate import ValidateResult
 
 
 class CommandError(Protocol):
@@ -74,6 +75,43 @@ def render_create_json(result: CreateResult) -> str:
             "superseded": result.superseded,
             "created": sorted(result.created),
             "updated": sorted(result.updated),
+        },
+        ensure_ascii=False,
+    )
+
+
+def render_validate_text(result: ValidateResult) -> str:
+    lines = [
+        f"{item.severity}  {item.path}  {item.code}  {item.message}"
+        for item in result.findings
+    ]
+    errors = sum(item.severity == "error" for item in result.findings)
+    warnings = sum(item.severity == "warning" for item in result.findings)
+    total = len(result.findings)
+    if total == 0:
+        lines.append(f"no findings — checked {result.checked} files")
+    else:
+        noun = "finding" if total == 1 else "findings"
+        error_noun = "error" if errors == 1 else "errors"
+        warning_noun = "warning" if warnings == 1 else "warnings"
+        lines.append(
+            f"{total} {noun} ({errors} {error_noun}, "
+            f"{warnings} {warning_noun}) — "
+            f"checked {result.checked} files"
+        )
+    return "\n".join(lines)
+
+
+def render_validate_json(result: ValidateResult) -> str:
+    errors = sum(item.severity == "error" for item in result.findings)
+    warnings = sum(item.severity == "warning" for item in result.findings)
+    return json.dumps(
+        {
+            "ok": result.ok,
+            "checked": result.checked,
+            "findings": [item.model_dump() for item in result.findings],
+            "counts": {"errors": errors, "warnings": warnings},
+            "unresolved_refs": result.unresolved_refs,
         },
         ensure_ascii=False,
     )
