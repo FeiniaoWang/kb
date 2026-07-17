@@ -97,8 +97,9 @@ class Document(BaseModel):
         doc_class: DocClass,
         frontmatter: Frontmatter,
     ) -> Document:
+        raw_id = frontmatter.root.get("id")
         document = cls(
-            id=frontmatter.root.get("id"),
+            id=raw_id if isinstance(raw_id, str) else None,
             path=relative_path,
             doc_class=doc_class,
             frontmatter=frontmatter,

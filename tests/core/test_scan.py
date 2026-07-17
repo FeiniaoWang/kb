@@ -52,28 +52,47 @@ def test_scan_classifies_from_type_and_excludes_log(tmp_path) -> None:
     assert all(doc.path != Path("log.md") for doc in kb.documents)
 
 
-def test_scan_collects_bad_yaml_and_missing_type(tmp_path) -> None:
+def test_scan_retains_parse_failures_and_missing_type_in_complete_file_view(tmp_path) -> None:
     write_doc(tmp_path, "bad-yaml.md", "type: [\n")
     write_doc(tmp_path, "missing-type.md", "id: RAW-000004\n")
     kb = scan(tmp_path)
     assert kb.documents == []
+    assert [item.path.as_posix() for item in kb.files] == [
+        "bad-yaml.md",
+        "missing-type.md",
+    ]
+    assert kb.files[0].frontmatter is None
+    assert kb.files[0].parse_error is not None
+    assert kb.files[1].frontmatter is not None
+    assert kb.files[1].parse_error is None
     assert [path.as_posix() for path, _ in kb.malformed] == [
         "bad-yaml.md",
         "missing-type.md",
     ]
 
 
-def test_scan_collects_document_validation_errors_in_path_order(tmp_path) -> None:
-    write_doc(tmp_path, "z-invalid.md", "id: [RAW-000009]\ntype: raw-source\n")
-    write_doc(tmp_path, "a-invalid.md", "id: 7\ntype: raw-source\n")
-    write_doc(tmp_path, "middle.md", "id: RAW-000005\ntype: raw-source\n")
+def test_scan_keeps_bad_id_shapes_classifiable_for_validate(tmp_path) -> None:
+    write_doc(tmp_path, "raw/sources/z-invalid.md", "id: [RAW-000009]\ntype: raw-source\n")
+    write_doc(tmp_path, "raw/sources/a-invalid.md", "id: 7\ntype: raw-source\n")
+    write_doc(tmp_path, "raw/sources/middle.md", "id: RAW-000005\ntype: raw-source\n")
     kb = scan(tmp_path)
-    assert [document.path.as_posix() for document in kb.documents] == ["middle.md"]
-    assert [path.as_posix() for path, _ in kb.malformed] == [
-        "a-invalid.md",
-        "z-invalid.md",
+    assert [document.path.as_posix() for document in kb.documents] == [
+        "raw/sources/a-invalid.md",
+        "raw/sources/middle.md",
+        "raw/sources/z-invalid.md",
     ]
-    assert all("id" in error for _, error in kb.malformed)
+    assert [document.id for document in kb.documents] == [None, "RAW-000005", None]
+    assert kb.malformed == []
+
+
+def test_scan_retains_log_in_files_but_excludes_it_from_documents(tmp_path) -> None:
+    write_doc(tmp_path, "log.md", "type: log\ncustom: ignored\n")
+    kb = scan(tmp_path)
+    assert [item.path.as_posix() for item in kb.files] == ["log.md"]
+    assert kb.files[0].frontmatter.root["type"] == "log"
+    assert kb.documents == []
+    assert kb.by_id == {}
+    assert kb.malformed == []
 
 
 def test_document_body_is_loaded_lazily(tmp_path, monkeypatch) -> None:

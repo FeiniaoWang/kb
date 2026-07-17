@@ -16,8 +16,15 @@ NO_KB_MESSAGE = (
 )
 
 
+class ScannedMarkdown(BaseModel):
+    path: Path
+    frontmatter: Frontmatter | None = None
+    parse_error: str | None = None
+
+
 class KB(BaseModel):
     root: Path
+    files: list[ScannedMarkdown] = Field(default_factory=list)
     documents: list[Document] = Field(default_factory=list)
     by_id: dict[str, Document] = Field(default_factory=dict)
     malformed: list[tuple[Path, str]] = Field(default_factory=list)
@@ -57,12 +64,10 @@ def read_frontmatter(path: Path) -> Frontmatter:
     parsed: Any = yaml.safe_load("".join(yaml_lines))
     if not isinstance(parsed, dict):
         raise ValueError("frontmatter must be a YAML mapping")
-    if not isinstance(parsed.get("type"), str) or not parsed["type"]:
-        raise ValueError("frontmatter is missing mandatory type")
     return Frontmatter.model_validate(parsed)
 
 
-def _doc_class(type_name: str) -> DocClass | None:
+def doc_class_from_type(type_name: str) -> DocClass | None:
     if type_name == "log":
         return None
     if type_name == "index":
@@ -81,18 +86,25 @@ def scan(root: Path) -> KB:
         relative = source_path.relative_to(resolved)
         try:
             frontmatter = read_frontmatter(source_path)
-            doc_class = _doc_class(frontmatter.root["type"])
-            if doc_class is None:
-                continue
-            document = Document.from_scan(
-                source_path=source_path,
-                relative_path=relative,
-                doc_class=doc_class,
-                frontmatter=frontmatter,
-            )
         except (OSError, UnicodeError, ValueError, yaml.YAMLError) as error:
-            kb.malformed.append((relative, str(error)))
+            message = str(error)
+            kb.files.append(ScannedMarkdown(path=relative, parse_error=message))
+            kb.malformed.append((relative, message))
             continue
+        kb.files.append(ScannedMarkdown(path=relative, frontmatter=frontmatter))
+        type_name = frontmatter.root.get("type")
+        if not isinstance(type_name, str) or not type_name:
+            kb.malformed.append((relative, "frontmatter is missing mandatory type"))
+            continue
+        doc_class = doc_class_from_type(type_name)
+        if doc_class is None:
+            continue
+        document = Document.from_scan(
+            source_path=source_path,
+            relative_path=relative,
+            doc_class=doc_class,
+            frontmatter=frontmatter,
+        )
         kb.documents.append(document)
         if document.id is not None:
             kb.by_id.setdefault(document.id, document)
