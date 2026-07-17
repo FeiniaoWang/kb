@@ -329,7 +329,11 @@ def _schema_findings(file: ScannedMarkdown) -> list[Finding]:
                 )
             )
     description = values.get("description")
-    if isinstance(description, str) and len(SENTENCE_END.findall(description)) > 2:
+    if (
+        "description" in legal
+        and isinstance(description, str)
+        and len(SENTENCE_END.findall(description)) > 2
+    ):
         findings.append(
             _finding(
                 file,

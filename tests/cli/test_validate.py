@@ -401,6 +401,25 @@ def test_ac26_reserved_keys_are_forbidden_outside_their_schema(tmp_path, invoke_
     assert codes_for(result).count("FM1_KEY_FORBIDDEN") == 3
 
 
+def test_illegal_description_is_not_evaluated_for_length(
+    tmp_path, invoke_validate
+) -> None:
+    root = make_kb(tmp_path / "kb")
+    result = run_one(
+        invoke_validate,
+        root,
+        "raw/sources/source.md",
+        {
+            "id": "RAW-000001",
+            "type": "raw-source",
+            "ingested_at": "2026-07-16T09:00:00Z",
+            "origin": "file",
+            "description": "One. Two! Three?",
+        },
+    )
+    assert codes_for(result, "raw/sources/source.md") == ["FM1_KEY_FORBIDDEN"]
+
+
 def test_ac27_index_id_is_forbidden_without_id_checks(tmp_path, invoke_validate) -> None:
     root = make_kb(tmp_path / "kb")
     result = run_one(invoke_validate, root, "index.md", {"type": "index", "description": "Root.", "id": "KB-000009"})
