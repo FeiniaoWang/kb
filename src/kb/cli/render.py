@@ -109,7 +109,16 @@ def render_validate_json(result: ValidateResult) -> str:
         {
             "ok": result.ok,
             "checked": result.checked,
-            "findings": [item.model_dump() for item in result.findings],
+            "findings": [
+                {
+                    "code": item.code,
+                    "severity": item.severity,
+                    "path": item.path,
+                    "id": item.id,
+                    "message": item.message,
+                }
+                for item in result.findings
+            ],
             "counts": {"errors": errors, "warnings": warnings},
             "unresolved_refs": result.unresolved_refs,
         },

@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import json
+import subprocess
 from pathlib import Path
 
 import yaml
 
 from conftest import make_doc, make_kb
+from kb.core.validate import Finding
 
 
 def snapshot(root: Path) -> dict[str, bytes]:
@@ -1165,3 +1167,201 @@ def test_scope_rejects_absolute_and_dot_segment_path_refs(
         "unresolvable ref: ./synthetic/a.md",
         "unresolvable ref: synthetic/../synthetic/a.md",
     ]
+
+
+def error_and_warning_kb(root: Path) -> None:
+    chat(root)
+    values = valid_synthetic_values(description="One. Two. Three.")
+    del values["title"]
+    make_doc(root, "synthetic/note.md", values)
+
+
+def test_ac65_text_lines_summary_counts_and_channels_are_exact(
+    tmp_path, invoke_validate
+) -> None:
+    root = make_kb(tmp_path / "kb")
+    error_and_warning_kb(root)
+    result = invoke_validate(root)
+    assert result.exit_code == 1
+    assert result.stderr == ""
+    assert result.stdout.splitlines() == [
+        "warning  synthetic/note.md  FM1_DESCRIPTION_LONG  description exceeds two sentences",
+        "error  synthetic/note.md  FM1_FIELD_MISSING  missing mandatory field 'title' for synthetic documents",
+        "2 findings (1 error, 1 warning) — checked 2 files",
+    ]
+
+
+def test_ac66_findings_sort_by_path_then_code(tmp_path, invoke_validate) -> None:
+    root = make_kb(tmp_path / "kb")
+    (root / "z.md").write_text("broken\n", encoding="utf-8")
+    make_doc(root, "a.md", {"type": "spec"})
+    make_doc(root, "m.md", {"type": "index"})
+    result = invoke_validate(root, "--json")
+    pairs = [(item["path"], item["code"]) for item in finding_payload(result)]
+    assert pairs == sorted(pairs)
+
+
+def test_ac67_json_schema_is_exact_and_id_is_nullable(
+    tmp_path, invoke_validate, monkeypatch
+) -> None:
+    root = make_kb(tmp_path / "kb")
+    error_and_warning_kb(root)
+    result = invoke_validate(root, "--json")
+    payload = json.loads(result.stdout)
+    assert result.exit_code == 1 and result.stderr == ""
+    assert set(payload) == {
+        "ok",
+        "checked",
+        "findings",
+        "counts",
+        "unresolved_refs",
+    }
+    assert payload["ok"] is False
+    assert isinstance(payload["checked"], int)
+    assert payload["counts"] == {"errors": 1, "warnings": 1}
+    assert payload["unresolved_refs"] == []
+    assert all(
+        set(item) == {"code", "severity", "path", "id", "message"}
+        for item in payload["findings"]
+    )
+    assert all(item["id"] == "KB-000001" for item in payload["findings"])
+
+    original_model_dump = Finding.model_dump
+
+    def model_dump_with_internal_field(self, *args, **kwargs):
+        dumped = original_model_dump(self, *args, **kwargs)
+        dumped["occurrence"] = self.occurrence
+        return dumped
+
+    monkeypatch.setattr(Finding, "model_dump", model_dump_with_internal_field)
+    hardened = invoke_validate(root, "--json")
+    assert all(
+        set(item) == {"code", "severity", "path", "id", "message"}
+        for item in finding_payload(hardened)
+    )
+
+    root = make_kb(tmp_path / "null-id")
+    (root / "README.md").write_text("broken\n", encoding="utf-8")
+    malformed = invoke_validate(root, "--json")
+    assert finding_payload(malformed)[0]["id"] is None
+
+
+def test_ac68_json_ok_is_equivalent_to_exit_zero(
+    tmp_path, invoke_validate
+) -> None:
+    root = make_kb(tmp_path / "warnings")
+    synthetic(root, description="One. Two. Three.")
+    normal = invoke_validate(root, "--json")
+    strict = invoke_validate(root, "--strict", "--json")
+    assert normal.exit_code == 0 and json.loads(normal.stdout)["ok"] is True
+    assert strict.exit_code == 1 and json.loads(strict.stdout)["ok"] is False
+    root = make_kb(tmp_path / "unresolved")
+    unresolved = invoke_validate(root, "KB-999999", "--json")
+    payload = json.loads(unresolved.stdout)
+    assert unresolved.exit_code == 1 and payload["ok"] is False
+    assert payload["unresolved_refs"] == ["KB-999999"]
+
+
+def test_ac69_clean_json_envelope_has_zero_counts(
+    tmp_path, invoke_validate
+) -> None:
+    root = make_kb(tmp_path / "kb")
+    result = invoke_validate(root, "--json")
+    assert result.exit_code == 0
+    assert json.loads(result.stdout) == {
+        "ok": True,
+        "checked": 0,
+        "findings": [],
+        "counts": {"errors": 0, "warnings": 0},
+        "unresolved_refs": [],
+    }
+
+
+def test_ac70_no_kb_errors_are_shared_in_text_and_json(
+    tmp_path, runner, invoke_validate
+) -> None:
+    text = invoke_validate(tmp_path)
+    explicit = invoke_validate(tmp_path, "--kb", str(tmp_path / "missing"))
+    json_result = invoke_validate(tmp_path, "--json")
+    message = (
+        "not inside a knowledge base (no kb-config.json found); "
+        "run 'kb init' or pass --kb"
+    )
+    assert text.exit_code == explicit.exit_code == json_result.exit_code == 2
+    assert text.stderr == f"E_NO_KB: {message}\n"
+    assert "E_NO_KB" in explicit.stderr
+    assert json.loads(json_result.stdout) == {
+        "error": {"code": "E_NO_KB", "message": message}
+    }
+
+
+def test_ac71_invalid_config_is_a_command_error(
+    tmp_path, invoke_validate
+) -> None:
+    root = tmp_path / "kb"
+    root.mkdir()
+    (root / "kb-config.json").write_text("{", encoding="utf-8")
+    result = invoke_validate(root)
+    assert result.exit_code == 2
+    assert "E_CONFIG_INVALID" in result.stderr
+    assert result.stdout == ""
+
+
+def test_ac72_newer_schema_is_unsupported(tmp_path, invoke_validate) -> None:
+    root = make_kb(tmp_path / "kb")
+    config_path = root / "kb-config.json"
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    config["schema"] = 999
+    config_path.write_text(json.dumps(config), encoding="utf-8")
+    result = invoke_validate(root)
+    assert result.exit_code == 2
+    assert "E_SCHEMA_UNSUPPORTED" in result.stderr
+
+
+def test_ac73_usage_and_help_copy_are_normative(
+    tmp_path, invoke_validate
+) -> None:
+    bad = invoke_validate(tmp_path, "--bogus-flag")
+    assert bad.exit_code == 2 and bad.stderr
+    help_result = invoke_validate(tmp_path, "--help")
+    normalized = " ".join(help_result.stdout.split())
+    required = [
+        "Check the knowledge base's mechanical integrity.",
+        "The single authoritative integrity checker and CI gate: verifies every rule checkable without judgment — universal type and type/location agreement, per-class frontmatter schemas, type and tag vocabularies, id format and uniqueness, link resolution, derivation-graph acyclicity, session parentage, and supersedes/status coupling.",
+        "Reports every finding with a stable code and severity; errors exit 1, warnings exit 0 unless --strict.",
+        "Reads everything, writes nothing.",
+        "With REF arguments (or refs piped on stdin), only findings for the named documents are reported.",
+        "Does not touch Git.",
+        "Documents to report findings for (id or KB-relative path). Also read from stdin when piped. [default: the whole KB]",
+        "Treat warnings as errors for the exit code.",
+        "KB root. [default: discovered upward from the current directory]",
+        "Emit findings as JSON.",
+        "kb validate Check the whole KB (the CI gate)",
+        "kb validate --strict Warnings fail the run too",
+        "kb validate KB-000042 synthetic/notes.md Only findings for the named documents",
+        'kb search "retry" --output paths | kb validate Validate a piped candidate set',
+        "kb validate --json Machine-readable findings",
+    ]
+    assert help_result.exit_code == 0
+    for text in required:
+        assert " ".join(text.split()) in normalized
+
+
+def test_ac74_validate_is_git_agnostic(
+    tmp_path, invoke_validate, monkeypatch
+) -> None:
+    root = make_kb(tmp_path / "kb")
+    (root / "README.md").write_text("broken\n", encoding="utf-8")
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError(
+            f"subprocess invocation is forbidden: {args!r} {kwargs!r}"
+        )
+
+    monkeypatch.setattr(subprocess, "run", forbidden)
+    monkeypatch.setattr(subprocess, "Popen", forbidden)
+    monkeypatch.setattr(subprocess, "check_call", forbidden)
+    monkeypatch.setattr(subprocess, "check_output", forbidden)
+    result = invoke_validate(root)
+    assert result.exit_code == 1
+    assert not (root / ".git").exists()
