@@ -97,6 +97,30 @@ def test_load_config_reports_invalid_utf8(tmp_path) -> None:
     assert invalid.value.code == "E_CONFIG_INVALID"
 
 
+def test_load_config_merges_missing_id_prefix_classes(tmp_path) -> None:
+    (tmp_path / "kb-config.json").write_text(
+        json.dumps({"id_prefixes": {"source": "SRC"}}), encoding="utf-8"
+    )
+
+    assert load_config(tmp_path).id_prefixes == {
+        "synthetic": "KB",
+        "source": "SRC",
+        "chat": "CHAT",
+        "feedback": "FEED",
+    }
+
+
+@pytest.mark.parametrize("prefix", ["lower", "BAD-PREFIX", 7, "GOVERNANCE"])
+def test_load_config_rejects_invalid_id_prefix_values(tmp_path, prefix) -> None:
+    (tmp_path / "kb-config.json").write_text(
+        json.dumps({"id_prefixes": {"synthetic": prefix}}), encoding="utf-8"
+    )
+
+    with pytest.raises(ConfigLoadError) as raised:
+        load_config(tmp_path)
+    assert raised.value.code == "E_CONFIG_INVALID"
+
+
 def test_doc_id_parses_formats_and_orders_numeric_ids() -> None:
     assert DocId.parse("KB-000042") == DocId(prefix="KB", number=42)
     assert DocId.parse("KB-1000001").format() == "KB-1000001"

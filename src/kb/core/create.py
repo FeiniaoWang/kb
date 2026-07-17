@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import re
 import sys
 from pathlib import Path, PurePosixPath
@@ -78,27 +79,62 @@ def _stable_unique(values: list[str]) -> list[str]:
     return list(dict.fromkeys(values))
 
 
+def _invalid_destination(dest: str | None) -> CreateFailure:
+    shown = "synthetic/" if dest is None else dest
+    return CreateFailure("E_CREATE_DEST_INVALID", f"invalid --dest: {shown}", 2)
+
+
+def _is_link_or_junction(path: Path) -> bool:
+    if path.is_symlink():
+        return True
+    is_junction = getattr(path, "is_junction", None)
+    return bool(is_junction is not None and is_junction())
+
+
 def _target_directory(root: Path, dest: str | None) -> tuple[Path, list[Path]]:
     base = root / "synthetic"
-    if dest is None:
-        return base, []
-    normalized = dest.rstrip("/")
-    raw_parts = normalized.split("/")
+    normalized = "" if dest is None else dest.rstrip("/")
+    raw_parts = [] if dest is None else normalized.split("/")
     candidate = PurePosixPath(normalized)
-    if (
+    if dest is not None and (
         not normalized
+        or "\\" in normalized
         or candidate.is_absolute()
         or any(part in {".", ".."} for part in raw_parts)
     ):
-        raise CreateFailure("E_CREATE_DEST_INVALID", f"invalid --dest: {dest}", 2)
+        raise _invalid_destination(dest)
     target = base.joinpath(*candidate.parts)
     missing: list[Path] = []
-    current = base
-    for part in candidate.parts:
+    current = root
+    components = ("synthetic", *candidate.parts)
+    for part in components:
         current /= part
+        if _is_link_or_junction(current):
+            raise _invalid_destination(dest)
+        if current.exists() and not current.is_dir():
+            raise _invalid_destination(dest)
         if not current.exists():
             missing.append(current)
+    real_base = base.resolve(strict=False)
+    real_target = target.resolve(strict=False)
+    if real_target != real_base and real_base not in real_target.parents:
+        raise _invalid_destination(dest)
     return target, missing
+
+
+def _exclusive_write(path: Path, content: str) -> None:
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(path, flags, 0o666)
+    try:
+        remaining = memoryview(content.encode("utf-8"))
+        while remaining:
+            written = os.write(descriptor, remaining)
+            if written == 0:
+                raise OSError("exclusive document write made no progress")
+            remaining = remaining[written:]
+    finally:
+        os.close(descriptor)
 
 
 def _warnings(config: Config, request: CreateRequest, tags: list[str]) -> list[str]:
@@ -293,6 +329,7 @@ def create(request: CreateRequest) -> CreateResult:
         supersedes=superseded_document.id if superseded_document else None,
         instructions=request.instructions,
     )
+    document_content = render_synthetic_document(frontmatter, body)
     relative = path.relative_to(root).as_posix()
     new_indexes = _new_index_contents(
         root,
@@ -328,11 +365,7 @@ def create(request: CreateRequest) -> CreateResult:
             index_path.write_text(
                 new_indexes[index_path], encoding="utf-8", newline="\n"
             )
-        path.write_text(
-            render_synthetic_document(frontmatter, body),
-            encoding="utf-8",
-            newline="\n",
-        )
+        _exclusive_write(path, document_content)
         if superseded_document is not None and superseded_content is not None:
             (root / superseded_document.path).write_bytes(superseded_content)
         existing_index.write_text(

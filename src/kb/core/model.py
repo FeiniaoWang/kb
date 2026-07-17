@@ -1,13 +1,23 @@
 from __future__ import annotations
 
 import json
+import re
 from enum import StrEnum
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, RootModel, ValidationError
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    PrivateAttr,
+    RootModel,
+    ValidationError,
+    field_validator,
+)
 
 CURRENT_SCHEMA = 1
+ID_PREFIX_PATTERN = re.compile(r"^[A-Z]+$")
 
 
 class DocClass(StrEnum):
@@ -127,6 +137,27 @@ class Config(BaseModel):
     tags: list[str] = Field(default_factory=list)
     id_prefixes: dict[str, str] = Field(default_factory=_default_prefixes)
     propagation_auto_safe: list[str] = Field(default_factory=list)
+
+    @field_validator("id_prefixes", mode="before")
+    @classmethod
+    def merge_default_id_prefixes(cls, value: object) -> object:
+        if not isinstance(value, dict):
+            return value
+        merged = _default_prefixes()
+        merged.update(value)
+        return merged
+
+    @field_validator("id_prefixes")
+    @classmethod
+    def validate_id_prefixes(cls, value: dict[str, str]) -> dict[str, str]:
+        for class_name, prefix in value.items():
+            if not ID_PREFIX_PATTERN.fullmatch(prefix):
+                raise ValueError(
+                    f"id prefix for {class_name!r} must contain uppercase letters only"
+                )
+            if prefix == "GOVERNANCE":
+                raise ValueError("reserved id prefix: GOVERNANCE")
+        return value
 
     @property
     def schema(self) -> int:

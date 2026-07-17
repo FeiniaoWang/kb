@@ -5,7 +5,7 @@ from collections.abc import Mapping
 
 import yaml
 from yaml.nodes import MappingNode, ScalarNode
-from yaml.tokens import ScalarToken
+from yaml.tokens import FlowMappingEndToken, ScalarToken, Token
 
 from kb.core.model import SyntheticFrontmatter
 
@@ -81,6 +81,65 @@ def _render_scalar_token(source: str, token: ScalarToken, value: str) -> str:
     return original[:content_start] + indentation + value + suffix
 
 
+def _missing_scalar_insertion(
+    yaml_text: str,
+    node: MappingNode,
+    tokens: list[Token],
+    missing: list[str],
+    replacements: Mapping[str, str],
+    eol: str,
+) -> tuple[int, str]:
+    rendered = [f"{key}: {replacements[key]}" for key in missing]
+    if node.flow_style:
+        closing = next(
+            (
+                token
+                for token in tokens
+                if isinstance(token, FlowMappingEndToken)
+                and token.end_mark.index == node.end_mark.index
+            ),
+            None,
+        )
+        if closing is None:
+            raise ValueError("top-level flow mapping has no closing token")
+        before_closing = yaml_text[: closing.start_mark.index].rstrip()
+        separator = "" if not node.value or before_closing.endswith(",") else ", "
+        return closing.start_mark.index, separator + ", ".join(rendered)
+    insertion_at = node.end_mark.index
+    prefix = "" if yaml_text[:insertion_at].endswith(("\n", "\r")) else eol
+    return insertion_at, prefix + eol.join(rendered) + eol
+
+
+def _validate_prepared_frontmatter(
+    yaml_text: str, replacements: Mapping[str, str]
+) -> None:
+    try:
+        effective = yaml.safe_load(yaml_text)
+        node = yaml.compose(yaml_text)
+    except yaml.YAMLError as error:
+        raise ValueError(f"prepared frontmatter is invalid YAML: {error}") from error
+    if not isinstance(effective, dict) or not isinstance(node, MappingNode):
+        raise ValueError("prepared frontmatter must be a YAML mapping")
+    prepared: dict[str, ScalarNode] = {}
+    for key_node, value_node in node.value:
+        if not isinstance(key_node, ScalarNode) or key_node.value not in replacements:
+            continue
+        if key_node.value in prepared:
+            raise ValueError(
+                f"prepared frontmatter key {key_node.value!r} must occur exactly once"
+            )
+        if not isinstance(value_node, ScalarNode):
+            raise ValueError(
+                f"prepared frontmatter value for {key_node.value!r} is not scalar"
+            )
+        prepared[key_node.value] = value_node
+    for key, replacement in replacements.items():
+        if key not in prepared or prepared[key].value != replacement:
+            raise ValueError(
+                f"prepared frontmatter value for {key!r} does not match replacement"
+            )
+
+
 def replace_frontmatter_scalars(
     source: bytes,
     replacements: Mapping[str, str],
@@ -96,9 +155,8 @@ def replace_frontmatter_scalars(
     effective = yaml.safe_load(yaml_text)
     if not isinstance(effective, dict):
         raise ValueError("frontmatter must be a YAML mapping")
-    scalar_tokens = [
-        token for token in yaml.scan(yaml_text) if isinstance(token, ScalarToken)
-    ]
+    tokens = list(yaml.scan(yaml_text))
+    scalar_tokens = [token for token in tokens if isinstance(token, ScalarToken)]
     spans: list[tuple[int, int, str]] = []
     found: set[str] = set()
     for key_node, value_node in node.value:
@@ -141,13 +199,13 @@ def replace_frontmatter_scalars(
         raise ValueError(
             f"frontmatter value for {required[0]!r} must be an explicit key"
         )
-    for value_start, value_end, replacement in sorted(spans, reverse=True):
-        yaml_text = yaml_text[:value_start] + replacement + yaml_text[value_end:]
     missing = [key for key in append_missing if key not in found]
     if missing:
-        if yaml_text and not yaml_text.endswith(("\n", "\r")):
-            yaml_text += eol
-        yaml_text += "".join(
-            f"{key}: {replacements[key]}{eol}" for key in missing
+        insertion_at, insertion = _missing_scalar_insertion(
+            yaml_text, node, tokens, missing, replacements, eol
         )
+        spans.append((insertion_at, insertion_at, insertion))
+    for value_start, value_end, replacement in sorted(spans, reverse=True):
+        yaml_text = yaml_text[:value_start] + replacement + yaml_text[value_end:]
+    _validate_prepared_frontmatter(yaml_text, replacements)
     return (text[:start] + yaml_text + text[end:]).encode("utf-8")

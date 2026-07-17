@@ -1,3 +1,4 @@
+import pytest
 import yaml
 
 from kb.core.frontmatter import (
@@ -164,3 +165,16 @@ Body
     assert parsed["last_human_touch"] == parsed["touch_alias"] == (
         "2026-07-16T10:00:00Z"
     )
+
+
+def test_replace_frontmatter_scalars_rejects_invalid_prepared_lifecycle() -> None:
+    source = b"""---
+id: KB-000001
+type: spec
+status: current
+---
+Body
+"""
+
+    with pytest.raises(ValueError, match="prepared frontmatter"):
+        replace_frontmatter_scalars(source, {"status": "[superseded]"})

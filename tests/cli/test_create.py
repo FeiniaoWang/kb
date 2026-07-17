@@ -1195,3 +1195,214 @@ def test_supersedes_merge_only_lifecycle_is_structured_invalid_without_writes(
     assert "E_CREATE_SUPERSEDES_INVALID" in result.stderr
     assert "explicit key" in result.stderr
     assert snapshot(initialized_kb) == before
+
+
+@pytest.mark.parametrize(
+    ("source", "expected_template"),
+    [
+        (
+            b"---\n{id: KB-000001, type: spec, status: current, timestamp: 2026-06-02T14:11:08Z, unknown: keep}\n---\nBody  \n",
+            b"---\n{id: KB-000001, type: spec, status: superseded, timestamp: {timestamp}, unknown: keep, last_human_touch: {timestamp}}\n---\nBody  \n",
+        ),
+        (
+            b"---\n{id: KB-000001, type: spec, status: current, unknown: keep, }\n---\nBody  \n",
+            b"---\n{id: KB-000001, type: spec, status: superseded, unknown: keep, timestamp: {timestamp}, last_human_touch: {timestamp}}\n---\nBody  \n",
+        ),
+        (
+            b"---\nid: KB-000001\ntype: spec\nstatus: current\nunknown: keep\n...\n---\nBody  \n",
+            b"---\nid: KB-000001\ntype: spec\nstatus: superseded\nunknown: keep\ntimestamp: {timestamp}\nlast_human_touch: {timestamp}\n...\n---\nBody  \n",
+        ),
+    ],
+    ids=["flow-missing-one", "flow-missing-both", "document-end-marker"],
+)
+def test_supersedes_inserts_missing_lifecycle_into_valid_yaml_atomically(
+    source, expected_template, initialized_kb, invoke_create
+) -> None:
+    add_chat(initialized_kb)
+    target = initialized_kb / "synthetic/old.md"
+    target.write_bytes(source)
+
+    result = supersede(invoke_create, initialized_kb)
+
+    assert result.exit_code == 0
+    _, _, replacement_yaml = split_document(
+        initialized_kb / "synthetic/replacement.md"
+    )
+    timestamp_match = re.search(rf"(?m)^timestamp: ({TIMESTAMP})$", replacement_yaml)
+    assert timestamp_match is not None
+    timestamp = timestamp_match.group(1)
+    expected = expected_template.replace(b"{timestamp}", timestamp.encode("ascii"))
+    assert target.read_bytes() == expected
+    updated = split_document(target)[0]
+    assert updated["status"] == "superseded"
+    assert updated["timestamp"] == updated["last_human_touch"]
+    assert updated["timestamp"].isoformat().replace("+00:00", "Z") == timestamp
+
+
+def test_windows_form_parent_destination_is_rejected_without_writes(
+    tmp_path, initialized_kb, invoke_create
+) -> None:
+    add_chat(initialized_kb)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "sentinel").write_bytes(b"outside")
+    kb_before = snapshot(initialized_kb)
+    outside_before = snapshot(outside)
+
+    result = invoke_valid(
+        invoke_create, initialized_kb, "--dest", r"..\..\outside"
+    )
+
+    assert result.exit_code == 2
+    assert "E_CREATE_DEST_INVALID" in result.stderr
+    assert snapshot(initialized_kb) == kb_before
+    assert snapshot(outside) == outside_before
+
+
+def test_symlink_destination_outside_is_rejected_without_writes(
+    tmp_path, initialized_kb, invoke_create
+) -> None:
+    add_chat(initialized_kb)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "sentinel").write_bytes(b"outside")
+    destination = initialized_kb / "synthetic/linked"
+    try:
+        destination.symlink_to(outside, target_is_directory=True)
+    except (NotImplementedError, OSError) as error:
+        pytest.skip(f"symlinks unsupported: {error}")
+    kb_before = snapshot(initialized_kb)
+    outside_before = snapshot(outside)
+    link_target = os.readlink(destination)
+
+    result = invoke_valid(invoke_create, initialized_kb, "--dest", "linked")
+
+    assert result.exit_code == 2
+    assert "E_CREATE_DEST_INVALID" in result.stderr
+    assert snapshot(initialized_kb) == kb_before
+    assert snapshot(outside) == outside_before
+    assert destination.is_symlink() and os.readlink(destination) == link_target
+
+
+def test_document_race_uses_exclusive_create_and_preserves_raced_bytes(
+    monkeypatch, initialized_kb, invoke_create
+) -> None:
+    add_chat(initialized_kb)
+    before = snapshot(initialized_kb)
+    target = initialized_kb / "synthetic/webhook-retry-policy.md"
+    raced_bytes = b"raced-in bytes\n"
+    original_open = os.open
+    raced = False
+
+    def racing_open(path, flags, mode=0o777, *, dir_fd=None):
+        nonlocal raced
+        if Path(path) == target and flags & os.O_CREAT and not raced:
+            raced = True
+            target.write_bytes(raced_bytes)
+        if dir_fd is None:
+            return original_open(path, flags, mode)
+        return original_open(path, flags, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr(os, "open", racing_open)
+    result = invoke_valid(invoke_create, initialized_kb)
+
+    assert raced
+    assert result.exit_code == 2
+    assert "E_CREATE_IO" in result.stderr
+    assert target.read_bytes() == raced_bytes
+    assert snapshot(initialized_kb) == before | {
+        "synthetic/webhook-retry-policy.md": raced_bytes
+    }
+
+
+@pytest.mark.parametrize(
+    ("dest", "expected_created", "expected_index_fragment"),
+    [
+        (
+            None,
+            [
+                "synthetic/index.md",
+                "synthetic/webhook-retry-policy.md",
+            ],
+            "## Files\n* [KB-000001][Webhook Retry Policy](webhook-retry-policy.md)",
+        ),
+        (
+            "a/b",
+            [
+                "synthetic/a/b/index.md",
+                "synthetic/a/b/webhook-retry-policy.md",
+                "synthetic/a/index.md",
+                "synthetic/index.md",
+            ],
+            "## Subdirectories\n* [a](a/index.md) - Documents under synthetic/a/.",
+        ),
+    ],
+    ids=["default", "nested"],
+)
+def test_missing_synthetic_base_is_created_with_current_indexes(
+    dest, expected_created, expected_index_fragment, initialized_kb, invoke_create
+) -> None:
+    add_chat(initialized_kb)
+    synthetic = initialized_kb / "synthetic"
+    (synthetic / "index.md").unlink()
+    synthetic.rmdir()
+    before = snapshot(initialized_kb)
+    arguments = ("--json",) if dest is None else ("--dest", dest, "--json")
+
+    result = invoke_valid(invoke_create, initialized_kb, *arguments)
+
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout)
+    assert payload["created"] == expected_created
+    assert payload["updated"] == ["index.md"]
+    assert expected_index_fragment in (synthetic / "index.md").read_text(
+        encoding="utf-8"
+    )
+    expected_changes = set(expected_created) | {"index.md", "log.md"}
+    assert changed(before, snapshot(initialized_kb)) == expected_changes
+    for relative in expected_created:
+        if relative.endswith("index.md"):
+            assert split_document(initialized_kb / relative)[0]["type"] == "index"
+
+
+def test_partial_prefix_config_uses_default_synthetic_prefix(
+    initialized_kb, invoke_create
+) -> None:
+    add_chat(initialized_kb)
+    config_path = initialized_kb / "kb-config.json"
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    config["id_prefixes"] = {"source": "SRC"}
+    config_path.write_text(json.dumps(config), encoding="utf-8")
+
+    result = invoke_valid(invoke_create, initialized_kb)
+
+    assert result.exit_code == 0
+    assert split_document(
+        initialized_kb / "synthetic/webhook-retry-policy.md"
+    )[0]["id"] == "KB-000001"
+
+
+@pytest.mark.parametrize("prefix", ["lower", "BAD-PREFIX", 7, "GOVERNANCE"])
+@pytest.mark.parametrize("json_output", [False, True], ids=["text", "json"])
+def test_invalid_synthetic_prefix_is_structured_config_error_without_writes(
+    prefix, json_output, initialized_kb, invoke_create
+) -> None:
+    add_chat(initialized_kb)
+    config_path = initialized_kb / "kb-config.json"
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    config["id_prefixes"]["synthetic"] = prefix
+    config_path.write_text(json.dumps(config), encoding="utf-8")
+    before = snapshot(initialized_kb)
+    arguments = ("--json",) if json_output else ()
+
+    result = invoke_valid(invoke_create, initialized_kb, *arguments)
+
+    assert result.exit_code == 2
+    if json_output:
+        payload = json.loads(result.stdout)
+        assert payload["error"]["code"] == "E_CONFIG_INVALID"
+        assert result.stderr == ""
+    else:
+        assert "E_CONFIG_INVALID" in result.stderr
+        assert result.stdout == ""
+    assert snapshot(initialized_kb) == before
