@@ -208,15 +208,29 @@ def test_ac11_partial_scaffold_recreates_only_missing_entries(tmp_path, invoke_i
 
 def test_ac12_foreign_content_is_untouched(tmp_path, invoke_init) -> None:
     notes = tmp_path / "notes.txt"
-    notes.write_bytes(b"private notes\x00")
+    notes_content = b"private notes\x00"
+    notes.write_bytes(notes_content)
     misc = tmp_path / "misc"
     misc.mkdir()
     foreign = misc / "data.bin"
-    foreign.write_bytes(b"foreign\xff")
+    foreign_content = b"foreign\xff"
+    foreign.write_bytes(foreign_content)
+
     result = invoke_init(tmp_path)
+
+    manifest_paths = sorted(expected_manifest("unused"))
+    expected_lines = [f"created  {path}" for path in manifest_paths]
+    expected_lines.append(
+        f"KB ready at {tmp_path.resolve()} — 12 created, 0 overwritten, 0 skipped"
+    )
     assert result.exit_code == 0
-    assert notes.read_bytes() == b"private notes\x00"
-    assert foreign.read_bytes() == b"foreign\xff"
+    assert result.stdout.splitlines() == expected_lines
+    assert files_under(tmp_path) == set(manifest_paths) | {
+        "notes.txt",
+        "misc/data.bin",
+    }
+    assert notes.read_bytes() == notes_content
+    assert foreign.read_bytes() == foreign_content
     assert not (misc / "index.md").exists()
 
 
