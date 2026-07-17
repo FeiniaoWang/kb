@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import re
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal
 
@@ -555,6 +555,76 @@ def _relationship_findings(file: ScannedMarkdown, kb: KB) -> list[Finding]:
     return findings
 
 
+def _lifecycle_findings(file: ScannedMarkdown, kb: KB) -> list[Finding]:
+    assert file.frontmatter is not None
+    values = file.frontmatter.root
+    if doc_class_from_type(_type_name(file)) is not DocClass.SYNTHETIC:
+        return []
+    findings: list[Finding] = []
+    supersedes = values.get("supersedes")
+    own_id = values.get("id")
+    if isinstance(supersedes, str) and supersedes.strip():
+        occurrence = list(values).index("supersedes")
+        if isinstance(own_id, str) and supersedes == own_id:
+            findings.append(
+                _finding(
+                    file,
+                    "LS_SUPERSEDES_SELF",
+                    "error",
+                    "document supersedes itself",
+                    occurrence,
+                )
+            )
+        else:
+            target = kb.by_id.get(supersedes)
+            if target is not None:
+                if target.doc_class is not DocClass.SYNTHETIC:
+                    findings.append(
+                        _finding(
+                            file,
+                            "LS_SUPERSEDES_NOT_SYNTHETIC",
+                            "error",
+                            f"supersedes target {supersedes} is not a synthetic document",
+                            occurrence,
+                        )
+                    )
+                else:
+                    status = target.frontmatter.root.get("status")
+                    if status != "superseded":
+                        state = (
+                            "has no status"
+                            if "status" not in target.frontmatter.root
+                            else f"has status '{status}'"
+                        )
+                        findings.append(
+                            _finding(
+                                file,
+                                "LS_SUPERSEDES_NOT_MARKED",
+                                "error",
+                                f"supersedes target {supersedes} {state}, expected 'superseded'",
+                                occurrence,
+                            )
+                        )
+    timestamp = _parse_timestamp(values.get("timestamp"))
+    touched = _parse_timestamp(values.get("last_human_touch"))
+    if timestamp is not None and touched is not None:
+        if timestamp.tzinfo is None:
+            timestamp = timestamp.replace(tzinfo=timezone.utc)
+        if touched.tzinfo is None:
+            touched = touched.replace(tzinfo=timezone.utc)
+        if touched > timestamp:
+            findings.append(
+                _finding(
+                    file,
+                    "LS_TOUCH_AFTER_TIMESTAMP",
+                    "warning",
+                    f"last_human_touch {values['last_human_touch']} is later than timestamp {values['timestamp']}",
+                    list(values).index("last_human_touch"),
+                )
+            )
+    return findings
+
+
 def _duplicate_id_findings(kb: KB) -> list[Finding]:
     participants: dict[str, list[ScannedMarkdown]] = {}
     for file in kb.files:
@@ -670,6 +740,7 @@ def _file_findings(file: ScannedMarkdown, config: Config, kb: KB) -> list[Findin
         findings.extend(_vocabulary_findings(file, config))
         findings.extend(_id_findings(file, config))
         findings.extend(_relationship_findings(file, kb))
+        findings.extend(_lifecycle_findings(file, kb))
     return findings
 
 

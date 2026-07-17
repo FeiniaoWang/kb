@@ -889,3 +889,160 @@ def test_relationship_occurrences_have_no_list_length_ceiling(
     ]
     assert [item["message"].split("'")[1] for item in links[:-1]] == parents
     assert links[-1]["message"].startswith("supersedes reference")
+
+
+def test_ac50_supersedes_target_must_be_marked_superseded(
+    tmp_path, invoke_validate
+) -> None:
+    root = make_kb(tmp_path / "status")
+    chat(root)
+    make_doc(
+        root,
+        "synthetic/old.md",
+        valid_synthetic_values(id="KB-000031", status="current"),
+    )
+    make_doc(
+        root,
+        "synthetic/new.md",
+        valid_synthetic_values(id="KB-000032", supersedes="KB-000031"),
+    )
+    result = invoke_validate(root, "--json")
+    marked = [
+        item
+        for item in payload_for(result, "synthetic/new.md")
+        if item["code"] == "LS_SUPERSEDES_NOT_MARKED"
+    ]
+    assert len(marked) == 1 and "has status 'current'" in marked[0]["message"]
+    root = make_kb(tmp_path / "missing")
+    chat(root)
+    old = valid_synthetic_values(id="KB-000031")
+    del old["status"]
+    make_doc(root, "synthetic/old.md", old)
+    make_doc(
+        root,
+        "synthetic/new.md",
+        valid_synthetic_values(id="KB-000032", supersedes="KB-000031"),
+    )
+    result = invoke_validate(root, "--json")
+    marked = [
+        item
+        for item in payload_for(result, "synthetic/new.md")
+        if item["code"] == "LS_SUPERSEDES_NOT_MARKED"
+    ]
+    assert len(marked) == 1 and "has no status" in marked[0]["message"]
+
+
+def test_ac51_non_synthetic_supersedes_target_gets_only_class_error(
+    tmp_path, invoke_validate
+) -> None:
+    root = make_kb(tmp_path / "kb")
+    source(root)
+    synthetic(root, supersedes="RAW-000001")
+    result = invoke_validate(root, "--json")
+    anchored = codes_for(result, "synthetic/note.md")
+    assert "LS_SUPERSEDES_NOT_SYNTHETIC" in anchored
+    assert "LS_SUPERSEDES_NOT_MARKED" not in anchored
+
+
+def test_ac52_self_supersedes_preempts_other_lifecycle_findings(
+    tmp_path, invoke_validate
+) -> None:
+    root = make_kb(tmp_path / "kb")
+    synthetic(root, supersedes="KB-000001")
+    result = invoke_validate(root, "--json")
+    lifecycle = [
+        code
+        for code in codes_for(result, "synthetic/note.md")
+        if code.startswith("LS_SUPERSEDES")
+    ]
+    assert lifecycle == ["LS_SUPERSEDES_SELF"]
+
+
+def test_ac53_conforming_supersession_pair_is_clean(
+    tmp_path, invoke_validate
+) -> None:
+    root = make_kb(tmp_path / "kb")
+    chat(root)
+    make_doc(
+        root,
+        "synthetic/old.md",
+        valid_synthetic_values(id="KB-000031", status="superseded"),
+    )
+    make_doc(
+        root,
+        "synthetic/new.md",
+        valid_synthetic_values(id="KB-000032", supersedes="KB-000031"),
+    )
+    make_doc(
+        root,
+        "synthetic/also-new.md",
+        valid_synthetic_values(id="KB-000033", supersedes="KB-000031"),
+    )
+    make_doc(
+        root,
+        "synthetic/unlinked.md",
+        valid_synthetic_values(id="KB-000034", status="superseded"),
+    )
+    result = invoke_validate(root, "--json")
+    assert not any(code.startswith("LS_") for code in codes_for(result))
+
+
+def test_ac54_last_human_touch_may_not_be_later_than_timestamp(
+    tmp_path, invoke_validate
+) -> None:
+    root = make_kb(tmp_path / "later")
+    synthetic(
+        root,
+        timestamp="2026-07-16T10:00:00Z",
+        last_human_touch="2026-07-16T11:00:00Z",
+    )
+    result = invoke_validate(root, "--json")
+    assert "LS_TOUCH_AFTER_TIMESTAMP" in codes_for(
+        result, "synthetic/note.md"
+    )
+    root = make_kb(tmp_path / "equal")
+    synthetic(
+        root,
+        timestamp="2026-07-16T10:00:00Z",
+        last_human_touch="2026-07-16T10:00:00Z",
+    )
+    result = invoke_validate(root, "--json")
+    assert "LS_TOUCH_AFTER_TIMESTAMP" not in codes_for(
+        result, "synthetic/note.md"
+    )
+    root = make_kb(tmp_path / "bad")
+    synthetic(root, last_human_touch="bad")
+    result = invoke_validate(root, "--json")
+    assert "FM1_FIELD_INVALID" in codes_for(result, "synthetic/note.md")
+    assert "LS_TOUCH_AFTER_TIMESTAMP" not in codes_for(
+        result, "synthetic/note.md"
+    )
+
+
+def test_ac55_warnings_are_reported_but_exit_zero_by_default(
+    tmp_path, invoke_validate
+) -> None:
+    root = make_kb(tmp_path / "kb")
+    synthetic(root, description="One. Two. Three.")
+    result = invoke_validate(root)
+    assert result.exit_code == 0
+    assert "warning" in result.stdout and "FM1_DESCRIPTION_LONG" in result.stdout
+
+
+def test_ac56_strict_changes_only_the_warning_gate(tmp_path, invoke_validate) -> None:
+    root = make_kb(tmp_path / "kb")
+    synthetic(root, description="One. Two. Three.")
+    normal = invoke_validate(root)
+    strict = invoke_validate(root, "--strict")
+    assert normal.stdout == strict.stdout
+    assert normal.exit_code == 0
+    assert strict.exit_code == 1
+
+
+def test_ac57_errors_exit_one_with_and_without_strict(
+    tmp_path, invoke_validate
+) -> None:
+    root = make_kb(tmp_path / "kb")
+    (root / "README.md").write_text("broken\n", encoding="utf-8")
+    assert invoke_validate(root).exit_code == 1
+    assert invoke_validate(root, "--strict").exit_code == 1
