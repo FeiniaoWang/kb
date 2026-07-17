@@ -138,25 +138,17 @@ kb resolve REF... [--json]
 ### `kb validate` (CLI-6)
 
 ```
-kb validate [REF...] [--json] [--strict]
+kb validate [REF...] [--strict] [--kb PATH] [--json]
 ```
 
-No args → whole KB. With refs → scoped to those documents, plus graph checks that are inherently global. Every finding carries a stable code, severity (`error`/`warning`), document, and message.
+The single authoritative integrity checker and CI gate — **total** (never stops at the first problem; every check runs, all findings reported in one pass) and **read-only** (byte-for-byte unchanged KB, no log entry). Full contract in [kb-validate.md](../../specs/commands/kb-validate.md); its §7.1 finding-code table is normative. Key decisions:
 
-| Check group | Checks |
-|---|---|
-| Universal `type` (FM0/OKF) | **every** `*.md` (including `index.md` and `log.md`) carries a `type` frontmatter field — missing `type` is an error |
-| Type↔location agreement | a document's directory matches its authoritative `type` (`index`→`index.md`; `raw-*`→`raw/<subclass>/`; governance types→`governance/`; synthetic types→`synthetic/`) — mismatch is an error |
-| Schema (FM1–FM3) | frontmatter parses; mandatory fields per class (synthetic full schema; raw reduced schema: `id`, `type`, `ingested_at`, `origin`, `about` for feedback); legal `status` values; `description` ≤ 2 sentences (heuristic sentence count → severity `warning`, never an error); timestamps parse as ISO-8601; unknown keys preserved and never flagged |
-| Tags (FM1b) | every `tags` value appears in the governance tag vocabulary |
-| Ids | globally unique; format matches governance-configured prefixes; duplicate detection catches sequential-allocation collisions after merges |
-| Links | every `derived_from`, `supersedes`, `about` value resolves to an existing id |
-| Graph (DG2) | acyclic; every chain terminates at raw or governance documents |
-| Session parentage (DG5) | every synthetic document has ≥1 `raw/chats/` record among its parents |
-| Lifecycle (LS) | any document named in another's `supersedes` has status `superseded`; `supersedes` targets exist; `last_human_touch` ≤ `timestamp` (warning) |
-
-- Errors → exit 1 (the CI gate). Warnings → exit 0 unless `--strict`.
-- Strictly LLM-free (NFR-3). Semantic review (contradictions, staleness judgment, instruction conflicts) belongs to the `kb-lint` skill, not this command.
+- **Findings, not errors.** Every violation is a finding with a stable, family-prefixed code (`FM0_UNPARSEABLE`, `FM0_MISSING_TYPE`, `LOC_TYPE_MISMATCH`, `FM1_FIELD_MISSING`, `FM1_FIELD_INVALID`, `FM1_KEY_FORBIDDEN`, `FM1_DESCRIPTION_LONG`, `TYPE_UNDECLARED`, `TAG_UNDECLARED`, `ID_INVALID`, `ID_PREFIX_MISMATCH`, `ID_DUPLICATE`, `LINK_UNRESOLVED`, `DG1_NO_PARENTS`, `DG2_CYCLE`, `DG5_NO_SESSION_PARENT`, `LS_SUPERSEDES_NOT_MARKED`, `LS_SUPERSEDES_NOT_SYNTHETIC`, `LS_SUPERSEDES_SELF`, `LS_TOUCH_AFTER_TIMESTAMP` — 16 errors, 4 warnings), severity, anchoring path, and message (wording normative). Codes are the machine contract for CI and skills (NFR-9): appended, never renamed or re-severitied within a major version. The command defines **no `E_VALIDATE_*` codes** — only the shared environment errors (exit 2) end the run; unreadable files are `FM0_UNPARSEABLE` findings.
+- **Severity split:** warnings are exactly `description` > 2 sentences, `last_human_touch` > `timestamp`, undeclared tag, and undeclared synthetic type (both vocabularies are open; per GOVERNANCE-KB-CONFIG, an empty `types` list means unconstrained — no finding — while an empty `tags` list means no tags are declared, so every tag flags). Everything structural is an error. `--strict` promotes only the exit code; the findings reported are identical.
+- **Scope filters findings.** All checks always run over the whole KB (graph/uniqueness checks are inherently global); with `REF...` (args or piped stdin, 00-shared §4.2), only findings **anchored** to in-scope files are reported and drive the exit code. Multi-document defects (`ID_DUPLICATE`, `DG2_CYCLE`) emit one finding per participant, naming the others — so any in-scope participant surfaces the defect. A path REF also resolves against malformed and operational files (validate is the malformed-file reporter; the id-allocation guard does not apply to it). An unresolvable REF follows the 00-shared §4.1 batch rule (stderr, exit ≥ 1, `--json` `unresolved_refs`), never a finding.
+- **Sharpened while specifying:** DG2's termination clause ("every chain terminates at raw or governance") is a theorem given DG1 + link resolution + acyclicity — only synthetic documents contribute edges — so it has no finding code. Numeric ids must be **canonical** (exactly six digits, or more with no leading zero): `KB-0000042` is `ID_INVALID`, closing its allocation-ambiguity with `KB-000042`. Known schema keys on the wrong class (`about` outside feedback, `status` on raw, `id` on `index.md`) are `FM1_KEY_FORBIDDEN`; FM2 openness applies only to genuinely unknown keys. Directory-invariant presence and index freshness stay with `kb index --check` (the CI gate is `kb validate && kb index --check`); a missing `log.md` is not a finding (write commands recreate it).
+- Errors → exit 1 (the CI gate). Warnings → exit 0 unless `--strict`. Environment/usage → exit 2.
+- Strictly LLM-free (NFR-3). Semantic review (contradictions, staleness judgment, orphan/coverage analysis, instruction conflicts, the drift report) belongs to the `kb-lint` skill, not this command.
 
 ### `kb mv` (CLI-7)
 

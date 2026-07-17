@@ -49,5 +49,5 @@ Layering rule: `core/` is pure logic — no Typer, no printing, no `sys.exit`. `
 - **Toolchain:** Python ≥ 3.14, managed with `uv` — `uv run pytest`, `uv add <pkg>`, `uv run kb ...`.
 - **Tests:** pytest; CLI exercised via Typer's `CliRunner` (no subprocesses). One acceptance criterion = one test, named `test_ac<NN>_<slug>` matching the spec's AC table. A command is done only when every AC in its spec has a passing test.
 - **Help text** wording is normative per spec §3 sections; tests assert substrings, never layout.
-- **Implementation order:** `init` → `ingest` → `validate`, then query/graph/housekeeping. Core models are introduced by the command that first needs them (00-shared.md §7 table).
+- **Implementation order:** `init` → `ingest` → `create` → `validate`, then query/graph/housekeeping. Core models are introduced by the command that first needs them (00-shared.md §7 table).
 - Commit specs and code separately when both change; reference the requirement ids (e.g. "CLI-11", "AC7") in commit messages where they apply.
