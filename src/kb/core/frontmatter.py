@@ -5,7 +5,7 @@ from collections.abc import Mapping
 
 import yaml
 from yaml.nodes import MappingNode, ScalarNode
-from yaml.tokens import FlowMappingEndToken, ScalarToken, Token
+from yaml.tokens import FlowEntryToken, FlowMappingEndToken, ScalarToken, Token
 
 from kb.core.model import SyntheticFrontmatter
 
@@ -102,8 +102,9 @@ def _missing_scalar_insertion(
         )
         if closing is None:
             raise ValueError("top-level flow mapping has no closing token")
-        before_closing = yaml_text[: closing.start_mark.index].rstrip()
-        separator = "" if not node.value or before_closing.endswith(",") else ", "
+        closing_index = tokens.index(closing)
+        has_trailing_separator = isinstance(tokens[closing_index - 1], FlowEntryToken)
+        separator = "" if not node.value or has_trailing_separator else ", "
         return closing.start_mark.index, separator + ", ".join(rendered)
     insertion_at = node.end_mark.index
     prefix = "" if yaml_text[:insertion_at].endswith(("\n", "\r")) else eol

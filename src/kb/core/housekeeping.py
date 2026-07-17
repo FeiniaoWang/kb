@@ -8,6 +8,13 @@ from pathlib import Path
 from pydantic import BaseModel, Field
 
 from kb.core.indexing import render_index
+from kb.core.safeio import (
+    FileIdentity,
+    append_mutable_bytes,
+    create_file_bytes,
+    inspect_mutable_file,
+    read_mutable_bytes,
+)
 
 
 class LogEntry(BaseModel):
@@ -227,14 +234,30 @@ def _log_content(timestamp: str) -> str:
     return f"{empty_log_content()}{entry}\n"
 
 
-def append_log(root: Path, entry: LogEntry) -> None:
+_AUTO_LOG_IDENTITY = object()
+
+
+def append_log(
+    root: Path,
+    entry: LogEntry,
+    *,
+    expected_identity: FileIdentity | None | object = _AUTO_LOG_IDENTITY,
+) -> None:
     path = root / "log.md"
-    if not path.exists():
-        path.write_text(empty_log_content(), encoding="utf-8", newline="\n")
-    existing = path.read_text(encoding="utf-8")
-    separator = "" if existing.endswith("\n") else "\n"
-    with path.open("a", encoding="utf-8", newline="\n") as stream:
-        stream.write(f"{separator}{format_log_entry(entry)}\n")
+    identity = (
+        inspect_mutable_file(path, allow_missing=True)
+        if expected_identity is _AUTO_LOG_IDENTITY
+        else expected_identity
+    )
+    row = f"{format_log_entry(entry)}\n".encode("utf-8")
+    if identity is None:
+        create_file_bytes(path, empty_log_content().encode("utf-8") + row)
+        return
+    if not isinstance(identity, FileIdentity):
+        raise TypeError("expected log identity must be a FileIdentity or None")
+    existing = read_mutable_bytes(path, identity)
+    separator = b"" if existing.endswith(b"\n") else b"\n"
+    append_mutable_bytes(path, separator + row, identity)
 
 
 def _manifest(timestamp: str) -> dict[str, ScaffoldEntry]:

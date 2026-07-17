@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 import re
 import sys
 from pathlib import Path, PurePosixPath
@@ -25,6 +24,13 @@ from kb.core.model import (
     Document,
     SyntheticFrontmatter,
     load_config,
+)
+from kb.core.safeio import (
+    FileIdentity,
+    create_file_bytes,
+    inspect_mutable_file,
+    overwrite_mutable_bytes,
+    read_mutable_bytes,
 )
 from kb.core.scan import KB, RootDiscoveryError, discover_root, resolve_ref, scan
 
@@ -120,21 +126,6 @@ def _target_directory(root: Path, dest: str | None) -> tuple[Path, list[Path]]:
     if real_target != real_base and real_base not in real_target.parents:
         raise _invalid_destination(dest)
     return target, missing
-
-
-def _exclusive_write(path: Path, content: str) -> None:
-    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
-    flags |= getattr(os, "O_NOFOLLOW", 0)
-    descriptor = os.open(path, flags, 0o666)
-    try:
-        remaining = memoryview(content.encode("utf-8"))
-        while remaining:
-            written = os.write(descriptor, remaining)
-            if written == 0:
-                raise OSError("exclusive document write made no progress")
-            remaining = remaining[written:]
-    finally:
-        os.close(descriptor)
 
 
 def _warnings(config: Config, request: CreateRequest, tags: list[str]) -> list[str]:
@@ -267,9 +258,14 @@ def _resolve_supersedes(kb: KB, ref: str | None) -> Document | None:
     return document
 
 
-def _superseded_bytes(root: Path, document: Document, timestamp: str) -> bytes:
+def _superseded_bytes(
+    root: Path,
+    document: Document,
+    timestamp: str,
+    identity: FileIdentity,
+) -> bytes:
     return replace_frontmatter_scalars(
-        (root / document.path).read_bytes(),
+        read_mutable_bytes(root / document.path, identity),
         {
             "status": "superseded",
             "timestamp": timestamp,
@@ -343,10 +339,34 @@ def create(request: CreateRequest) -> CreateResult:
         missing_directories[0].parent if missing_directories else target_dir
     )
     existing_index = existing_index_dir / "index.md"
+    superseded_identity: FileIdentity | None = None
+    if superseded_document is not None:
+        try:
+            inspected = inspect_mutable_file(root / superseded_document.path)
+            if inspected is None:
+                raise OSError("supersedes target disappeared")
+            superseded_identity = inspected
+        except OSError as error:
+            raise CreateFailure(
+                "E_CREATE_SUPERSEDES_INVALID",
+                f"supersedes target cannot be updated safely: {request.supersedes}: "
+                f"{error}",
+                1,
+            ) from error
+    try:
+        inspected_index = inspect_mutable_file(existing_index)
+        if inspected_index is None:
+            raise OSError("index disappeared")
+        existing_index_identity = inspected_index
+        log_identity = inspect_mutable_file(root / "log.md", allow_missing=True)
+    except OSError as error:
+        raise CreateFailure("E_CREATE_IO", str(error), 2) from error
     try:
         superseded_content = (
-            _superseded_bytes(root, superseded_document, timestamp)
-            if superseded_document is not None
+            _superseded_bytes(
+                root, superseded_document, timestamp, superseded_identity
+            )
+            if superseded_document is not None and superseded_identity is not None
             else None
         )
     except OSError as error:
@@ -365,13 +385,21 @@ def create(request: CreateRequest) -> CreateResult:
             index_path.write_text(
                 new_indexes[index_path], encoding="utf-8", newline="\n"
             )
-        _exclusive_write(path, document_content)
-        if superseded_document is not None and superseded_content is not None:
-            (root / superseded_document.path).write_bytes(superseded_content)
-        existing_index.write_text(
-            regenerate_directory_index(root, existing_index_dir),
-            encoding="utf-8",
-            newline="\n",
+        create_file_bytes(path, document_content.encode("utf-8"))
+        if (
+            superseded_document is not None
+            and superseded_content is not None
+            and superseded_identity is not None
+        ):
+            overwrite_mutable_bytes(
+                root / superseded_document.path,
+                superseded_content,
+                superseded_identity,
+            )
+        overwrite_mutable_bytes(
+            existing_index,
+            regenerate_directory_index(root, existing_index_dir).encode("utf-8"),
+            existing_index_identity,
         )
         old_id = superseded_document.id if superseded_document else None
         append_log(
@@ -383,6 +411,7 @@ def create(request: CreateRequest) -> CreateResult:
                 doc_ids=[doc_id] + ([old_id] if old_id else []),
                 note=relative + (f" supersedes {old_id}" if old_id else ""),
             ),
+            expected_identity=log_identity,
         )
     except OSError as error:
         raise CreateFailure("E_CREATE_IO", str(error), 2) from error

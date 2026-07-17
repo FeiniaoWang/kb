@@ -1064,15 +1064,17 @@ def test_supersedes_preparation_oserror_is_structured_without_writes(
     add_chat(initialized_kb)
     target = add_synthetic(initialized_kb)
     before = snapshot(initialized_kb)
-    read_bytes = Path.read_bytes
+    original_open = os.open
 
-    def fail_target(path: Path) -> bytes:
-        if path == target:
+    def fail_target(path, flags, mode=0o777, *, dir_fd=None):
+        if Path(path) == target and flags & os.O_ACCMODE == os.O_RDONLY:
             raise OSError("target became unreadable")
-        return read_bytes(path)
+        if dir_fd is None:
+            return original_open(path, flags, mode)
+        return original_open(path, flags, mode, dir_fd=dir_fd)
 
     with monkeypatch.context() as context:
-        context.setattr(Path, "read_bytes", fail_target)
+        context.setattr(os, "open", fail_target)
         result = supersede(invoke_create, initialized_kb)
 
     assert result.exit_code == 2
@@ -1212,8 +1214,17 @@ def test_supersedes_merge_only_lifecycle_is_structured_invalid_without_writes(
             b"---\nid: KB-000001\ntype: spec\nstatus: current\nunknown: keep\n...\n---\nBody  \n",
             b"---\nid: KB-000001\ntype: spec\nstatus: superseded\nunknown: keep\ntimestamp: {timestamp}\nlast_human_touch: {timestamp}\n...\n---\nBody  \n",
         ),
+        (
+            b"---\n{id: KB-000001, type: spec, status: current, # trailing separator comment\n}\n---\nBody  \n",
+            b"---\n{id: KB-000001, type: spec, status: superseded, # trailing separator comment\ntimestamp: {timestamp}, last_human_touch: {timestamp}}\n---\nBody  \n",
+        ),
     ],
-    ids=["flow-missing-one", "flow-missing-both", "document-end-marker"],
+    ids=[
+        "flow-missing-one",
+        "flow-missing-both",
+        "document-end-marker",
+        "flow-commented-trailing-separator",
+    ],
 )
 def test_supersedes_inserts_missing_lifecycle_into_valid_yaml_atomically(
     source, expected_template, initialized_kb, invoke_create
@@ -1406,3 +1417,90 @@ def test_invalid_synthetic_prefix_is_structured_config_error_without_writes(
         assert "E_CONFIG_INVALID" in result.stderr
         assert result.stdout == ""
     assert snapshot(initialized_kb) == before
+
+
+def test_symlinked_supersession_target_outside_is_invalid_without_writes(
+    tmp_path, initialized_kb, invoke_create
+) -> None:
+    add_chat(initialized_kb)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    external = add_synthetic(outside, relative="old.md")
+    target = initialized_kb / "synthetic/old.md"
+    try:
+        target.symlink_to(external)
+    except (NotImplementedError, OSError) as error:
+        pytest.skip(f"symlinks unsupported: {error}")
+    kb_before = snapshot(initialized_kb)
+    outside_before = snapshot(outside)
+    link_target = os.readlink(target)
+
+    result = supersede(invoke_create, initialized_kb)
+
+    assert result.exit_code == 1
+    assert "E_CREATE_SUPERSEDES_INVALID" in result.stderr
+    assert snapshot(initialized_kb) == kb_before
+    assert snapshot(outside) == outside_before
+    assert target.is_symlink() and os.readlink(target) == link_target
+
+
+def test_symlinked_existing_index_outside_fails_before_any_writes(
+    tmp_path, initialized_kb, invoke_create
+) -> None:
+    add_chat(initialized_kb)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    external = write_doc(
+        outside,
+        "index.md",
+        "type: index\ndescription: External index.\n",
+        "# External\n",
+    )
+    index = initialized_kb / "synthetic/index.md"
+    index.unlink()
+    try:
+        index.symlink_to(external)
+    except (NotImplementedError, OSError) as error:
+        pytest.skip(f"symlinks unsupported: {error}")
+    kb_before = snapshot(initialized_kb)
+    outside_before = snapshot(outside)
+    link_target = os.readlink(index)
+
+    result = invoke_valid(invoke_create, initialized_kb)
+
+    assert result.exit_code == 2
+    assert "E_CREATE_IO" in result.stderr
+    assert snapshot(initialized_kb) == kb_before
+    assert snapshot(outside) == outside_before
+    assert index.is_symlink() and os.readlink(index) == link_target
+
+
+def test_symlinked_existing_log_outside_fails_before_any_writes(
+    tmp_path, initialized_kb, invoke_create
+) -> None:
+    add_chat(initialized_kb)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    external = write_doc(
+        outside,
+        "log.md",
+        "type: log\n",
+        "# External log\n",
+    )
+    log = initialized_kb / "log.md"
+    log.unlink()
+    try:
+        log.symlink_to(external)
+    except (NotImplementedError, OSError) as error:
+        pytest.skip(f"symlinks unsupported: {error}")
+    kb_before = snapshot(initialized_kb)
+    outside_before = snapshot(outside)
+    link_target = os.readlink(log)
+
+    result = invoke_valid(invoke_create, initialized_kb)
+
+    assert result.exit_code == 2
+    assert "E_CREATE_IO" in result.stderr
+    assert snapshot(initialized_kb) == kb_before
+    assert snapshot(outside) == outside_before
+    assert log.is_symlink() and os.readlink(log) == link_target
