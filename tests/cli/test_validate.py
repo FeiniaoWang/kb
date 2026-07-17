@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 from pathlib import Path
 
@@ -1198,7 +1199,14 @@ def test_ac66_findings_sort_by_path_then_code(tmp_path, invoke_validate) -> None
     make_doc(root, "m.md", {"type": "index"})
     result = invoke_validate(root, "--json")
     pairs = [(item["path"], item["code"]) for item in finding_payload(result)]
-    assert pairs == sorted(pairs)
+    assert len(pairs) > 1
+    assert pairs == [
+        *[("a.md", "FM1_FIELD_MISSING")] * 7,
+        ("a.md", "LOC_TYPE_MISMATCH"),
+        ("m.md", "FM1_FIELD_MISSING"),
+        ("m.md", "LOC_TYPE_MISMATCH"),
+        ("z.md", "FM0_UNPARSEABLE"),
+    ]
 
 
 def test_ac67_json_schema_is_exact_and_id_is_nullable(
@@ -1217,33 +1225,49 @@ def test_ac67_json_schema_is_exact_and_id_is_nullable(
         "unresolved_refs",
     }
     assert payload["ok"] is False
-    assert isinstance(payload["checked"], int)
+    assert payload["checked"] == 2
     assert payload["counts"] == {"errors": 1, "warnings": 1}
     assert payload["unresolved_refs"] == []
-    assert all(
-        set(item) == {"code", "severity", "path", "id", "message"}
-        for item in payload["findings"]
-    )
-    assert all(item["id"] == "KB-000001" for item in payload["findings"])
+    assert len(payload["findings"]) == 2
+    assert payload["findings"] == [
+        {
+            "code": "FM1_DESCRIPTION_LONG",
+            "severity": "warning",
+            "path": "synthetic/note.md",
+            "id": "KB-000001",
+            "message": "description exceeds two sentences",
+        },
+        {
+            "code": "FM1_FIELD_MISSING",
+            "severity": "error",
+            "path": "synthetic/note.md",
+            "id": "KB-000001",
+            "message": "missing mandatory field 'title' for synthetic documents",
+        },
+    ]
 
-    original_model_dump = Finding.model_dump
+    def forbidden_model_dump(*args, **kwargs):
+        raise AssertionError("generic Finding serialization is forbidden")
 
-    def model_dump_with_internal_field(self, *args, **kwargs):
-        dumped = original_model_dump(self, *args, **kwargs)
-        dumped["occurrence"] = self.occurrence
-        return dumped
-
-    monkeypatch.setattr(Finding, "model_dump", model_dump_with_internal_field)
+    monkeypatch.setattr(Finding, "model_dump", forbidden_model_dump)
     hardened = invoke_validate(root, "--json")
-    assert all(
-        set(item) == {"code", "severity", "path", "id", "message"}
-        for item in finding_payload(hardened)
-    )
+    assert json.loads(hardened.stdout) == payload
 
     root = make_kb(tmp_path / "null-id")
     (root / "README.md").write_text("broken\n", encoding="utf-8")
     malformed = invoke_validate(root, "--json")
-    assert finding_payload(malformed)[0]["id"] is None
+    assert finding_payload(malformed) == [
+        {
+            "code": "FM0_UNPARSEABLE",
+            "severity": "error",
+            "path": "README.md",
+            "id": None,
+            "message": (
+                "frontmatter cannot be parsed: "
+                "missing opening frontmatter delimiter"
+            ),
+        }
+    ]
 
 
 def test_ac68_json_ok_is_equivalent_to_exit_zero(
@@ -1260,6 +1284,7 @@ def test_ac68_json_ok_is_equivalent_to_exit_zero(
     payload = json.loads(unresolved.stdout)
     assert unresolved.exit_code == 1 and payload["ok"] is False
     assert payload["unresolved_refs"] == ["KB-999999"]
+    assert unresolved.stderr == "unresolvable ref: KB-999999\n"
 
 
 def test_ac69_clean_json_envelope_has_zero_counts(
@@ -1278,18 +1303,22 @@ def test_ac69_clean_json_envelope_has_zero_counts(
 
 
 def test_ac70_no_kb_errors_are_shared_in_text_and_json(
-    tmp_path, runner, invoke_validate
+    tmp_path, invoke_validate
 ) -> None:
+    configless = tmp_path / "configless"
+    configless.mkdir()
     text = invoke_validate(tmp_path)
-    explicit = invoke_validate(tmp_path, "--kb", str(tmp_path / "missing"))
+    explicit = invoke_validate(tmp_path, "--kb", str(configless))
     json_result = invoke_validate(tmp_path, "--json")
     message = (
         "not inside a knowledge base (no kb-config.json found); "
         "run 'kb init' or pass --kb"
     )
     assert text.exit_code == explicit.exit_code == json_result.exit_code == 2
-    assert text.stderr == f"E_NO_KB: {message}\n"
-    assert "E_NO_KB" in explicit.stderr
+    for result in (text, explicit):
+        assert result.stdout == ""
+        assert result.stderr == f"E_NO_KB: {message}\n"
+    assert json_result.stderr == ""
     assert json.loads(json_result.stdout) == {
         "error": {"code": "E_NO_KB", "message": message}
     }
@@ -1301,10 +1330,18 @@ def test_ac71_invalid_config_is_a_command_error(
     root = tmp_path / "kb"
     root.mkdir()
     (root / "kb-config.json").write_text("{", encoding="utf-8")
-    result = invoke_validate(root)
-    assert result.exit_code == 2
-    assert "E_CONFIG_INVALID" in result.stderr
-    assert result.stdout == ""
+    text = invoke_validate(root)
+    json_result = invoke_validate(root, "--json")
+    payload = json.loads(json_result.stdout)
+    assert text.exit_code == json_result.exit_code == 2
+    assert text.stdout == ""
+    assert json_result.stderr == ""
+    assert set(payload) == {"error"}
+    assert set(payload["error"]) == {"code", "message"}
+    assert payload["error"]["code"] == "E_CONFIG_INVALID"
+    message = payload["error"]["message"]
+    assert message.startswith("invalid kb-config.json: ")
+    assert text.stderr == f"E_CONFIG_INVALID: {message}\n"
 
 
 def test_ac72_newer_schema_is_unsupported(tmp_path, invoke_validate) -> None:
@@ -1313,9 +1350,19 @@ def test_ac72_newer_schema_is_unsupported(tmp_path, invoke_validate) -> None:
     config = json.loads(config_path.read_text(encoding="utf-8"))
     config["schema"] = 999
     config_path.write_text(json.dumps(config), encoding="utf-8")
-    result = invoke_validate(root)
-    assert result.exit_code == 2
-    assert "E_SCHEMA_UNSUPPORTED" in result.stderr
+    text = invoke_validate(root)
+    json_result = invoke_validate(root, "--json")
+    message = "unsupported KB schema 999; maximum supported schema is 1"
+    assert text.exit_code == json_result.exit_code == 2
+    assert text.stdout == ""
+    assert text.stderr == f"E_SCHEMA_UNSUPPORTED: {message}\n"
+    assert json_result.stderr == ""
+    payload = json.loads(json_result.stdout)
+    assert set(payload) == {"error"}
+    assert set(payload["error"]) == {"code", "message"}
+    assert payload == {
+        "error": {"code": "E_SCHEMA_UNSUPPORTED", "message": message}
+    }
 
 
 def test_ac73_usage_and_help_copy_are_normative(
@@ -1352,6 +1399,26 @@ def test_ac74_validate_is_git_agnostic(
 ) -> None:
     root = make_kb(tmp_path / "kb")
     (root / "README.md").write_text("broken\n", encoding="utf-8")
+    marker = tmp_path / "git-invoked"
+    shim_dir = tmp_path / "bin"
+    shim_dir.mkdir()
+    git_shim = shim_dir / "git"
+    git_shim.write_text(
+        "#!/bin/sh\nprintf invoked > \"$KB_VALIDATE_GIT_MARKER\"\nexit 97\n",
+        encoding="utf-8",
+    )
+    git_shim.chmod(0o755)
+    monkeypatch.setenv("KB_VALIDATE_GIT_MARKER", str(marker))
+    monkeypatch.setenv(
+        "PATH", f"{shim_dir}{os.pathsep}{os.environ.get('PATH', '')}"
+    )
+
+    repository_root = Path(__file__).parents[2]
+    for relative in ("src/kb/core/validate.py", "src/kb/cli/validate.py"):
+        source_text = (repository_root / relative).read_text(encoding="utf-8")
+        assert ".git" not in source_text
+        assert "subprocess" not in source_text
+        assert "os.system" not in source_text
 
     def forbidden(*args, **kwargs):
         raise AssertionError(
@@ -1364,4 +1431,5 @@ def test_ac74_validate_is_git_agnostic(
     monkeypatch.setattr(subprocess, "check_output", forbidden)
     result = invoke_validate(root)
     assert result.exit_code == 1
+    assert not marker.exists()
     assert not (root / ".git").exists()
