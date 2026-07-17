@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import re
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Literal
 
 from pydantic import BaseModel, Field, PrivateAttr
 
 from kb.core.model import Config, ConfigLoadError, DocClass, Document, load_config
 from kb.core.scan import (
+    ID_REF_PATTERN,
     KB,
     RootDiscoveryError,
     ScannedMarkdown,
@@ -753,6 +754,42 @@ def _all_findings(kb: KB, config: Config) -> list[Finding]:
     return sorted(findings, key=lambda item: (item.path, item.code, item.occurrence))
 
 
+def _stable_unique(values: list[str]) -> list[str]:
+    return list(dict.fromkeys(values))
+
+
+def _path_ref(ref: str) -> Path | None:
+    candidate = PurePosixPath(ref)
+    if candidate.is_absolute() or any(
+        part in {".", ".."} for part in ref.split("/")
+    ):
+        return None
+    if not str(candidate).endswith(".md"):
+        candidate = PurePosixPath(f"{candidate}.md")
+    return Path(*candidate.parts)
+
+
+def _resolve_scope(kb: KB, refs: list[str]) -> tuple[set[Path], list[str]]:
+    universe = {file.path for file in kb.files}
+    if not refs:
+        return universe, []
+    scope: set[Path] = set()
+    unresolved: list[str] = []
+    for ref in _stable_unique(refs):
+        resolved: Path | None
+        if ID_REF_PATTERN.fullmatch(ref):
+            document = kb.by_id.get(ref)
+            resolved = None if document is None else document.path
+        else:
+            candidate = _path_ref(ref)
+            resolved = candidate if candidate in universe else None
+        if resolved is None:
+            unresolved.append(ref)
+        else:
+            scope.add(resolved)
+    return scope, unresolved
+
+
 def validate(request: ValidateRequest) -> ValidateResult:
     try:
         root = discover_root(request.kb_root)
@@ -760,13 +797,17 @@ def validate(request: ValidateRequest) -> ValidateResult:
     except (RootDiscoveryError, ConfigLoadError) as error:
         raise ValidateFailure(error.code, error.message) from error
     kb = scan(root)
-    findings = _all_findings(kb, config)
-    failed = any(item.severity == "error" for item in findings)
+    all_findings = _all_findings(kb, config)
+    scope, unresolved = _resolve_scope(kb, request.refs)
+    findings = [item for item in all_findings if Path(item.path) in scope]
+    failed = bool(unresolved) or any(
+        item.severity == "error" for item in findings
+    )
     if request.strict and findings:
         failed = True
     return ValidateResult(
-        checked=len(kb.files),
+        checked=len(scope),
         findings=findings,
-        unresolved_refs=[],
+        unresolved_refs=unresolved,
         exit_code=1 if failed else 0,
     )

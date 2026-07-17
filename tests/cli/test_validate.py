@@ -1046,3 +1046,122 @@ def test_ac57_errors_exit_one_with_and_without_strict(
     (root / "README.md").write_text("broken\n", encoding="utf-8")
     assert invoke_validate(root).exit_code == 1
     assert invoke_validate(root, "--strict").exit_code == 1
+
+
+def scoped_pair(root: Path) -> None:
+    chat(root)
+    make_doc(root, "synthetic/a.md", valid_synthetic_values(id="KB-000001"))
+    bad = valid_synthetic_values(id="KB-000002")
+    del bad["title"]
+    make_doc(root, "synthetic/b.md", bad)
+
+
+def test_ac58_scope_hides_other_files_findings_and_gate(
+    tmp_path, invoke_validate
+) -> None:
+    root = make_kb(tmp_path / "kb")
+    scoped_pair(root)
+    result = invoke_validate(root, "synthetic/a.md")
+    assert result.exit_code == 0
+    assert result.stdout == "no findings — checked 1 files\n"
+
+
+def test_ac59_id_and_extensionless_path_scope_to_the_same_document(
+    tmp_path, invoke_validate
+) -> None:
+    root = make_kb(tmp_path / "kb")
+    scoped_pair(root)
+    by_id = invoke_validate(root, "KB-000002")
+    by_path = invoke_validate(root, "synthetic/b")
+    assert by_id.exit_code == by_path.exit_code == 1
+    assert by_id.stdout == by_path.stdout
+    assert "synthetic/b.md" in by_id.stdout
+
+
+def test_ac60_piped_refs_work_and_arguments_win_over_stdin(
+    tmp_path, invoke_validate
+) -> None:
+    root = make_kb(tmp_path / "kb")
+    scoped_pair(root)
+    piped = invoke_validate(root, input="\nsynthetic/b.md\n\n")
+    assert piped.exit_code == 1 and "synthetic/b.md" in piped.stdout
+    arguments = invoke_validate(
+        root, "synthetic/a.md", input="synthetic/b.md\n"
+    )
+    assert arguments.exit_code == 0
+    assert "synthetic/b.md" not in arguments.stdout
+
+
+def test_ac61_global_duplicate_check_reports_only_the_scoped_anchor(
+    tmp_path, invoke_validate
+) -> None:
+    root = make_kb(tmp_path / "kb")
+    chat(root)
+    make_doc(root, "synthetic/a.md", valid_synthetic_values(id="KB-000007"))
+    make_doc(root, "synthetic/b.md", valid_synthetic_values(id="KB-000007"))
+    result = invoke_validate(root, "synthetic/a.md", "--json")
+    duplicates = [
+        item
+        for item in finding_payload(result)
+        if item["code"] == "ID_DUPLICATE"
+    ]
+    assert len(duplicates) == 1
+    assert duplicates[0]["path"] == "synthetic/a.md"
+    assert "synthetic/b.md" in duplicates[0]["message"]
+
+
+def test_ac62_malformed_file_resolves_by_path(tmp_path, invoke_validate) -> None:
+    root = make_kb(tmp_path / "kb")
+    path = root / "raw/sources/broken.md"
+    path.parent.mkdir(parents=True)
+    path.write_text("broken\n", encoding="utf-8")
+    result = invoke_validate(root, "raw/sources/broken.md")
+    assert result.exit_code == 1
+    assert "FM0_UNPARSEABLE" in result.stdout
+    assert "checked 1 files" in result.stdout
+
+
+def test_ac63_unresolvable_ref_is_a_batch_diagnostic_and_exit_one(
+    tmp_path, invoke_validate
+) -> None:
+    root = make_kb(tmp_path / "kb")
+    chat(root)
+    make_doc(root, "synthetic/a.md", valid_synthetic_values())
+    result = invoke_validate(root, "KB-999999", "synthetic/a.md")
+    assert result.exit_code == 1
+    assert result.stderr == "unresolvable ref: KB-999999\n"
+    assert result.stdout == "no findings — checked 1 files\n"
+
+
+def test_ac64_duplicate_refs_are_silently_deduplicated(
+    tmp_path, invoke_validate
+) -> None:
+    root = make_kb(tmp_path / "kb")
+    chat(root)
+    make_doc(root, "synthetic/a.md", valid_synthetic_values())
+    once = invoke_validate(root, "KB-000001")
+    twice = invoke_validate(root, "KB-000001", "KB-000001")
+    assert twice.exit_code == once.exit_code
+    assert twice.stdout == once.stdout
+    assert twice.stderr == once.stderr == ""
+
+
+def test_scope_rejects_absolute_and_dot_segment_path_refs(
+    tmp_path, invoke_validate
+) -> None:
+    root = make_kb(tmp_path / "kb")
+    chat(root)
+    make_doc(root, "synthetic/a.md", valid_synthetic_values())
+    result = invoke_validate(
+        root,
+        str(root / "synthetic/a.md"),
+        "./synthetic/a.md",
+        "synthetic/../synthetic/a.md",
+    )
+    assert result.exit_code == 1
+    assert result.stdout == "no findings — checked 0 files\n"
+    assert result.stderr.splitlines() == [
+        f"unresolvable ref: {root / 'synthetic/a.md'}",
+        "unresolvable ref: ./synthetic/a.md",
+        "unresolvable ref: synthetic/../synthetic/a.md",
+    ]

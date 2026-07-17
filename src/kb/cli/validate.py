@@ -23,6 +23,15 @@ VALIDATE_EXAMPLES = """Examples:
   kb validate --json                           Machine-readable findings"""
 
 
+def _effective_refs(argument_refs: list[str]) -> list[str]:
+    if argument_refs:
+        return argument_refs
+    stream = typer.get_text_stream("stdin")
+    if stream.isatty():
+        return []
+    return [line.strip() for line in stream if line.strip()]
+
+
 def validate_command(
     refs: Annotated[
         list[str] | None,
@@ -49,7 +58,11 @@ def validate_command(
 ) -> None:
     try:
         result = validate(
-            ValidateRequest(refs=refs or [], strict=strict, kb_root=kb_root)
+            ValidateRequest(
+                refs=_effective_refs(refs or []),
+                strict=strict,
+                kb_root=kb_root,
+            )
         )
     except ValidateFailure as error:
         typer.echo(
@@ -57,6 +70,8 @@ def validate_command(
             err=not json_output,
         )
         raise typer.Exit(code=2) from error
+    for ref in result.unresolved_refs:
+        typer.echo(f"unresolvable ref: {ref}", err=True)
     typer.echo(
         render_validate_json(result) if json_output else render_validate_text(result)
     )
