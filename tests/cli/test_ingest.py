@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 from datetime import datetime
 from pathlib import Path
 
 import yaml
+import pytest
 
 TIMESTAMP = r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z"
 
@@ -654,3 +656,167 @@ def test_ac32_absolute_and_parent_dest_are_rejected_without_writes(
         assert "E_INGEST_DEST_INVALID" in result.stderr
         assert value in result.stderr
         assert snapshot(initialized_kb) == before
+
+
+def test_ac33_feedback_path_ref_stores_canonical_id(initialized_kb, invoke_ingest) -> None:
+    write_existing(initialized_kb, "synthetic/specs/webhook.md", "id: KB-000007\ntype: coding-spec\n")
+    result = invoke_ingest(
+        initialized_kb, "--class", "feedback", "--from", "stdin",
+        "--about", "synthetic/specs/webhook.md", input="feedback",
+    )
+    assert result.exit_code == 0
+    assert split_document(initialized_kb / "raw/feedback/feed-000001.md")[0]["about"] == "KB-000007"
+
+
+def test_ac34_unknown_about_id_is_reference_finding(initialized_kb, invoke_ingest) -> None:
+    before = snapshot(initialized_kb)
+    result = invoke_ingest(
+        initialized_kb, "--class", "feedback", "--from", "stdin",
+        "--about", "KB-999999", input="feedback",
+    )
+    assert result.exit_code == 1 and "E_INGEST_ABOUT_UNRESOLVED" in result.stderr
+    assert snapshot(initialized_kb) == before
+
+
+def test_ac35_about_index_without_id_is_reference_finding(initialized_kb, invoke_ingest) -> None:
+    before = snapshot(initialized_kb)
+    result = invoke_ingest(
+        initialized_kb, "--class", "feedback", "--from", "stdin", "--about", "index.md", input="x"
+    )
+    assert result.exit_code == 1 and "E_INGEST_ABOUT_UNRESOLVED" in result.stderr
+    assert snapshot(initialized_kb) == before
+
+
+def test_ac36_about_class_pairing_is_usage_error(initialized_kb, invoke_ingest) -> None:
+    before = snapshot(initialized_kb)
+    missing = invoke_ingest(initialized_kb, "--class", "feedback", "--from", "stdin", input="x")
+    forbidden = invoke_ingest(
+        initialized_kb, "--class", "source", "--from", "stdin", "--about", "KB-000001", input="x"
+    )
+    assert missing.exit_code == forbidden.exit_code == 2
+    assert "E_INGEST_USAGE" in missing.stderr and "--about is required" in missing.stderr
+    assert "E_INGEST_USAGE" in forbidden.stderr and "--about is forbidden" in forbidden.stderr
+    assert snapshot(initialized_kb) == before
+
+
+def test_ac37_source_adapter_pairing_is_usage_error(initialized_kb, invoke_ingest) -> None:
+    before = snapshot(initialized_kb)
+    missing = invoke_ingest(initialized_kb, "--class", "source", "--from", "file")
+    forbidden = invoke_ingest(
+        initialized_kb, "--class", "source", "--from", "stdin", "source.md", input="x"
+    )
+    assert missing.exit_code == forbidden.exit_code == 2
+    assert "E_INGEST_USAGE" in missing.stderr and "required" in missing.stderr
+    assert "E_INGEST_USAGE" in forbidden.stderr and "forbidden" in forbidden.stderr
+    assert snapshot(initialized_kb) == before
+
+
+def test_ac38_missing_or_directory_source_is_environment_error(
+    initialized_kb, tmp_path, invoke_ingest
+) -> None:
+    before = snapshot(initialized_kb)
+    missing = ingest_file(invoke_ingest, initialized_kb, tmp_path / "absent")
+    directory = ingest_file(invoke_ingest, initialized_kb, tmp_path)
+    assert missing.exit_code == directory.exit_code == 2
+    assert "E_INGEST_SOURCE_NOT_FOUND" in missing.stderr
+    assert "E_INGEST_SOURCE_NOT_FOUND" in directory.stderr
+    assert snapshot(initialized_kb) == before
+
+
+def test_ac39_bad_enums_and_unknown_option_are_typer_usage_errors(initialized_kb, invoke_ingest) -> None:
+    before = snapshot(initialized_kb)
+    cases = [
+        ("--class", "bogus", "--from", "stdin"),
+        ("--class", "source", "--from", "bogus"),
+        ("--class", "source", "--from", "stdin", "--bogus-flag"),
+    ]
+    for arguments in cases:
+        result = invoke_ingest(initialized_kb, *arguments, input="x")
+        assert result.exit_code == 2
+        assert result.stderr
+        assert snapshot(initialized_kb) == before
+
+
+def test_ac40_missing_discovered_or_explicit_root_reports_shared_error(
+    tmp_path, invoke_ingest
+) -> None:
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    first = invoke_ingest(empty, "--class", "source", "--from", "stdin", input="x")
+    second = invoke_ingest(
+        empty, "--class", "source", "--from", "stdin", "--kb", str(empty), input="x"
+    )
+    for result in [first, second]:
+        assert result.exit_code == 2
+        assert result.stderr.strip() == (
+            "E_NO_KB: not inside a knowledge base (no kb-config.json found); "
+            "run 'kb init' or pass --kb"
+        )
+
+
+def test_ac41_invalid_config_is_environment_error(initialized_kb, invoke_ingest) -> None:
+    (initialized_kb / "kb-config.json").write_text("not json", encoding="utf-8")
+    before = snapshot(initialized_kb)
+    result = invoke_ingest(initialized_kb, "--class", "source", "--from", "stdin", input="x")
+    assert result.exit_code == 2 and "E_CONFIG_INVALID" in result.stderr
+    assert snapshot(initialized_kb) == before
+
+
+def test_ac42_newer_schema_is_environment_error(initialized_kb, invoke_ingest) -> None:
+    (initialized_kb / "kb-config.json").write_text('{"schema": 999}', encoding="utf-8")
+    before = snapshot(initialized_kb)
+    result = invoke_ingest(initialized_kb, "--class", "source", "--from", "stdin", input="x")
+    assert result.exit_code == 2 and "E_SCHEMA_UNSUPPORTED" in result.stderr
+    assert snapshot(initialized_kb) == before
+
+
+def test_ac43_failed_preflight_is_byte_atomic(initialized_kb, invoke_ingest) -> None:
+    before = snapshot(initialized_kb)
+    result = invoke_ingest(
+        initialized_kb, "--class", "feedback", "--from", "stdin", "--about", "KB-999999", input="x"
+    )
+    assert result.exit_code == 1
+    assert snapshot(initialized_kb) == before
+
+
+@pytest.mark.skipif(
+    os.name != "posix" or os.geteuid() == 0,
+    reason="requires enforceable POSIX directory permissions",
+)
+def test_ac44_write_phase_os_error_is_typed(initialized_kb, tmp_path, invoke_ingest) -> None:
+    target = initialized_kb / "raw/sources"
+    source = tmp_path / "doc.md"
+    source.write_text("doc", encoding="utf-8")
+    target.chmod(0o500)
+    try:
+        result = ingest_file(invoke_ingest, initialized_kb, source)
+    finally:
+        target.chmod(0o700)
+    assert result.exit_code == 2
+    assert "E_INGEST_IO" in result.stderr
+    assert result.stderr.split(":", 1)[1].strip()
+
+
+def test_ac45_actor_is_written_to_log(initialized_kb, tmp_path, invoke_ingest) -> None:
+    source = tmp_path / "doc.md"
+    source.write_text("doc", encoding="utf-8")
+    assert ingest_file(invoke_ingest, initialized_kb, source, "--actor", "pm-skill").exit_code == 0
+    assert " | ingested | pm-skill | RAW-000001 | " in (
+        initialized_kb / "log.md"
+    ).read_text(encoding="utf-8").splitlines()[-1]
+
+
+def test_ac46_missing_log_is_recreated_without_initialized_entry(
+    initialized_kb, tmp_path, invoke_ingest
+) -> None:
+    (initialized_kb / "log.md").unlink()
+    source = tmp_path / "doc.md"
+    source.write_text("doc", encoding="utf-8")
+    assert ingest_file(invoke_ingest, initialized_kb, source).exit_code == 0
+    log = (initialized_kb / "log.md").read_text(encoding="utf-8")
+    assert log.startswith(
+        "---\ntype: log\n---\n<!-- KB history — append-only; written by `kb log`. "
+    )
+    assert "# Knowledge Base Log\n" in log
+    assert " | initialized | " not in log
+    assert log.count(" | ingested | ") == 1
