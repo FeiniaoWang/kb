@@ -820,3 +820,110 @@ def test_ac46_missing_log_is_recreated_without_initialized_entry(
     assert "# Knowledge Base Log\n" in log
     assert " | initialized | " not in log
     assert log.count(" | ingested | ") == 1
+
+
+def test_ac47_success_json_has_exact_fields_sorted_paths_and_original(
+    initialized_kb, tmp_path, invoke_ingest
+) -> None:
+    binary = tmp_path / "Q3 Report.pdf"
+    binary.write_bytes(b"\xffbinary")
+    result = ingest_file(
+        invoke_ingest,
+        initialized_kb,
+        binary,
+        "--title",
+        "Q3 Report",
+        "--dest",
+        "q3",
+        "--json",
+    )
+    payload = json.loads(result.stdout)
+    assert result.exit_code == 0
+    assert result.stderr == ""
+    assert set(payload) == {"ok", "id", "path", "original", "created", "updated"}
+    assert payload == {
+        "ok": True,
+        "id": "RAW-000001",
+        "path": "raw/sources/q3/q3-report.md",
+        "original": "raw/sources/q3/q3-report.pdf",
+        "created": [
+            "raw/sources/q3/index.md",
+            "raw/sources/q3/q3-report.md",
+            "raw/sources/q3/q3-report.pdf",
+        ],
+        "updated": ["raw/sources/index.md"],
+    }
+    text = tmp_path / "text.md"
+    text.write_text("text", encoding="utf-8")
+    text_result = ingest_file(invoke_ingest, initialized_kb, text, "--json")
+    assert json.loads(text_result.stdout)["original"] is None
+
+
+def test_ac48_error_json_is_exact_shared_envelope(initialized_kb, invoke_ingest) -> None:
+    result = invoke_ingest(
+        initialized_kb,
+        "--class",
+        "feedback",
+        "--from",
+        "stdin",
+        "--about",
+        "KB-999999",
+        "--json",
+        input="feedback",
+    )
+    payload = json.loads(result.stdout)
+    assert result.exit_code == 1
+    assert result.stderr == ""
+    assert set(payload) == {"error"}
+    assert set(payload["error"]) == {"code", "message"}
+    assert payload["error"]["code"] == "E_INGEST_ABOUT_UNRESOLVED"
+    assert isinstance(payload["error"]["message"], str)
+
+
+def test_ac49_help_contains_every_normative_string(runner) -> None:
+    result = runner.invoke(
+        __import__("kb.cli.app", fromlist=["app"]).app,
+        ["ingest", "--help"],
+        terminal_width=1000,
+    )
+    expected = [
+        "Ingest material into the knowledge base as immutable raw evidence.",
+        "Reads from a file, stdin, or the clipboard and files one normalized Markdown document into raw/sources/, raw/chats/, or raw/feedback/, with the next sequential id and the reduced raw frontmatter.",
+        "The body is copied verbatim — ingest normalizes and files, it never synthesizes.",
+        "A non-text file is copied unchanged alongside a generated Markdown stub, which becomes the citable form.",
+        "Feedback requires --about: the document the feedback concerns.",
+        "Updates the affected index.md listings and appends an ingested entry to log.md.",
+        "Does not touch Git.",
+        "Path to the source file (required with --from file, forbidden otherwise).",
+        "Raw subclass to file under: source, chat, or feedback.",
+        "Where to read the material from: file, stdin, or clipboard.",
+        "Subdirectory under the class directory (e.g. api → raw/sources/api/). Created with its index.md if missing.",
+        "Document the feedback concerns (id or KB-relative path). Required for --class feedback.",
+        "Document title; also drives the target filename. [default: derived from the source filename or the id]",
+        'Provenance recorded in the frontmatter — a path, a URL, or a label. [default: the source path, "stdin", or "clipboard"]',
+        "Actor recorded in the log entry. [default: kb-cli]",
+        "KB root. [default: discovered upward from the current directory]",
+        "Emit results as JSON.",
+        "kb ingest --class source --from file notes.md                 File a document into raw/sources/",
+        "kb ingest --class source --from file report.pdf --dest q3     Non-text original + citable stub into raw/sources/q3/",
+        "kb ingest --class feedback --from stdin --about KB-000007     Pipe feedback about KB-000007",
+        'kb ingest --class chat --from clipboard --title "Planning session"   Clipboard into raw/chats/',
+        "kb ingest --class source --from file page.html --origin https://ex.com/post   Record the web page it came from",
+    ]
+    assert result.exit_code == 0
+    assert all(value in result.stdout for value in expected)
+
+
+def test_ac50_file_ingest_never_invokes_git_or_creates_git_directory(
+    initialized_kb, tmp_path, invoke_ingest, monkeypatch
+) -> None:
+    source = tmp_path / "doc.md"
+    source.write_text("doc", encoding="utf-8")
+
+    def forbidden_subprocess(*args, **kwargs):
+        raise AssertionError(f"unexpected subprocess invocation: {args!r}")
+
+    monkeypatch.setattr("kb.core.ingest.subprocess.run", forbidden_subprocess)
+    result = ingest_file(invoke_ingest, initialized_kb, source)
+    assert result.exit_code == 0
+    assert not (initialized_kb / ".git").exists()

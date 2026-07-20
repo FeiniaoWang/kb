@@ -51,8 +51,8 @@ def render_ingest_json(result: IngestResult) -> str:
             "id": result.id,
             "path": result.path,
             "original": result.original,
-            "created": result.created,
-            "updated": result.updated,
+            "created": sorted(result.created),
+            "updated": sorted(result.updated),
         },
         ensure_ascii=False,
     )
