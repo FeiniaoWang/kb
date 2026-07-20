@@ -17,6 +17,7 @@ from kb.core.housekeeping import LogEntry, append_log, utc_now
 from kb.core.ids import next_id
 from kb.core.indexing import create_directory_index, regenerate_directory_index
 from kb.core.model import ConfigLoadError, RawClass, RawFrontmatter, load_config
+from kb.core.safeio import create_file_bytes
 from kb.core.scan import KB, RootDiscoveryError, discover_root, resolve_ref, scan
 
 CLASS_DIR = {
@@ -206,12 +207,41 @@ def _destination_parts(value: str | None) -> tuple[str, ...]:
     candidate = PurePosixPath(stripped)
     if (
         not stripped
+        or "\\" in value
+        or re.match(r"^[A-Za-z]:", stripped) is not None
         or candidate.is_absolute()
         or not candidate.parts
         or any(part in {".", ".."} for part in stripped.split("/"))
     ):
         raise IngestFailure("E_INGEST_DEST_INVALID", f"invalid --dest: {value}", 2)
     return candidate.parts
+
+
+def _target_directory(
+    root: Path,
+    raw_class: RawClass,
+    destination_parts: tuple[str, ...],
+    destination_value: str | None,
+) -> tuple[Path, Path]:
+    class_dir = root / CLASS_DIR[raw_class]
+    target_dir = class_dir.joinpath(*destination_parts)
+    try:
+        resolved_class_dir = class_dir.resolve(strict=True)
+        resolved_target_dir = target_dir.resolve(strict=False)
+    except (OSError, RuntimeError) as error:
+        raise IngestFailure(
+            "E_INGEST_DEST_INVALID",
+            f"invalid --dest: {destination_value}: {error}",
+            2,
+        ) from error
+    if (
+        resolved_target_dir != resolved_class_dir
+        and not resolved_target_dir.is_relative_to(resolved_class_dir)
+    ):
+        raise IngestFailure(
+            "E_INGEST_DEST_INVALID", f"invalid --dest: {destination_value}", 2
+        )
+    return class_dir, target_dir
 
 
 def _new_directories(class_dir: Path, target_dir: Path) -> list[Path]:
@@ -275,6 +305,15 @@ def _failure_from_config(error: ConfigLoadError) -> IngestFailure:
     return IngestFailure(error.code, error.message, 2)
 
 
+def _non_text_original_path(
+    target_dir: Path, stem: str, extension: str
+) -> Path:
+    filename = (
+        f"{stem}.md.original" if extension == ".md" else f"{stem}{extension}"
+    )
+    return target_dir / filename
+
+
 def ingest(request: IngestRequest) -> IngestResult:
     try:
         root = discover_root(request.kb_root)
@@ -294,8 +333,9 @@ def ingest(request: IngestRequest) -> IngestResult:
         )
     _surface(request)
     destination_parts = _destination_parts(request.dest)
-    class_dir = root / CLASS_DIR[request.raw_class]
-    target_dir = class_dir.joinpath(*destination_parts)
+    class_dir, target_dir = _target_directory(
+        root, request.raw_class, destination_parts, request.dest
+    )
     new_directories = _new_directories(class_dir, target_dir)
     payload = ADAPTERS[request.source_kind](request.source)
     text_body, original_bytes = _normalized_input(payload, request.source_kind)
@@ -312,13 +352,21 @@ def ingest(request: IngestRequest) -> IngestResult:
     if original_bytes is not None and payload.source_filename is not None:
         extension = Path(payload.source_filename).suffix.lower()
     document_path = target_dir / f"{stem}.md"
-    original_path = target_dir / f"{stem}{extension}" if original_bytes is not None else None
+    original_path = (
+        _non_text_original_path(target_dir, stem, extension)
+        if original_bytes is not None
+        else None
+    )
     if document_path.exists() or (
         original_path is not None and original_path.exists()
     ):
         stem = f"{stem}-{doc_id.lower()}"
         document_path = target_dir / f"{stem}.md"
-        original_path = target_dir / f"{stem}{extension}" if original_bytes is not None else None
+        original_path = (
+            _non_text_original_path(target_dir, stem, extension)
+            if original_bytes is not None
+            else None
+        )
         if document_path.exists() or (
             original_path is not None and original_path.exists()
         ):
@@ -352,10 +400,10 @@ def ingest(request: IngestRequest) -> IngestResult:
         if new_directories:
             target_dir.mkdir(parents=True)
         if original_path is not None and original_bytes is not None:
-            original_path.write_bytes(original_bytes)
+            create_file_bytes(original_path, original_bytes)
             original_relative = original_path.relative_to(root).as_posix()
             created.append(original_relative)
-        path.write_text(_document(frontmatter, body), encoding="utf-8", newline="\n")
+        create_file_bytes(path, _document(frontmatter, body).encode("utf-8"))
         for directory in reversed(new_directories):
             index_path = directory / "index.md"
             index_path.write_text(

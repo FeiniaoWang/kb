@@ -6,8 +6,10 @@ import re
 from datetime import datetime
 from pathlib import Path
 
-import yaml
 import pytest
+import yaml
+
+from kb.core.scan import scan
 
 TIMESTAMP = r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z"
 
@@ -542,7 +544,9 @@ def test_ac26_index_lists_stub_but_not_binary(initialized_kb, tmp_path, invoke_i
     assert "q3-report.pdf" not in index
 
 
-def test_ac27_binary_extension_is_lowercase_or_absent(initialized_kb, tmp_path, invoke_ingest) -> None:
+def test_ac27_binary_extension_is_lowercase_absent_or_markdown_original(
+    initialized_kb, tmp_path, invoke_ingest
+) -> None:
     photo = tmp_path / "Photo.JPG"
     photo.write_bytes(b"\xffjpg")
     assert ingest_file(invoke_ingest, initialized_kb, photo).exit_code == 0
@@ -553,6 +557,35 @@ def test_ac27_binary_extension_is_lowercase_or_absent(initialized_kb, tmp_path, 
     assert ingest_file(invoke_ingest, initialized_kb, dump).exit_code == 0
     assert (initialized_kb / "raw/sources/dump").is_file()
     assert "[dump](dump)" in split_document(initialized_kb / "raw/sources/dump.md")[1]
+
+    markdown = tmp_path / "Binary Note.MD"
+    markdown.write_bytes(b"\xffmarkdown binary")
+    first = ingest_file(invoke_ingest, initialized_kb, markdown)
+    stub = initialized_kb / "raw/sources/binary-note.md"
+    original = initialized_kb / "raw/sources/binary-note.md.original"
+    assert first.exit_code == 0
+    assert original.read_bytes() == markdown.read_bytes()
+    assert split_document(stub)[1] == (
+        "Non-text original stored alongside this stub: "
+        "[binary-note.md.original](binary-note.md.original)\n"
+    )
+    document_paths = {
+        document.path.as_posix() for document in scan(initialized_kb).documents
+    }
+    assert "raw/sources/binary-note.md" in document_paths
+    assert "raw/sources/binary-note.md.original" not in document_paths
+    index = (initialized_kb / "raw/sources/index.md").read_text(encoding="utf-8")
+    assert "* [RAW-000003][Binary Note](binary-note.md)" in index
+    assert "binary-note.md.original" not in index
+
+    second = ingest_file(invoke_ingest, initialized_kb, markdown)
+    suffixed_stub = initialized_kb / "raw/sources/binary-note-raw-000004.md"
+    suffixed_original = (
+        initialized_kb / "raw/sources/binary-note-raw-000004.md.original"
+    )
+    assert second.exit_code == 0
+    assert suffixed_original.read_bytes() == markdown.read_bytes()
+    assert "[binary-note-raw-000004.md.original]" in split_document(suffixed_stub)[1]
 
 
 def test_binary_suffixed_collision_refuses_to_overwrite_partial_original(
@@ -644,18 +677,47 @@ def test_ac31_trailing_slash_dest_is_normalized(initialized_kb, tmp_path, invoke
     assert (initialized_kb / "raw/sources/api/doc.md").is_file()
 
 
-def test_ac32_absolute_and_parent_dest_are_rejected_without_writes(
-    initialized_kb, tmp_path, invoke_ingest
+def test_ac32_unsafe_or_escaping_dest_is_rejected_without_writes(
+    initialized_kb, tmp_path, invoke_ingest, monkeypatch
 ) -> None:
     source = tmp_path / "doc.md"
     source.write_text("doc", encoding="utf-8")
     before = snapshot(initialized_kb)
-    for value in ["/abs", "../escape"]:
+    invalid_values = [
+        "/abs",
+        "../escape",
+        r"nested\escape",
+        "C:/escape",
+        r"C:\escape",
+        "C:escape",
+        r"\\server\share",
+        "//server/share",
+    ]
+    for value in invalid_values:
         result = ingest_file(invoke_ingest, initialized_kb, source, "--dest", value)
         assert result.exit_code == 2
         assert "E_INGEST_DEST_INVALID" in result.stderr
         assert value in result.stderr
         assert snapshot(initialized_kb) == before
+
+    class_dir = initialized_kb / "raw/sources"
+    target_dir = class_dir / "linked"
+    outside = tmp_path / "outside"
+    real_resolve = Path.resolve
+
+    def escaping_resolve(path: Path, *args, **kwargs) -> Path:
+        if path == class_dir:
+            return class_dir
+        if path == target_dir:
+            return outside
+        return real_resolve(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "resolve", escaping_resolve)
+    result = ingest_file(invoke_ingest, initialized_kb, source, "--dest", "linked")
+    assert result.exit_code == 2
+    assert "E_INGEST_DEST_INVALID" in result.stderr
+    assert "linked" in result.stderr
+    assert snapshot(initialized_kb) == before
 
 
 def test_ac33_feedback_path_ref_stores_canonical_id(initialized_kb, invoke_ingest) -> None:
@@ -795,6 +857,54 @@ def test_ac44_write_phase_os_error_is_typed(initialized_kb, tmp_path, invoke_ing
     assert result.exit_code == 2
     assert "E_INGEST_IO" in result.stderr
     assert result.stderr.split(":", 1)[1].strip()
+
+
+@pytest.mark.parametrize(
+    ("source_name", "source_bytes", "occupied_name"),
+    [
+        ("late.txt", b"text", "late.md"),
+        ("late.pdf", b"\xffbinary", "late.pdf"),
+    ],
+)
+def test_append_only_file_creation_refuses_late_stub_and_original_occupants(
+    initialized_kb,
+    tmp_path,
+    invoke_ingest,
+    monkeypatch,
+    source_name,
+    source_bytes,
+    occupied_name,
+) -> None:
+    from kb.core import ingest as ingest_core
+    from kb.core.safeio import create_file_bytes as exclusive_create
+
+    source = tmp_path / source_name
+    source.write_bytes(source_bytes)
+    occupied_path = initialized_kb / "raw/sources" / occupied_name
+
+    def create_with_late_occupant(path: Path, content: bytes) -> None:
+        if path == occupied_path:
+            exclusive_create(path, b"late occupant")
+        exclusive_create(path, content)
+
+    monkeypatch.setattr(
+        ingest_core,
+        "create_file_bytes",
+        create_with_late_occupant,
+        raising=False,
+    )
+
+    result = ingest_file(invoke_ingest, initialized_kb, source)
+
+    assert result.exit_code == 2
+    assert "E_INGEST_IO" in result.stderr
+    assert occupied_path.read_bytes() == b"late occupant"
+    assert "late.md" not in (
+        initialized_kb / "raw/sources/index.md"
+    ).read_text(encoding="utf-8")
+    assert " | ingested | " not in (
+        initialized_kb / "log.md"
+    ).read_text(encoding="utf-8")
 
 
 def test_ac45_actor_is_written_to_log(initialized_kb, tmp_path, invoke_ingest) -> None:
