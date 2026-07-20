@@ -497,3 +497,57 @@ def test_ac23_whitespace_file_and_empty_stdin_are_findings(
     assert "E_INGEST_EMPTY" in file_result.stderr
     assert "E_INGEST_EMPTY" in stdin_result.stderr
     assert snapshot(initialized_kb) == before
+
+
+def test_ac24_binary_file_creates_byte_identical_original_and_exact_stub(
+    initialized_kb, tmp_path, invoke_ingest
+) -> None:
+    source = tmp_path / "Q3 Report.pdf"
+    source.write_bytes(b"%PDF-\xff\x00")
+    result = ingest_file(invoke_ingest, initialized_kb, source, "--title", "Q3 Report")
+    original = initialized_kb / "raw/sources/q3-report.pdf"
+    stub = initialized_kb / "raw/sources/q3-report.md"
+    frontmatter, body, _ = split_document(stub)
+    assert result.exit_code == 0
+    assert original.read_bytes() == source.read_bytes()
+    assert list(frontmatter) == ["id", "type", "ingested_at", "origin", "title"]
+    assert body == "Non-text original stored alongside this stub: [q3-report.pdf](q3-report.pdf)\n"
+    assert result.stdout.splitlines()[:2] == [
+        "created  raw/sources/q3-report.md",
+        "created  raw/sources/q3-report.pdf",
+    ]
+
+
+def test_ac25_binary_collision_suffixes_both_files(initialized_kb, tmp_path, invoke_ingest) -> None:
+    write_existing(initialized_kb, "raw/sources/q3-report.md", "id: RAW-000001\ntype: raw-source\n")
+    source = tmp_path / "Q3 Report.pdf"
+    source.write_bytes(b"\xffbinary")
+    result = ingest_file(invoke_ingest, initialized_kb, source, "--title", "Q3 Report")
+    assert result.exit_code == 0
+    assert (initialized_kb / "raw/sources/q3-report-raw-000002.pdf").read_bytes() == source.read_bytes()
+    assert split_document(initialized_kb / "raw/sources/q3-report-raw-000002.md")[1] == (
+        "Non-text original stored alongside this stub: "
+        "[q3-report-raw-000002.pdf](q3-report-raw-000002.pdf)\n"
+    )
+
+
+def test_ac26_index_lists_stub_but_not_binary(initialized_kb, tmp_path, invoke_ingest) -> None:
+    source = tmp_path / "Q3 Report.pdf"
+    source.write_bytes(b"\xffbinary")
+    assert ingest_file(invoke_ingest, initialized_kb, source, "--title", "Q3 Report").exit_code == 0
+    index = (initialized_kb / "raw/sources/index.md").read_text(encoding="utf-8")
+    assert "* [RAW-000001][Q3 Report](q3-report.md)" in index
+    assert "q3-report.pdf" not in index
+
+
+def test_ac27_binary_extension_is_lowercase_or_absent(initialized_kb, tmp_path, invoke_ingest) -> None:
+    photo = tmp_path / "Photo.JPG"
+    photo.write_bytes(b"\xffjpg")
+    assert ingest_file(invoke_ingest, initialized_kb, photo).exit_code == 0
+    assert (initialized_kb / "raw/sources/photo.jpg").is_file()
+    assert "[photo.jpg](photo.jpg)" in split_document(initialized_kb / "raw/sources/photo.md")[1]
+    dump = tmp_path / "dump"
+    dump.write_bytes(b"\xffdump")
+    assert ingest_file(invoke_ingest, initialized_kb, dump).exit_code == 0
+    assert (initialized_kb / "raw/sources/dump").is_file()
+    assert "[dump](dump)" in split_document(initialized_kb / "raw/sources/dump.md")[1]

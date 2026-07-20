@@ -161,16 +161,23 @@ def slug(value: str, fallback: str) -> str:
     return candidate or fallback.lower()
 
 
-def _normalized_text(payload: AdapterPayload, source_kind: str) -> str:
+def _normalized_input(
+    payload: AdapterPayload, source_kind: str
+) -> tuple[str | None, bytes | None]:
     try:
         decoded = payload.data.decode("utf-8")
     except UnicodeDecodeError as error:
+        if source_kind == "file":
+            return None, payload.data
         raise IngestFailure(
             "E_INGEST_NOT_TEXT", f"{source_kind} input is not UTF-8 text", 1
         ) from error
     if not decoded.strip():
         raise IngestFailure("E_INGEST_EMPTY", "input is empty or whitespace-only", 1)
-    return decoded.replace("\r\n", "\n").replace("\r", "\n").rstrip("\n") + "\n"
+    return (
+        decoded.replace("\r\n", "\n").replace("\r", "\n").rstrip("\n") + "\n",
+        None,
+    )
 
 
 def _surface(request: IngestRequest) -> None:
@@ -266,24 +273,36 @@ def ingest(request: IngestRequest) -> IngestResult:
         )
     _surface(request)
     payload = ADAPTERS[request.source_kind](request.source)
-    body = _normalized_text(payload, request.source_kind)
+    text_body, original_bytes = _normalized_input(payload, request.source_kind)
     about = _canonical_about(kb, request)
     doc_id = next_id(kb, config.id_prefixes[request.raw_class.value]).format()
     title = _derived_title(request, payload, doc_id)
-    stem_source = (
-        request.title
-        if request.title is not None
-        else (
-            Path(payload.source_filename).stem
-            if payload.source_filename is not None
-            else doc_id.lower()
-        )
+    stem_source = request.title if request.title is not None else (
+        Path(payload.source_filename).stem
+        if payload.source_filename is not None
+        else doc_id.lower()
     )
     stem = slug(stem_source, doc_id)
     target_dir = root / CLASS_DIR[request.raw_class]
-    path = target_dir / f"{stem}.md"
-    if path.exists():
-        path = target_dir / f"{stem}-{doc_id.lower()}.md"
+    extension = ""
+    if original_bytes is not None and payload.source_filename is not None:
+        extension = Path(payload.source_filename).suffix.lower()
+    document_path = target_dir / f"{stem}.md"
+    original_path = target_dir / f"{stem}{extension}" if original_bytes is not None else None
+    if document_path.exists() or (
+        original_path is not None and original_path.exists()
+    ):
+        stem = f"{stem}-{doc_id.lower()}"
+        document_path = target_dir / f"{stem}.md"
+        original_path = target_dir / f"{stem}{extension}" if original_bytes is not None else None
+    body = text_body
+    if original_path is not None:
+        body = (
+            f"Non-text original stored alongside this stub: "
+            f"[{original_path.name}]({original_path.name})\n"
+        )
+    assert body is not None
+    path = document_path
     timestamp = utc_now()
     frontmatter = RawFrontmatter(
         id=doc_id,
@@ -295,6 +314,8 @@ def ingest(request: IngestRequest) -> IngestResult:
     )
     relative = path.relative_to(root).as_posix()
     try:
+        if original_path is not None and original_bytes is not None:
+            original_path.write_bytes(original_bytes)
         path.write_text(_document(frontmatter, body), encoding="utf-8", newline="\n")
         index = target_dir / "index.md"
         index.write_text(
@@ -314,10 +335,15 @@ def ingest(request: IngestRequest) -> IngestResult:
         )
     except OSError as error:
         raise IngestFailure("E_INGEST_IO", str(error), 2) from error
+    created = [relative]
+    original_relative = None
+    if original_path is not None:
+        original_relative = original_path.relative_to(root).as_posix()
+        created.append(original_relative)
     return IngestResult(
         id=doc_id,
         path=relative,
-        original=None,
-        created=[relative],
+        original=original_relative,
+        created=sorted(created),
         updated=[index.relative_to(root).as_posix()],
     )
