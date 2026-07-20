@@ -20,7 +20,7 @@ kb ingest --class source|chat|feedback --from file|stdin|clipboard [SOURCE]
 | `SOURCE` | positional | file path | — | Path to the source file. **Required iff `--from file`; forbidden otherwise** |
 | `--class` | required option | `source\|chat\|feedback` | — | Raw subclass: sets `type` (`raw-source\|chat\|feedback`), the class directory (`raw/sources\|chats\|feedback/`), and the id prefix (`kb-config.json` `id_prefixes`, key `source\|chat\|feedback`) |
 | `--from` | required option | `file\|stdin\|clipboard` | — | Adapter to read the material with. Always explicit — never inferred from other arguments |
-| `--dest` | option | relative path | class directory | Subdirectory **relative to the class directory** (`--dest api` → `raw/sources/api/`). Created (with parents) if missing, each new directory with its `index.md`. Must not be absolute or contain `.`/`..` segments |
+| `--dest` | option | relative POSIX path | class directory | Subdirectory **relative to the class directory** (`--dest api` → `raw/sources/api/`). Created (with parents) if missing, each new directory with its `index.md`. Must use `/` separators; must not be absolute, contain a backslash or `.`/`..` segment, or use a Windows drive or UNC spelling. After existing components and symlinks are resolved, the target must remain beneath the resolved class directory |
 | `--about` | option | `REF` | — | Document the feedback concerns. **Required for `--class feedback`, forbidden otherwise.** Resolved per 00-shared §4; must resolve to a document carrying an id; the canonical id is stored |
 | `--title` | option | text | derived (§4 step 9) | Frontmatter `title`; also drives the target filename (slugified) |
 | `--origin` | option | text | adapter default (§4 step 4) | Provenance recorded in the `origin` frontmatter field. Free-form text — a filesystem path, a **URL** (e.g. the web page the material came from), or a label. Stored verbatim, never validated; overrides the adapter default |
@@ -70,7 +70,7 @@ The run is **pre-flight, then write**: steps 1–10 complete before the first by
 
 1. Resolve the KB root (00-shared §1: `--kb`, else upward discovery). No root → `E_NO_KB`, exit 2. Load `kb-config.json` (`E_CONFIG_INVALID` / `E_SCHEMA_UNSUPPORTED`, exit 2).
 2. Scan (00-shared §5). If `KB.malformed` is non-empty → `E_INGEST_MALFORMED`, exit 2, naming the malformed paths and directing to `kb validate` — the id-allocation guard of 00-shared §6.
-3. Validate the surface: `SOURCE` present iff `--from file`, `--about` present iff `--class feedback` (violations → `E_INGEST_USAGE`, exit 2); `--dest`, when given, must be a relative path containing no `.` or `..` segments (a trailing `/` is stripped) → else `E_INGEST_DEST_INVALID`, exit 2. The **target directory** is the class directory joined with `--dest`.
+3. Validate the surface: `SOURCE` present iff `--from file`, `--about` present iff `--class feedback` (violations → `E_INGEST_USAGE`, exit 2); `--dest`, when given, is interpreted as a POSIX path regardless of host platform. It must contain no backslash, must not be absolute or use a Windows drive or UNC spelling, and must contain no `.` or `..` segments (a trailing `/` is stripped) → else `E_INGEST_DEST_INVALID`, exit 2. Resolve the class directory and the joined target (including any existing symlink components); the resolved target must be equal to or beneath the resolved class directory, else the same error. The **target directory** is the class directory joined with the validated `--dest` parts. All of these checks are pre-flight and write nothing.
 4. Acquire the input as **bytes** through the adapter registry (§4.1):
    - `file` — read `SOURCE`; missing, unreadable, or not a regular file → `E_INGEST_SOURCE_NOT_FOUND`, exit 2. Default origin: the absolute resolved `SOURCE` path. Source filename: the `SOURCE` basename.
    - `stdin` — read to EOF. On a TTY this reads interactively until Ctrl-D (documented, not an error). Default origin: `stdin`. No source filename.
@@ -82,15 +82,15 @@ The run is **pre-flight, then write**: steps 1–10 complete before the first by
 9. Compute names:
    - **Slug base:** `--title` if given; else the source filename stem (basename minus its final extension; `file` only); else the lowercased id.
    - **slug():** NFKD-normalize, drop non-ASCII, lowercase, collapse every run of characters outside `[a-z0-9]` into a single `-`, trim leading/trailing `-`. An empty result falls back to the lowercased id.
-   - **Document filename:** `<slug>.md`. **Non-text original filename:** `<slug>.<ext>` with the original extension lowercased (bare `<slug>` if the original has none).
-   - **Collision:** if the document path — or, non-text, the original path — already exists in the target directory, append `-<lowercased id>` to **both** stems (`meeting-notes.md` → `meeting-notes-raw-000042.md`). The id is unique, so suffixed names never collide. Nothing existing is ever overwritten (raw is append-only, LS4).
+   - **Document filename:** `<slug>.md`. **Non-text original filename:** `<slug>.<ext>` with the original extension lowercased (bare `<slug>` if the original has none), except that a normalized `.md` extension uses `<slug>.md.original`. This keeps the citable stub at `<slug>.md` while ensuring the byte-identical original is not discovered as a Markdown document.
+   - **Collision:** if the document path — or, non-text, the original path — already exists in the target directory, append `-<lowercased id>` to **both** stems (`meeting-notes.md` → `meeting-notes-raw-000042.md`). For a non-text `.md` source the pair becomes `<slug>-<lowercased id>.md` and `<slug>-<lowercased id>.md.original`. The id is unique under a valid pre-flight scan; if either exclusive creation nevertheless finds a late occupant, ingestion fails with `E_INGEST_IO`. Nothing existing is ever overwritten or followed (raw is append-only, LS4).
    - **Title field (always written):** `--title` if given; else the source filename stem with `-`/`_` replaced by spaces, whitespace runs collapsed, no case change; else the id string.
 10. Construct and validate the `RawFrontmatter` (00-shared §7): `id`, `type` (`raw-source|chat|feedback`), `ingested_at` = invocation time as ISO-8601 UTC with seconds precision (`YYYY-MM-DDTHH:MM:SSZ`), `origin` (`--origin` else the adapter default), `title`, and `about` (feedback only). `origin` is free-form provenance text — a filesystem path, a URL (e.g. the web page material was saved from), or a label — stored verbatim and never validated; `--origin` overrides the adapter default (so a local copy of a web page is filed with its true URL provenance). It is emitted as a YAML plain scalar, quoted only when YAML requires it.
 
 **Write phase:**
 
 11. Create missing directories along the target path. Each newly created directory gets its `index.md` in the same operation (directory invariant, 00-shared) — born current per the §5.3 template, already listing its child.
-12. Write the files: non-text → the original, byte-for-byte; then the document — the frontmatter block in the pinned key order (`id`, `type`, `ingested_at`, `origin`, `title`, `about`), then `---`, then the body with **no inserted heading or blank line**: the normalized text (text case) or the pinned one-line stub (non-text case, §5.2).
+12. Create the files exclusively (create-new, never truncate or follow a final-component symlink): non-text → the original, byte-for-byte; then the document — the frontmatter block in the pinned key order (`id`, `type`, `ingested_at`, `origin`, `title`, `about`), then `---`, then the body with **no inserted heading or blank line**: the normalized text (text case) or the pinned one-line stub (non-text case, §5.2). A late occupant or broken final-component symlink therefore produces E12 rather than an overwrite.
 13. Regenerate `index.md` listing bodies (grammar: kb-init §5.2): the target directory's (unless it was just created — then it is already current) and, when step 11 created directories, the **nearest pre-existing ancestor's** (its `## Subdirectories` gains the new child). No other `index.md` is touched; global freshness is `kb index`'s job.
 14. Append the log entry (00-shared §8): action `ingested`, actor `--actor` (default `kb-cli`), ids = the new id, note = `<document relpath> from <origin>`. A missing `log.md` is first recreated with the kb-init §5.3 scaffold (frontmatter + header comment + heading, no `initialized` line) and then appended.
 15. Report per §6, exit 0.
@@ -169,6 +169,15 @@ Non-text original stored alongside this stub: [q3-report.pdf](q3-report.pdf)
 
 Only `.md` documents appear in `index.md` `## Files` listings — the original is reachable through the stub's link, never listed directly. On a name collision both stems take the `-<lowercased id>` suffix together, so the pair stays visibly paired.
 
+If the non-text source's normalized extension is itself `.md` (including an uppercase source extension such as `.MD`), the original uses the `.md.original` suffix so it stays distinct from the citable stub and outside Markdown scan/index discovery:
+
+```
+raw/sources/binary-note.md           # citable stub
+raw/sources/binary-note.md.original  # byte-identical original
+```
+
+The stub links `binary-note.md.original`. On collision, the shared stem is suffixed consistently: `binary-note-raw-000002.md` and `binary-note-raw-000002.md.original`.
+
 ### 5.3 New-directory `index.md` (pinned template)
 
 Every directory created by `--dest` gets this `index.md` in the same operation (directory invariant), born current — its listing already includes the child written by this run:
@@ -246,7 +255,7 @@ ingested RAW-000002 as raw/sources/q3/q3-report.md
 | E3 | Config `schema` newer than the CLI knows | `E_SCHEMA_UNSUPPORTED` | 2 |
 | E4 | `KB.malformed` non-empty | `E_INGEST_MALFORMED` naming the malformed paths, directing to `kb validate`; nothing written (id-allocation guard, 00-shared §6) | 2 |
 | E5 | `SOURCE` missing with `--from file`, or given with `--from stdin\|clipboard`; `--about` missing with `--class feedback`, or given with another class | `E_INGEST_USAGE` with a case-specific message | 2 |
-| E6 | `--dest` absolute, or containing `.`/`..` segments, or empty | `E_INGEST_DEST_INVALID` naming the offending value | 2 |
+| E6 | `--dest` empty; absolute; containing a backslash or `.`/`..` segment; using a Windows drive or UNC spelling; or resolving outside the class directory | `E_INGEST_DEST_INVALID` naming the offending value | 2 |
 | E7 | `SOURCE` missing, unreadable, or not a regular file | `E_INGEST_SOURCE_NOT_FOUND` | 2 |
 | E8 | No clipboard tool on `PATH`, or the tool exits non-zero | `E_INGEST_CLIPBOARD` | 2 |
 | E9 | stdin/clipboard bytes do not decode as UTF-8 | `E_INGEST_NOT_TEXT` (a non-text **file** instead takes the §5.2 stub path) | 1 |
@@ -294,12 +303,12 @@ One pytest test per item (00-shared §10), named `test_ac<NN>_<slug>`. Each is i
 | AC24 | Given a binary file `Q3 Report.pdf` (invalid UTF-8) and `--title "Q3 Report"`, when it is ingested, then `q3-report.pdf` is a byte-identical copy, `q3-report.md` matches §5.2 exactly (frontmatter + the pinned one-line stub body linking `q3-report.pdf`), and both appear as `created` in the output. |
 | AC25 | Given `q3-report.md` already exists in the target directory, when the AC24 ingest runs and receives id `RAW-000002`, then **both** new files are suffixed (`q3-report-raw-000002.md`, `q3-report-raw-000002.pdf`) and the stub links the suffixed original. |
 | AC26 | Given AC24's run, then the target directory's `index.md` `## Files` lists the stub `q3-report.md` and does **not** list `q3-report.pdf`. |
-| AC27 | Given case (a) a binary file `Photo.JPG`, then the original is copied as `photo.jpg` (extension lowercased) with stub `photo.md` linking `photo.jpg`; case (b) an extensionless binary file `dump`, then the original is copied as `dump` (bare slug) with stub `dump.md` linking `dump`. |
+| AC27 | Given case (a) a binary file `Photo.JPG`, then the original is copied as `photo.jpg` (extension lowercased) with stub `photo.md` linking `photo.jpg`; case (b) an extensionless binary file `dump`, then the original is copied as `dump` (bare slug) with stub `dump.md` linking `dump`; case (c) a non-text file `Binary Note.MD`, then the citable stub is `binary-note.md`, the byte-identical original is `binary-note.md.original`, the stub links that original, and only the stub is discovered and listed as Markdown; a collision suffixes the shared stem consistently. |
 | AC28 | Given `--dest api` where `raw/sources/api/` does not exist, then the directory is created with an `index.md` byte-matching §5.3 (description `Documents under raw/sources/api/.`, title `api`, listing the new document), `raw/sources/index.md` is regenerated with `* [api](api/index.md) - Documents under raw/sources/api/.` under `## Subdirectories`, and the root and `raw/` indexes are untouched. |
 | AC29 | Given `--dest a/b` where neither directory exists, then both are created with born-current §5.3 indexes (`a`'s listing `b` under `## Subdirectories`, `b`'s listing the document under `## Files`), and only the nearest pre-existing ancestor's index (`raw/sources/index.md`) is regenerated. |
 | AC30 | Given `--dest api` where `raw/sources/api/` already exists with its index, then only `raw/sources/api/index.md` is regenerated (`updated`); `raw/sources/index.md` is untouched. |
 | AC31 | Given `--dest api/` (trailing slash), then behavior is identical to `--dest api`: the document lands in `raw/sources/api/` and exit is 0. |
-| AC32 | Given `--dest /abs` (case a) and `--dest ../escape` (case b), then exit 2 with `E_INGEST_DEST_INVALID` naming the value, nothing written. |
+| AC32 | Given `--dest /abs`, `--dest ../escape`, a value containing `\\`, a Windows drive spelling (`C:/escape` or `C:\\escape`), a UNC spelling, or a path whose existing components resolve outside the class directory, then exit 2 with `E_INGEST_DEST_INVALID` naming the value and nothing written; the result is platform-independent. |
 | AC33 | Given `--class feedback --about synthetic/specs/webhook.md` where that document carries id `KB-000007`, then the stored frontmatter is `about: KB-000007` (canonical id, not the path). |
 | AC34 | Given `--class feedback --about KB-999999` (no such id), then exit 1 with `E_INGEST_ABOUT_UNRESOLVED` and nothing written. |
 | AC35 | Given `--class feedback --about index.md` (resolves to a document without an id), then exit 1 with `E_INGEST_ABOUT_UNRESOLVED` and nothing written. |
@@ -311,7 +320,7 @@ One pytest test per item (00-shared §10), named `test_ac<NN>_<slug>`. Each is i
 | AC41 | Given a KB whose `kb-config.json` contains invalid JSON, when an ingest runs, then exit 2 with `E_CONFIG_INVALID` and nothing written. |
 | AC42 | Given a KB whose `kb-config.json` has `schema` newer than the CLI knows (e.g. `999`), when an ingest runs, then exit 2 with `E_SCHEMA_UNSUPPORTED` and nothing written. |
 | AC43 | Given a failing pre-flight run (AC34's setup), then afterwards every file in the KB is byte-identical to before — no document, no index change, no log line (pre-flight atomicity). |
-| AC44 | Given a target class directory made unwritable so that pre-flight passes but the write phase fails, when an ingest runs, then exit 2 with `E_INGEST_IO` and the OS message (E12; partial state permitted, not rolled back; skipif on platforms without POSIX permissions). |
+| AC44 | Given case (a) a target class directory made unwritable so that pre-flight passes but the write phase fails, or case (b) a late occupant or broken final-component symlink appears at a planned original/stub path, when ingest writes, then exit 2 with `E_INGEST_IO` and the OS message; no occupant is overwritten or followed (E12; other partial state is permitted, not rolled back; the permission case may skip on platforms without POSIX permissions). |
 | AC45 | Given `--actor pm-skill`, then the log line's actor column is `pm-skill`. |
 | AC46 | Given a KB whose `log.md` was deleted, when an ingest runs, then `log.md` exists afterwards with the kb-init §5.3 scaffold (frontmatter `type: log`, header comment, heading), no `initialized` line, and exactly one `ingested` line. |
 | AC47 | Given `--json` on a successful non-text `--dest` run (AC24+AC28 setup), then stdout parses as JSON with exactly the fields `ok` (true), `id`, `path`, `original` (string), `created`/`updated` (alphabetically sorted arrays of relative paths, excluding `log.md`), and nothing else on stdout; a text ingest yields `original: null`. |
