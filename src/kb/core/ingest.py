@@ -7,7 +7,7 @@ import subprocess
 import sys
 import unicodedata
 from collections.abc import Callable
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Literal
 
 import yaml
@@ -15,7 +15,7 @@ from pydantic import BaseModel, Field
 
 from kb.core.housekeeping import LogEntry, append_log, utc_now
 from kb.core.ids import next_id
-from kb.core.indexing import regenerate_directory_index
+from kb.core.indexing import create_directory_index, regenerate_directory_index
 from kb.core.model import ConfigLoadError, RawClass, RawFrontmatter, load_config
 from kb.core.scan import KB, RootDiscoveryError, discover_root, resolve_ref, scan
 
@@ -197,10 +197,31 @@ def _surface(request: IngestRequest) -> None:
         raise IngestFailure(
             "E_INGEST_USAGE", "--about is forbidden unless --class feedback", 2
         )
-    if request.dest is not None:
-        raise IngestFailure(
-            "E_INGEST_DEST_INVALID", f"invalid --dest: {request.dest}", 2
-        )
+
+
+def _destination_parts(value: str | None) -> tuple[str, ...]:
+    if value is None:
+        return ()
+    stripped = value.rstrip("/")
+    candidate = PurePosixPath(stripped)
+    if (
+        not stripped
+        or candidate.is_absolute()
+        or not candidate.parts
+        or any(part in {".", ".."} for part in stripped.split("/"))
+    ):
+        raise IngestFailure("E_INGEST_DEST_INVALID", f"invalid --dest: {value}", 2)
+    return candidate.parts
+
+
+def _new_directories(class_dir: Path, target_dir: Path) -> list[Path]:
+    missing: list[Path] = []
+    current = class_dir
+    for part in target_dir.relative_to(class_dir).parts:
+        current /= part
+        if not current.exists():
+            missing.append(current)
+    return missing
 
 
 def _canonical_about(kb: KB, request: IngestRequest) -> str | None:
@@ -272,6 +293,10 @@ def ingest(request: IngestRequest) -> IngestResult:
             2,
         )
     _surface(request)
+    destination_parts = _destination_parts(request.dest)
+    class_dir = root / CLASS_DIR[request.raw_class]
+    target_dir = class_dir.joinpath(*destination_parts)
+    new_directories = _new_directories(class_dir, target_dir)
     payload = ADAPTERS[request.source_kind](request.source)
     text_body, original_bytes = _normalized_input(payload, request.source_kind)
     about = _canonical_about(kb, request)
@@ -283,7 +308,6 @@ def ingest(request: IngestRequest) -> IngestResult:
         else doc_id.lower()
     )
     stem = slug(stem_source, doc_id)
-    target_dir = root / CLASS_DIR[request.raw_class]
     extension = ""
     if original_bytes is not None and payload.source_filename is not None:
         extension = Path(payload.source_filename).suffix.lower()
@@ -321,16 +345,31 @@ def ingest(request: IngestRequest) -> IngestResult:
         about=about,
     )
     relative = path.relative_to(root).as_posix()
+    created = [relative]
+    original_relative = None
+    updated: list[str] = []
     try:
+        if new_directories:
+            target_dir.mkdir(parents=True)
         if original_path is not None and original_bytes is not None:
             original_path.write_bytes(original_bytes)
+            original_relative = original_path.relative_to(root).as_posix()
+            created.append(original_relative)
         path.write_text(_document(frontmatter, body), encoding="utf-8", newline="\n")
-        index = target_dir / "index.md"
-        index.write_text(
-            regenerate_directory_index(root, target_dir),
+        for directory in reversed(new_directories):
+            index_path = directory / "index.md"
+            index_path.write_text(
+                create_directory_index(root, directory), encoding="utf-8", newline="\n"
+            )
+            created.append(index_path.relative_to(root).as_posix())
+        refresh_directory = new_directories[0].parent if new_directories else target_dir
+        refresh_index = refresh_directory / "index.md"
+        refresh_index.write_text(
+            regenerate_directory_index(root, refresh_directory),
             encoding="utf-8",
             newline="\n",
         )
+        updated.append(refresh_index.relative_to(root).as_posix())
         append_log(
             root,
             LogEntry(
@@ -343,15 +382,10 @@ def ingest(request: IngestRequest) -> IngestResult:
         )
     except OSError as error:
         raise IngestFailure("E_INGEST_IO", str(error), 2) from error
-    created = [relative]
-    original_relative = None
-    if original_path is not None:
-        original_relative = original_path.relative_to(root).as_posix()
-        created.append(original_relative)
     return IngestResult(
         id=doc_id,
         path=relative,
         original=original_relative,
         created=sorted(created),
-        updated=[index.relative_to(root).as_posix()],
+        updated=sorted(updated),
     )
