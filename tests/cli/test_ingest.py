@@ -507,8 +507,8 @@ def test_ac24_binary_file_creates_byte_identical_original_and_exact_stub(
     result = ingest_file(invoke_ingest, initialized_kb, source, "--title", "Q3 Report")
     original = initialized_kb / "raw/sources/q3-report.pdf"
     stub = initialized_kb / "raw/sources/q3-report.md"
-    frontmatter, body, _ = split_document(stub)
     assert result.exit_code == 0
+    frontmatter, body, _ = split_document(stub)
     assert original.read_bytes() == source.read_bytes()
     assert list(frontmatter) == ["id", "type", "ingested_at", "origin", "title"]
     assert body == "Non-text original stored alongside this stub: [q3-report.pdf](q3-report.pdf)\n"
@@ -551,3 +551,25 @@ def test_ac27_binary_extension_is_lowercase_or_absent(initialized_kb, tmp_path, 
     assert ingest_file(invoke_ingest, initialized_kb, dump).exit_code == 0
     assert (initialized_kb / "raw/sources/dump").is_file()
     assert "[dump](dump)" in split_document(initialized_kb / "raw/sources/dump.md")[1]
+
+
+def test_binary_suffixed_collision_refuses_to_overwrite_partial_original(
+    initialized_kb, tmp_path, invoke_ingest
+) -> None:
+    write_existing(
+        initialized_kb,
+        "raw/sources/q3-report.md",
+        "id: RAW-000001\ntype: raw-source\n",
+    )
+    partial_original = initialized_kb / "raw/sources/q3-report-raw-000002.pdf"
+    partial_original.write_bytes(b"partial original")
+    source = tmp_path / "Q3 Report.pdf"
+    source.write_bytes(b"\xffnew original")
+    before = snapshot(initialized_kb)
+
+    result = ingest_file(invoke_ingest, initialized_kb, source, "--title", "Q3 Report")
+
+    assert result.exit_code == 2
+    assert "E_INGEST_IO" in result.stderr
+    assert partial_original.read_bytes() == b"partial original"
+    assert snapshot(initialized_kb) == before

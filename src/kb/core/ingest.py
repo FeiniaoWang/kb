@@ -295,6 +295,14 @@ def ingest(request: IngestRequest) -> IngestResult:
         stem = f"{stem}-{doc_id.lower()}"
         document_path = target_dir / f"{stem}.md"
         original_path = target_dir / f"{stem}{extension}" if original_bytes is not None else None
+        if document_path.exists() or (
+            original_path is not None and original_path.exists()
+        ):
+            raise IngestFailure(
+                "E_INGEST_IO",
+                "refusing to overwrite existing raw path",
+                2,
+            )
     body = text_body
     if original_path is not None:
         body = (
