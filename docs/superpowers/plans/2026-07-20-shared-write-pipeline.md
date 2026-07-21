@@ -2279,7 +2279,7 @@ review was approved.
 - Modify: `src/kb/core/indexing.py`
 - Modify focused safe-I/O, pipeline, and indexing tests.
 
-- [ ] **Step 1: Replace recursive rooted scan traversal**
+- [x] **Step 1: Replace recursive rooted scan traversal**
 
 Add a descriptor-created tree deeper than Python's recursion limit and prove
 the operation never leaks `RecursionError`. Implement iterative traversal with
@@ -2287,20 +2287,20 @@ bounded live descriptors, descriptor-relative descent/ascent, identity
 verification, deterministic lexical order, and no root-to-descendant quadratic
 reopening.
 
-- [ ] **Step 2: Acquire projected child metadata by prefix**
+- [x] **Step 2: Acquire projected child metadata by prefix**
 
 Use `read_frontmatter_prefix()` for existing Markdown child metadata in both
 the rooted pipeline and ordinary convenience acquisition paths. Preserve full
 subdirectory `index.md` reads where the body heading is required, and pin the
 behavior with a multi-megabyte-body regression.
 
-- [ ] **Step 3: Verify born directories immediately before logging**
+- [x] **Step 3: Verify born directories immediately before logging**
 
 Move final born-directory verification after all other non-log writes and
 immediately before log creation/append. Pin that a verification failure leaves
 log bytes unchanged and that no fallible pipeline operation follows logging.
 
-- [ ] **Step 4: Verify and commit code/tests separately from documentation**
+- [x] **Step 4: Verify and commit code/tests separately from documentation**
 
 Run focused safe-I/O/index/pipeline tests, create and ingest plus architecture
 tests, explicit AC collection, deep-tree resource regressions, the full suite,
@@ -2328,7 +2328,7 @@ and `git diff --check`.
 - [x] Create AC01–AC52 and ingest AC01–AC50 pass unchanged.
 - [x] Architecture tests prevent command-owned persistence from returning.
 - [x] Full repository tests and `git diff --check` pass through Task 10.
-- [ ] Task 11 iterative traversal, prefix-only projected child acquisition,
+- [x] Task 11 iterative traversal, prefix-only projected child acquisition,
       and pre-log final verification are complete.
 - [ ] Revalidate the downstream CLI/core input-seam plan after this branch is
       integrated. Its source paths exist, but its separate prepared models
