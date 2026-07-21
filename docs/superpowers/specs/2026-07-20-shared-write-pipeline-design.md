@@ -212,6 +212,7 @@ Every path in an intent is a normalized KB-root-relative POSIX path. Before any 
 - a path is absolute, empty, contains `.` or `..`, uses backslashes, or escapes the resolved KB root;
 - birth, companion, or mutation paths overlap;
 - companion paths are not siblings of the citable document;
+- a companion path ends in `.md` and would enter the Markdown scan/index surface;
 - mutation keys or paths are duplicated;
 - the citable document is not Markdown;
 - a destination component is a symlink or junction; or
@@ -270,6 +271,15 @@ The module defines neutral exceptions rather than command failures:
 
 ```python
 WritePhase = Literal["preflight", "write"]
+WriteOperation = Literal[
+    "inspect",
+    "read",
+    "render",
+    "mkdir",
+    "create",
+    "overwrite",
+    "append",
+]
 WriteRole = Literal[
     "directory",
     "companion",
@@ -286,6 +296,7 @@ class AllocationBlocked(Exception):
 
 class WriteFailure(Exception):
     phase: WritePhase
+    operation: WriteOperation
     role: WriteRole
     path: Path
     cause: OSError
@@ -296,7 +307,8 @@ Command modules retain all stable codes, messages, and exit codes:
 
 - shared root/config errors map exactly as they do today;
 - `AllocationBlocked` maps to the command's malformed-allocation error;
-- create preflight failure for mutation key `superseded` maps to the existing `E_CREATE_SUPERSEDES_INVALID`, exit `1` message;
+- create preflight `operation="inspect"` failure for mutation key `superseded` maps to the existing `E_CREATE_SUPERSEDES_INVALID`, exit `1` message;
+- create preflight `operation="read"` failure for that mutation remains `E_CREATE_IO`, exit `2`;
 - other create pipeline failures map to `E_CREATE_IO`, exit `2`;
 - ingest pipeline failures map to `E_INGEST_IO`, exit `2`; and
 - semantic lossless-transformation errors remain command-owned and pre-write.
