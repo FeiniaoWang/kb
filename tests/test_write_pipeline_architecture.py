@@ -57,14 +57,13 @@ def wildcard_imports(text: str) -> set[str]:
     }
 
 
-def _simple_callable_bindings(tree: ast.Module) -> dict[str, str]:
-    bindings = {
-        alias.asname: alias.name
-        for node in ast.walk(tree)
-        if isinstance(node, ast.ImportFrom)
-        for alias in node.names
-        if alias.asname is not None
-    }
+def _simple_callable_bindings(tree: ast.Module) -> dict[str, set[str]]:
+    bindings: dict[str, set[str]] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom):
+            for alias in node.names:
+                if alias.asname is not None:
+                    bindings.setdefault(alias.asname, set()).add(alias.name)
     for node in ast.walk(tree):
         targets: list[ast.expr]
         value: ast.expr | None
@@ -84,16 +83,25 @@ def _simple_callable_bindings(tree: ast.Module) -> dict[str, str]:
             continue
         for target in targets:
             if isinstance(target, ast.Name):
-                bindings[target.id] = referenced_name
+                bindings.setdefault(target.id, set()).add(referenced_name)
     return bindings
 
 
-def _resolved_name(name: str, bindings: dict[str, str]) -> str:
+def _reachable_names(name: str, bindings: dict[str, set[str]]) -> set[str]:
+    reachable: set[str] = set()
     seen: set[str] = set()
-    while name in bindings and name not in seen:
-        seen.add(name)
-        name = bindings[name]
-    return name
+    pending = [name]
+    while pending:
+        current = pending.pop()
+        if current in seen:
+            continue
+        seen.add(current)
+        targets = bindings.get(current)
+        if targets:
+            pending.extend(targets)
+        else:
+            reachable.add(current)
+    return reachable
 
 
 def directly_called_names(text: str) -> set[str]:
@@ -104,7 +112,7 @@ def directly_called_names(text: str) -> set[str]:
         if not isinstance(node, ast.Call):
             continue
         if isinstance(node.func, ast.Name):
-            names.add(_resolved_name(node.func.id, bindings))
+            names.update(_reachable_names(node.func.id, bindings))
         elif isinstance(node.func, ast.Attribute):
             names.add(node.func.attr)
     return names
@@ -184,6 +192,47 @@ import kb.core.safeio as safeio
 
 birth = safeio.create_rooted_file_bytes
 wrapped_birth = birth
+wrapped_birth(root, path, content, identity)
+"""
+
+    assert "create_rooted_file_bytes" in directly_called_names(text)
+
+
+def test_ast_names_preserve_forbidden_edges_after_later_reassignment() -> None:
+    text = """
+import kb.core.safeio as safeio
+
+birth = safeio.create_rooted_file_bytes
+birth(root, path, content, identity)
+birth = domain.harmless
+"""
+
+    assert "create_rooted_file_bytes" in directly_called_names(text)
+
+
+def test_ast_names_preserve_forbidden_edges_across_scope_reuse() -> None:
+    text = """
+import kb.core.safeio as safeio
+
+def persist():
+    birth = safeio.create_rooted_file_bytes
+    birth(root, path, content, identity)
+
+def benign():
+    birth = domain.harmless
+    birth()
+"""
+
+    assert "create_rooted_file_bytes" in directly_called_names(text)
+
+
+def test_ast_names_terminate_on_alias_cycles_and_keep_forbidden_edges() -> None:
+    text = """
+import kb.core.safeio as safeio
+
+birth = safeio.create_rooted_file_bytes
+wrapped_birth = birth
+birth = wrapped_birth
 wrapped_birth(root, path, content, identity)
 """
 
