@@ -47,12 +47,24 @@ identity-checked bytes are acquired later only for mutation sources that need
 lossless transformation. `Document.body` remains lazy, and no live descriptor
 crosses `load_write_context()`, `prepare_write()`, or `apply_write()`.
 
-Every created directory returns a captured `FileIdentity`. `apply_write()`
-keeps those identities, not descriptors, as local state and requires the
-expected immediate-parent identity for every subsequent child-directory,
-born-index, companion, and document birth. It verifies every born directory
-identity again before success. A replacement directory receives no pipeline
-bytes; failure is typed and prior completed effects remain without rollback.
+Every created directory is first made under a high-entropy private staging
+name beneath the verified parent. The implementation opens and holds that
+directory, captures its `FileIdentity`, atomically publishes it to the final
+name with a kernel no-replace primitive, and verifies that the published entry
+matches the held identity before returning it. Darwin uses
+`renameatx_np(..., RENAME_EXCL)` and Linux uses
+`renameat2(..., RENAME_NOREPLACE)`; ordinary rename is never an acceptable
+fallback because it may overwrite an empty late occupant. Unsupported
+platforms fail safely. Failed publication preserves the final occupant and
+identity-checks any private staging cleanup.
+
+`apply_write()` keeps returned identities, not descriptors, as local state and
+requires the expected immediate-parent identity for every subsequent
+child-directory, born-index, companion, and document birth. It verifies every
+born directory identity again before success. A replacement directory
+receives no pipeline bytes; failure is typed and prior completed effects remain
+without rollback. Parent and staging descriptors close within the one rooted
+directory-birth operation on every path.
 
 ## Global Constraints
 
@@ -66,9 +78,11 @@ bytes; failure is typed and prior completed effects remain without rollback.
   frontmatter prefix; allocation contexts retain no document body or complete
   Markdown source bytes, while full rooted mutation-source acquisition remains
   deferred to preparation.
-- Every born directory identity is captured at `mkdir`, required for all later
+- Every born directory identity is captured from an opened private staging
+  directory before atomic exclusive publication, required for all later
   child/index/companion/document births below it, and verified before success;
-  no descriptor survives an individual rooted operation.
+  no descriptor survives an individual rooted operation and no ordinary rename
+  fallback may overwrite a late occupant.
 - Every existing mutation target, existing affected index, and existing `log.md` is inspected before the write boundary and updated using the captured `FileIdentity`.
 - The fixed application order is: missing directories and born indexes root-to-leaf; companions in declared order; citable document; mutations in declared order; nearest pre-existing affected index; log last.
 - Binary ingest represents the byte-identical original as a companion, so the original is created before the Markdown stub.

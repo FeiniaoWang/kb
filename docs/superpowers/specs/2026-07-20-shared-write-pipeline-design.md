@@ -104,19 +104,30 @@ typed metadata between stages.
 
 ### Born-directory identity binding
 
-`create_rooted_directory()` returns the identity of the directory it created
-while its verified immediate-parent descriptor is still held. During
-`apply_write()`, every born directory identity is retained as immutable local
-state and is required as the expected immediate-parent identity for its own
-`index.md`, the next child directory, and every companion or citable document
-born beneath it. A replacement installed at the pathname after `mkdir` is
-therefore never eligible to receive a later pipeline write. Every born
-directory is identity-verified again before success is returned.
+`create_rooted_directory()` creates a high-entropy private staging directory
+under the verified immediate parent, opens and holds that staging directory,
+and captures its identity before publication. It then publishes the held
+directory to the final name with a kernel atomic no-replace primitive
+(`renameatx_np(..., RENAME_EXCL)` on Darwin or
+`renameat2(..., RENAME_NOREPLACE)` on Linux), verifies that the final entry is
+the held identity, and only then returns it. Ordinary rename is forbidden
+because it may overwrite an empty late occupant. A platform without a reliable
+descriptor-relative atomic no-replace publication primitive fails safely; a
+failed publication preserves the late occupant and removes only a staging
+entry whose identity still matches the held directory.
 
-Only identities cross individual rooted operations. Parent and child
+During `apply_write()`, every returned born directory identity is retained as
+immutable local state and is required as the expected immediate-parent
+identity for its own `index.md`, the next child directory, and every companion
+or citable document born beneath it. A replacement installed before, during,
+or after publication is therefore never trusted for a later pipeline write.
+Every born directory is identity-verified again before success is returned.
+
+Only identities cross individual rooted operations. Parent and staging
 descriptors remain operation-local and are closed before the next pipeline
-effect, including on failure. A born-directory identity mismatch is a typed
-write-phase `WriteFailure`; prior effects remain as documented because the
+effect, including on success, publication failure, verification failure, and
+cleanup failure. A born-directory identity mismatch is a typed write-phase
+`WriteFailure`; prior published effects remain as documented because the
 pipeline does not roll back.
 
 ## Goal
