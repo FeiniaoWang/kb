@@ -16,7 +16,7 @@ Requirements → Design → Implementation → Testing → Deploy → Maintenanc
 
 ### Goal
 
-The goal is to discover, analyze, and define what and why (the problem, the user needs, and the features required).
+The goal is to discover, analyze, and define what for who and why.
 
 ### Output
 
@@ -48,8 +48,8 @@ A C4 Context Diagram provides a high-level, 10,000-foot view of how a software s
 
 #### Product Manager/Business Analyst
 
-* Leads the draft of the `PRD`.
-* Creates the `C4 Context Diagram` with AI tools.
+* Leads the draft of the PRD.
+* Creates the C4 Context Diagram with the `C4 Modeling` skill.
 * Use the `Grill Me` skill to rigorously stress-test the problem statement and ensure that the team is solving the right problem.
 * Use the `Storyteller` skill to brainstorm and generate comprehensive user stories and edge cases.
 
@@ -94,6 +94,17 @@ This isn’t the future. Teams are doing it now. They are shipping faster, catch
 
 Infrastructure-as-Code (IaC) is augmented by AI models that write, maintain, and validate deployment scripts based on real-time system metrics.
 
-## Maintenance
+## Monitoring & Maintenance
+
+### Production Monitoring Becomes Proactive, Not Reactive
+AI agents continuously evaluate logs, metrics, and error patterns. They identify issues before users do.
+Examples include:
+
+memory leaks building up slowly
+API latency spikes
+suspicious traffic patterns
+recurring warnings that predict a crash
+Support teams finally work ahead of incidents instead of after them.
+
 
 Log summarization and bug-localization tools turn raw server errors into readable narratives, allowing for rapid root-cause analysis.
