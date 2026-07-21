@@ -257,7 +257,7 @@ def create(request: CreateRequest) -> CreateResult:
     root = context.root
     config = context.config
     kb = context.kb
-    target_dir, _ = _target_directory(root, request.dest)
+    target_dir, missing_directories = _target_directory(root, request.dest)
     tags = _stable_unique(request.tags)
     warnings = _warnings(config, request, tags)
     body = _body(request)
@@ -269,11 +269,16 @@ def create(request: CreateRequest) -> CreateResult:
     doc_id = next_id(kb, config.id_prefixes["synthetic"]).format()
     stem = slug(request.title, doc_id)
     path = target_dir / f"{stem}.md"
+    implicit_index_path = target_dir / "index.md" if missing_directories else None
     superseded_path = (
         root / superseded_document.path if superseded_document is not None else None
     )
     suffix = f"-{doc_id.lower()}"
-    while path.exists() or path == superseded_path:
+    while (
+        path.exists()
+        or path == superseded_path
+        or path == implicit_index_path
+    ):
         stem += suffix
         path = target_dir / f"{stem}.md"
     timestamp = utc_now()

@@ -3,17 +3,9 @@ from pathlib import Path
 
 
 COMMAND_MODULES = ("src/kb/core/create.py", "src/kb/core/ingest.py")
-PERSISTENCE_PRIMITIVES = {
+HOUSEKEEPING_INDEXING_PERSISTENCE = {
     "append_log",
-    "append_rooted_bytes",
     "create_directory_index",
-    "create_file_bytes",
-    "create_rooted_directory",
-    "create_rooted_file_bytes",
-    "inspect_mutable_file",
-    "inspect_rooted_file",
-    "overwrite_mutable_bytes",
-    "overwrite_rooted_bytes",
     "regenerate_directory_index",
 }
 RETIRED_ORCHESTRATION_HELPERS = {"_new_directories", "_new_index_contents"}
@@ -55,6 +47,38 @@ def wildcard_imports(text: str) -> set[str]:
         and node.module is not None
         and any(alias.name == "*" for alias in node.names)
     }
+
+
+def safeio_import_dependencies(text: str) -> set[str]:
+    dependencies: set[str] = set()
+    for node in ast.walk(parsed(text)):
+        if isinstance(node, ast.ImportFrom):
+            module = node.module or ""
+            absolute_safeio = node.level == 0 and (
+                module == "kb.core.safeio"
+                or module.startswith("kb.core.safeio.")
+                or (
+                    module == "kb.core"
+                    and any(alias.name == "safeio" for alias in node.names)
+                )
+            )
+            relative_safeio = node.level == 1 and (
+                module == "safeio"
+                or module.startswith("safeio.")
+                or (
+                    not module
+                    and any(alias.name == "safeio" for alias in node.names)
+                )
+            )
+            if absolute_safeio or relative_safeio:
+                dependencies.add("kb.core.safeio")
+        elif isinstance(node, ast.Import) and any(
+            alias.name == "kb.core.safeio"
+            or alias.name.startswith("kb.core.safeio.")
+            for alias in node.names
+        ):
+            dependencies.add("kb.core.safeio")
+    return dependencies
 
 
 def _simple_callable_bindings(tree: ast.Module) -> dict[str, set[str]]:
@@ -186,6 +210,27 @@ wrapped_birth(root, path, content, identity)
     assert "create_rooted_file_bytes" in directly_called_names(text)
 
 
+def test_ast_gate_detects_aliased_direct_safeio_read_dependency() -> None:
+    text = "from kb.core.safeio import read_rooted_bytes as read\n"
+
+    assert safeio_import_dependencies(text) == {"kb.core.safeio"}
+
+
+def test_ast_gate_detects_aliased_safeio_module_dependency() -> None:
+    text = "import kb.core.safeio as safeio\n"
+
+    assert safeio_import_dependencies(text) == {"kb.core.safeio"}
+
+
+def test_ast_gate_detects_wildcard_and_parent_module_safeio_dependencies() -> None:
+    assert safeio_import_dependencies("from kb.core.safeio import *\n") == {
+        "kb.core.safeio"
+    }
+    assert safeio_import_dependencies("from kb.core import safeio as storage\n") == {
+        "kb.core.safeio"
+    }
+
+
 def test_ast_names_follow_module_attribute_callable_rebinding() -> None:
     text = """
 import kb.core.safeio as safeio
@@ -258,9 +303,10 @@ def test_ingest_consumes_shared_write_pipeline() -> None:
 
 
 def test_create_and_ingest_do_not_own_persistence_primitives() -> None:
-    forbidden_names = PERSISTENCE_PRIMITIVES | RETIRED_ORCHESTRATION_HELPERS
+    forbidden_names = HOUSEKEEPING_INDEXING_PERSISTENCE | RETIRED_ORCHESTRATION_HELPERS
     for path in COMMAND_MODULES:
         text = source(path)
+        assert not safeio_import_dependencies(text)
         assert not wildcard_imports(text)
         assert not (imported_names(text) & forbidden_names)
         assert not (directly_called_names(text) & forbidden_names)

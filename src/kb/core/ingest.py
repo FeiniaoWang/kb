@@ -343,13 +343,18 @@ def ingest(request: IngestRequest) -> IngestResult:
     if original_bytes is not None and payload.source_filename is not None:
         extension = Path(payload.source_filename).suffix.lower()
     document_path = target_dir / f"{stem}.md"
+    implicit_index_path = (
+        target_dir / "index.md" if not target_dir.exists() else None
+    )
     original_path = (
         _non_text_original_path(target_dir, stem, extension)
         if original_bytes is not None
         else None
     )
-    if document_path.exists() or (
-        original_path is not None and original_path.exists()
+    if (
+        document_path.exists()
+        or document_path == implicit_index_path
+        or (original_path is not None and original_path.exists())
     ):
         stem = f"{stem}-{doc_id.lower()}"
         document_path = target_dir / f"{stem}.md"
