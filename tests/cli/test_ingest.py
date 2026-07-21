@@ -875,23 +875,28 @@ def test_append_only_file_creation_refuses_late_stub_and_original_occupants(
     source_bytes,
     occupied_name,
 ) -> None:
-    from kb.core import ingest as ingest_core
-    from kb.core.safeio import create_file_bytes as exclusive_create
+    from kb.core import write_pipeline
 
     source = tmp_path / source_name
     source.write_bytes(source_bytes)
     occupied_path = initialized_kb / "raw/sources" / occupied_name
 
-    def create_with_late_occupant(path: Path, content: bytes) -> None:
-        if path == occupied_path:
-            exclusive_create(path, b"late occupant")
-        exclusive_create(path, content)
+    real_create = write_pipeline.create_rooted_file_bytes
+
+    def create_with_late_occupant(
+        root: Path,
+        relative: Path,
+        content: bytes,
+        root_identity,
+    ) -> None:
+        if root / relative == occupied_path:
+            real_create(root, relative, b"late occupant", root_identity)
+        real_create(root, relative, content, root_identity)
 
     monkeypatch.setattr(
-        ingest_core,
-        "create_file_bytes",
+        write_pipeline,
+        "create_rooted_file_bytes",
         create_with_late_occupant,
-        raising=False,
     )
 
     result = ingest_file(invoke_ingest, initialized_kb, source)
@@ -902,6 +907,49 @@ def test_append_only_file_creation_refuses_late_stub_and_original_occupants(
     assert "late.md" not in (
         initialized_kb / "raw/sources/index.md"
     ).read_text(encoding="utf-8")
+    assert " | ingested | " not in (
+        initialized_kb / "log.md"
+    ).read_text(encoding="utf-8")
+
+
+def test_ingest_stale_index_identity_is_typed_and_preserves_late_occupant(
+    initialized_kb,
+    tmp_path,
+    invoke_ingest,
+    monkeypatch,
+) -> None:
+    from kb.core import write_pipeline
+
+    source = tmp_path / "doc.md"
+    source.write_text("doc", encoding="utf-8")
+    index = initialized_kb / "raw/sources/index.md"
+    late = b"late replacement index\n"
+    real_overwrite = write_pipeline.overwrite_rooted_bytes
+
+    def replace_before_overwrite(
+        root: Path,
+        relative: Path,
+        content: bytes,
+        root_identity,
+        expected,
+    ) -> None:
+        if relative == Path("raw/sources/index.md"):
+            index.rename(index.with_name("old-index.md"))
+            index.write_bytes(late)
+        real_overwrite(root, relative, content, root_identity, expected)
+
+    monkeypatch.setattr(
+        write_pipeline,
+        "overwrite_rooted_bytes",
+        replace_before_overwrite,
+    )
+
+    result = ingest_file(invoke_ingest, initialized_kb, source)
+
+    assert result.exit_code == 2
+    assert "E_INGEST_IO" in result.stderr
+    assert index.read_bytes() == late
+    assert (initialized_kb / "raw/sources/doc.md").is_file()
     assert " | ingested | " not in (
         initialized_kb / "log.md"
     ).read_text(encoding="utf-8")
