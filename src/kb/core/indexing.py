@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from pathlib import Path
 
 from kb.core.frontmatter import yaml_scalar
@@ -24,13 +25,17 @@ def _frontmatter_closing(lines: list[str]) -> int:
     )
 
 
-def _heading(path: Path) -> str:
-    lines = path.read_text(encoding="utf-8").splitlines()
+def _heading_from_text(text: str, fallback: str) -> str:
+    lines = text.splitlines()
     closing = _frontmatter_closing(lines)
     for line in lines[closing + 1 :]:
         if line.startswith("# "):
             return line[2:]
-    return path.parent.name
+    return fallback
+
+
+def _heading(path: Path) -> str:
+    return _heading_from_text(path.read_text(encoding="utf-8"), path.parent.name)
 
 
 def _description(frontmatter: dict[str, object]) -> str | None:
@@ -62,20 +67,24 @@ def subdirectory_listing_line(
     return line if not description else f"{line} - {description}"
 
 
-def render_directory_listing(root: Path, directory: Path) -> str:
-    subdirectories: list[str] = []
-    files: list[str] = []
+def render_directory_listing(
+    root: Path,
+    directory: Path,
+    *,
+    planned_files: Mapping[str, str] | None = None,
+    planned_subdirectories: Mapping[str, str] | None = None,
+) -> str:
+    subdirectories = dict(planned_subdirectories or {})
+    files = dict(planned_files or {})
     for child in sorted(path for path in directory.iterdir() if path.is_dir()):
         index = child / "index.md"
         if not index.is_file():
             continue
         frontmatter = read_frontmatter(index).root
-        subdirectories.append(
-            subdirectory_listing_line(
-                child.name,
-                _description(frontmatter),
-                title=_heading(index),
-            )
+        subdirectories[child.name] = subdirectory_listing_line(
+            child.name,
+            _description(frontmatter),
+            title=_heading(index),
         )
     for child in sorted(directory.glob("*.md")):
         if child.name in {"index.md", "log.md"}:
@@ -85,19 +94,20 @@ def render_directory_listing(root: Path, directory: Path) -> str:
             continue
         doc_id = frontmatter.get("id")
         title = frontmatter.get("title") or child.stem
-        files.append(
-            file_listing_line(
-                child.name,
-                str(doc_id) if doc_id is not None else None,
-                str(title),
-                _description(frontmatter),
-            )
+        files[child.name] = file_listing_line(
+            child.name,
+            str(doc_id) if doc_id is not None else None,
+            str(title),
+            _description(frontmatter),
         )
     sections: list[str] = []
     if subdirectories:
-        sections.append("## Subdirectories\n" + "\n".join(subdirectories))
+        sections.append(
+            "## Subdirectories\n"
+            + "\n".join(subdirectories[name] for name in sorted(subdirectories))
+        )
     if files:
-        sections.append("## Files\n" + "\n".join(files))
+        sections.append("## Files\n" + "\n".join(files[name] for name in sorted(files)))
     return "\n\n".join(sections)
 
 
@@ -110,16 +120,32 @@ def create_directory_index(root: Path, directory: Path) -> str:
     )
 
 
-def regenerate_directory_index(root: Path, directory: Path) -> str:
+def regenerate_directory_index(
+    root: Path,
+    directory: Path,
+    *,
+    source: bytes | None = None,
+    planned_files: Mapping[str, str] | None = None,
+    planned_subdirectories: Mapping[str, str] | None = None,
+) -> str:
     path = directory / "index.md"
-    text = path.read_text(encoding="utf-8")
+    text = (
+        path.read_text(encoding="utf-8")
+        if source is None
+        else source.decode("utf-8", errors="strict")
+    )
     lines = text.splitlines(keepends=True)
     closing = _frontmatter_closing(lines)
     frontmatter_block = "".join(lines[: closing + 1])
     if not frontmatter_block.endswith("\n"):
         frontmatter_block += "\n"
-    body = f"# {_heading(path)}\n\n{INDEX_COMMENT}\n"
-    listing = render_directory_listing(root, directory)
+    body = f"# {_heading_from_text(text, path.parent.name)}\n\n{INDEX_COMMENT}\n"
+    listing = render_directory_listing(
+        root,
+        directory,
+        planned_files=planned_files,
+        planned_subdirectories=planned_subdirectories,
+    )
     return (
         frontmatter_block + body
         if not listing

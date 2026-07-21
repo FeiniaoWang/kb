@@ -65,3 +65,46 @@ def test_regeneration_keeps_subdirectory_heading_and_directory_link_distinct(
     regenerated = regenerate_directory_index(tmp_path, tmp_path)
 
     assert "* [Governance](governance/index.md)" in regenerated
+
+
+def test_regeneration_uses_identity_checked_source_and_merges_planned_file(
+    tmp_path,
+) -> None:
+    init_kb(tmp_path)
+    directory = tmp_path / "synthetic"
+    index = directory / "index.md"
+    source = index.read_bytes()
+    index.write_text("not the prepared source\n", encoding="utf-8")
+
+    rendered = regenerate_directory_index(
+        tmp_path,
+        directory,
+        source=source,
+        planned_files={
+            "planned.md": "* [KB-000001][Planned](planned.md) - Planned."
+        },
+    )
+
+    assert rendered.startswith("---\ntype: index\n")
+    assert "not the prepared source" not in rendered
+    assert "* [KB-000001][Planned](planned.md) - Planned." in rendered
+
+
+def test_projected_entries_merge_by_path_key_not_rendered_label(tmp_path) -> None:
+    init_kb(tmp_path)
+    directory = tmp_path / "synthetic"
+    (directory / "zulu.md").write_text(
+        "---\nid: KB-000009\ntype: spec\ntitle: A First Label\n"
+        "description: Existing.\n---\n",
+        encoding="utf-8",
+    )
+
+    rendered = regenerate_directory_index(
+        tmp_path,
+        directory,
+        planned_files={
+            "alpha.md": "* [KB-000010][Z Last Label](alpha.md) - Planned."
+        },
+    )
+
+    assert rendered.index("(alpha.md)") < rendered.index("(zulu.md)")
