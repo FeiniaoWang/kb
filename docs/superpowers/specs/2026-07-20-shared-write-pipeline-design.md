@@ -201,7 +201,9 @@ config acquisition plus lazy Markdown frontmatter-prefix scans. It does not
 move external file, stdin, clipboard, or create-body acquisition; that work
 remains in the separately approved CLI/core input-seam plan. It does not
 define `kb revise`, introduce rollback, add a transaction abstraction, or
-change any PRD or command behavior.
+change the PRD. Command behavior changes only through the explicit
+command-contract reconciliation above; all other command behavior remains
+unchanged.
 
 ## Design Vocabulary and Dependency Classification
 
