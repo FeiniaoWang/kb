@@ -8,6 +8,32 @@
 
 **Tech Stack:** Python >=3.14, Pydantic 2.x, PyYAML, pytest, `uv`; no new runtime or development dependencies.
 
+## Human-Approved Containment Amendment
+
+This amendment supersedes the path-based safe-I/O code snippets in this plan.
+All persistence operations are rooted at the KB selected during preparation.
+Capture the root directory identity without keeping descriptors in
+`PreparedWrite`; for every operation, reopen and verify that root, traverse
+relative directory components using descriptor-relative no-follow opens, and
+keep the verified parent descriptor open through the final `mkdir`, exclusive
+create, inspect, read, identity-checked overwrite, or append. Refuse the
+operation with `OSError` before mutation on platforms lacking the necessary
+stdlib `dir_fd`/no-follow support. Close every descriptor on every path so an
+abandoned preparation cannot leak handles.
+
+Before returning from preparation, reject any explicit birth, companion, or
+mutation path that collides with an implicit born index, the affected existing
+index, or root `log.md`. A document born as a would-be `index.md` is one such
+prewrite `ValueError`.
+
+After consumption, late path/link/environment failures are `WriteFailure`s
+with the fixed operation and role for the attempted effect. In particular,
+companion and document failures are `phase="write"`, `operation="create"`, with
+their exact role and normalized root-relative path; directory, index, mutation,
+and log failures remain attributed to `mkdir`, `create`, `overwrite`, and
+`append` respectively. The application order and partial-write/no-rollback
+contract are unchanged.
+
 ## Global Constraints
 
 - The root source of truth is `docs/prd.md`; command behavior remains governed by `docs/specs/commands/00-shared.md`, `docs/specs/commands/kb-create.md`, and `docs/specs/commands/kb-ingest.md` in that precedence order.

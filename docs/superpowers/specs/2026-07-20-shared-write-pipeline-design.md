@@ -4,6 +4,35 @@
 
 **Status:** Approved
 
+## Human-Approved Containment Amendment
+
+This amendment supersedes every path-based safe-I/O snippet below where the
+snippet conflicts with containment. Filesystem persistence is anchored to the
+KB root selected during preparation: the implementation captures that root's
+identity without retaining an open descriptor, reopens and verifies the root
+for each later operation, traverses every relative directory component with
+no-follow directory descriptors, and holds the verified parent descriptor
+through the final `mkdir`, create, inspect, read, overwrite, or append syscall.
+Final components are also no-follow. A platform that cannot provide the
+required stdlib descriptor-relative and no-follow operations fails safely with
+an `OSError` before mutation instead of falling back to an unanchored path.
+All descriptors close on success and failure; abandoned preparations retain no
+live filesystem handles.
+
+Preparation rejects collisions between explicit birth, companion, or mutation
+paths and implicit pipeline paths: every born `index.md`, the affected existing
+`index.md`, and root `log.md`. These knowable conflicts are programmer misuse
+reported as `ValueError` before any write, including a document birth at a
+would-be born `index.md`.
+
+After a preparation is consumed, environmental or late-link failures at a
+companion or document path are neutral write failures, not raw path-validation
+errors: `phase="write"`, `operation="create"`, the exact role (`companion` or
+`document`), and the normalized root-relative path. Directory, index, mutation,
+and log failures retain their respective `mkdir`/`create`/`overwrite`/`append`
+operation and role attribution. The fixed partial-write order and no-rollback
+contract remain unchanged.
+
 ## Goal
 
 Extract the duplicated create/ingest filesystem commit orchestration into one deep core module while preserving every observable `kb create` and `kb ingest` contract. The extraction also strengthens ingest's mutable index and log handling to match create's identity-checked safety without adding rollback or changing documented partial-write semantics.
