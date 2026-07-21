@@ -1072,6 +1072,34 @@ def test_ac47_actor_option_is_recorded_in_log(
     ).read_text(encoding="utf-8").splitlines()[-1]
 
 
+@pytest.mark.parametrize("json_output", [False, True], ids=["text", "json"])
+def test_unencodable_actor_is_stable_create_io_without_any_mutation(
+    json_output,
+    initialized_kb,
+    invoke_create,
+) -> None:
+    add_chat(initialized_kb)
+    before = snapshot(initialized_kb)
+    arguments = ["--actor", "kb-author-\udcff"]
+    if json_output:
+        arguments.append("--json")
+
+    result = invoke_valid(invoke_create, initialized_kb, *arguments)
+
+    assert result.exit_code == 2
+    assert isinstance(result.exception, SystemExit)
+    if json_output:
+        error = json.loads(result.stdout)["error"]
+        assert error["code"] == "E_CREATE_IO"
+        assert "UTF-8" in error["message"]
+        assert result.stderr == ""
+    else:
+        assert "E_CREATE_IO" in result.stderr
+        assert "UTF-8" in result.stderr
+        assert result.stdout == ""
+    assert snapshot(initialized_kb) == before
+
+
 def test_ac48_missing_log_is_recreated_without_initialized_entry(
     initialized_kb, invoke_create
 ) -> None:

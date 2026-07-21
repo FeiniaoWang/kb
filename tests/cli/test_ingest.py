@@ -1059,6 +1059,124 @@ def test_destination_preflight_preserves_context_and_surface_validation_order(
     assert snapshot(initialized_kb) == before
 
 
+@pytest.mark.parametrize(
+    "destination",
+    ["linked.md", "linked.md/child"],
+    ids=["final-component", "intermediate-component"],
+)
+@pytest.mark.parametrize("json_output", [False, True], ids=["text", "json"])
+def test_md_named_destination_link_found_by_context_is_exact_destination_error(
+    destination,
+    json_output,
+    initialized_kb,
+    tmp_path,
+    invoke_ingest,
+    monkeypatch,
+) -> None:
+    import kb.core.ingest as ingest_core
+
+    source = tmp_path / "context-destination-source.md"
+    source.write_text("source\n", encoding="utf-8")
+    external = tmp_path / "destination-target"
+    external.mkdir()
+    sentinel = external / "sentinel.bin"
+    sentinel.write_bytes(b"target bytes")
+    linked = initialized_kb / "raw/sources/linked.md"
+    try:
+        linked.symlink_to(external, target_is_directory=True)
+    except (NotImplementedError, OSError) as error:
+        pytest.skip(f"symlinks unsupported: {error}")
+    link_text = os.readlink(linked)
+    before = snapshot(initialized_kb)
+    source_before = source.read_bytes()
+    acquired: list[str | None] = []
+
+    def forbidden_adapter(value: str | None):
+        acquired.append(value)
+        raise AssertionError("context destination failure must precede acquisition")
+
+    monkeypatch.setitem(ingest_core.ADAPTERS, "file", forbidden_adapter)
+    arguments = ["--dest", destination]
+    if json_output:
+        arguments.append("--json")
+
+    result = ingest_file(
+        invoke_ingest,
+        initialized_kb,
+        source,
+        *arguments,
+    )
+
+    assert result.exit_code == 2
+    assert isinstance(result.exception, SystemExit)
+    if json_output:
+        error = json.loads(result.stdout)["error"]
+        assert error["code"] == "E_INGEST_DEST_INVALID"
+        assert destination in error["message"]
+        assert result.stderr == ""
+    else:
+        assert "E_INGEST_DEST_INVALID" in result.stderr
+        assert destination in result.stderr
+        assert result.stdout == ""
+    assert acquired == []
+    assert snapshot(initialized_kb) == before
+    assert linked.is_symlink() and os.readlink(linked) == link_text
+    assert sentinel.read_bytes() == b"target bytes"
+    assert source.read_bytes() == source_before
+
+
+@pytest.mark.parametrize(
+    ("arguments", "absent_code"),
+    [
+        (["--dest", "../escape"], "E_INGEST_DEST_INVALID"),
+        (
+            ["--class", "feedback", "--from", "file"],
+            "E_INGEST_USAGE",
+        ),
+    ],
+    ids=["invalid-destination-syntax", "surface-error"],
+)
+def test_unrelated_md_link_context_failure_stays_generic_and_keeps_precedence(
+    arguments,
+    absent_code,
+    initialized_kb,
+    tmp_path,
+    invoke_ingest,
+    monkeypatch,
+) -> None:
+    import kb.core.ingest as ingest_core
+
+    source = tmp_path / "unrelated-context-source.md"
+    source.write_text("source\n", encoding="utf-8")
+    external = tmp_path / "unrelated-target"
+    external.mkdir()
+    linked = initialized_kb / "synthetic/unrelated.md"
+    try:
+        linked.symlink_to(external, target_is_directory=True)
+    except (NotImplementedError, OSError) as error:
+        pytest.skip(f"symlinks unsupported: {error}")
+    before = snapshot(initialized_kb)
+    acquired: list[str | None] = []
+
+    def forbidden_adapter(value: str | None):
+        acquired.append(value)
+        raise AssertionError("context failure must precede acquisition")
+
+    monkeypatch.setitem(ingest_core.ADAPTERS, "file", forbidden_adapter)
+    command = [*arguments]
+    if "--class" not in command:
+        command = ["--class", "source", "--from", "file", *command]
+    command.insert(command.index("--from") + 2, str(source))
+
+    result = invoke_ingest(initialized_kb, *command)
+
+    assert result.exit_code == 2
+    assert "E_INGEST_IO" in result.stderr
+    assert absent_code not in result.stderr
+    assert acquired == []
+    assert snapshot(initialized_kb) == before
+
+
 @pytest.mark.parametrize("json_output", [False, True], ids=["text", "json"])
 def test_destination_metadata_error_is_exact_before_adapter(
     json_output, initialized_kb, tmp_path, invoke_ingest, monkeypatch
@@ -1472,6 +1590,57 @@ def test_ac45_actor_is_written_to_log(initialized_kb, tmp_path, invoke_ingest) -
     assert " | ingested | pm-skill | RAW-000001 | " in (
         initialized_kb / "log.md"
     ).read_text(encoding="utf-8").splitlines()[-1]
+
+
+@pytest.mark.parametrize("json_output", [False, True], ids=["text", "json"])
+def test_surrogate_escaped_source_origin_is_stable_ingest_io_without_mutation(
+    json_output,
+    initialized_kb,
+    tmp_path,
+    invoke_ingest,
+    monkeypatch,
+) -> None:
+    import kb.core.ingest as ingest_core
+
+    source = tmp_path / "adapter-source.md"
+    source.write_bytes(b"evidence\n")
+    source_before = source.read_bytes()
+    before = snapshot(initialized_kb)
+    escaped_name = "evidence-\udcff.md"
+    escaped_origin = f"/external/{escaped_name}"
+
+    def surrogate_payload(_value: str | None) -> ingest_core.AdapterPayload:
+        return ingest_core.AdapterPayload(
+            data=source_before,
+            default_origin=escaped_origin,
+            source_filename=escaped_name,
+        )
+
+    monkeypatch.setitem(ingest_core.ADAPTERS, "file", surrogate_payload)
+    arguments = ["--title", "Evidence"]
+    if json_output:
+        arguments.append("--json")
+
+    result = ingest_file(
+        invoke_ingest,
+        initialized_kb,
+        source,
+        *arguments,
+    )
+
+    assert result.exit_code == 2
+    assert isinstance(result.exception, SystemExit)
+    if json_output:
+        error = json.loads(result.stdout)["error"]
+        assert error["code"] == "E_INGEST_IO"
+        assert "UTF-8" in error["message"]
+        assert result.stderr == ""
+    else:
+        assert "E_INGEST_IO" in result.stderr
+        assert "UTF-8" in result.stderr
+        assert result.stdout == ""
+    assert snapshot(initialized_kb) == before
+    assert source.read_bytes() == source_before
 
 
 def test_ac46_missing_log_is_recreated_without_initialized_entry(

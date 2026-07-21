@@ -201,6 +201,16 @@ def _surface(request: IngestRequest) -> None:
         )
 
 
+def _invalid_destination(
+    value: str | None,
+    error: OSError | RuntimeError | None = None,
+) -> IngestFailure:
+    message = f"invalid --dest: {value}"
+    if error is not None:
+        message += f": {error}"
+    return IngestFailure("E_INGEST_DEST_INVALID", message, 2)
+
+
 def _destination_parts(value: str | None) -> tuple[str, ...]:
     if value is None:
         return ()
@@ -214,8 +224,24 @@ def _destination_parts(value: str | None) -> tuple[str, ...]:
         or not candidate.parts
         or any(part in {".", ".."} for part in stripped.split("/"))
     ):
-        raise IngestFailure("E_INGEST_DEST_INVALID", f"invalid --dest: {value}", 2)
+        raise _invalid_destination(value)
     return candidate.parts
+
+
+def _unsafe_path_is_destination_component(
+    error: WriteFailure,
+    request: IngestRequest,
+) -> bool:
+    try:
+        destination_parts = _destination_parts(request.dest)
+    except IngestFailure:
+        return False
+    current = Path()
+    for part in (*CLASS_DIR[request.raw_class].parts, *destination_parts):
+        current /= part
+        if current == error.path:
+            return True
+    return False
 
 
 def _target_directory(
@@ -245,11 +271,7 @@ def _target_directory(
             if not stat.S_ISDIR(metadata.st_mode):
                 raise OSError("destination component is not a directory")
     except (OSError, RuntimeError) as error:
-        raise IngestFailure(
-            "E_INGEST_DEST_INVALID",
-            f"invalid --dest: {destination_value}: {error}",
-            2,
-        ) from error
+        raise _invalid_destination(destination_value, error) from error
     return class_dir, target_dir
 
 
@@ -321,6 +343,8 @@ def ingest(request: IngestRequest) -> IngestResult:
     except ConfigLoadError as error:
         raise _failure_from_config(error) from error
     except WriteFailure as error:
+        if _unsafe_path_is_destination_component(error, request):
+            raise _invalid_destination(request.dest, error.cause) from error
         raise IngestFailure("E_INGEST_IO", str(error.cause), 2) from error
     except AllocationBlocked as error:
         paths = ", ".join(path.as_posix() for path in error.paths)

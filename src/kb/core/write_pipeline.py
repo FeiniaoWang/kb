@@ -41,6 +41,8 @@ from kb.core.scan import (
     scan_snapshot,
 )
 
+_EMPTY_LOG_CONTENT = empty_log_content().encode("utf-8")
+
 WritePhase = Literal["preflight", "write"]
 WriteOperation = Literal[
     "inspect",
@@ -110,6 +112,7 @@ class PreparedWrite(BaseModel):
     _refresh_identity: FileIdentity = PrivateAttr()
     _refresh_content: bytes = PrivateAttr()
     _log_identity: FileIdentity | None = PrivateAttr(default=None)
+    _log_row: bytes = PrivateAttr()
     _created: list[str] = PrivateAttr(default_factory=list)
     _updated: list[str] = PrivateAttr(default_factory=list)
     _consumed: bool = PrivateAttr(default=False)
@@ -631,6 +634,30 @@ def prepare_write(context: WriteContext, intent: WriteIntent) -> PreparedWrite:
             cause,
         ) from error
 
+    try:
+        formatted_log_row = format_log_entry(intent.log_entry)
+    except (TypeError, ValueError) as error:
+        cause = OSError(errno.EINVAL, "log row could not be formatted")
+        raise WriteFailure(
+            "preflight",
+            "render",
+            "log",
+            Path("log.md"),
+            cause,
+        ) from error
+
+    try:
+        log_row = f"{formatted_log_row}\n".encode("utf-8")
+    except UnicodeEncodeError as error:
+        cause = OSError(errno.EILSEQ, "log row is not valid UTF-8")
+        raise WriteFailure(
+            "preflight",
+            "render",
+            "log",
+            Path("log.md"),
+            cause,
+        ) from error
+
     prepared = PreparedWrite(sources=sources)
     prepared._root = root
     prepared._root_identity = root_identity
@@ -644,6 +671,7 @@ def prepare_write(context: WriteContext, intent: WriteIntent) -> PreparedWrite:
     prepared._refresh_identity = index_snapshot.identity
     prepared._refresh_content = refresh_content
     prepared._log_identity = log_identity
+    prepared._log_row = log_row
     prepared._created = sorted(
         [
             birth_relative.as_posix(),
@@ -807,12 +835,11 @@ def apply_write(
                 error,
             ) from error
         try:
-            row = f"{format_log_entry(intent.log_entry)}\n".encode("utf-8")
             if prepared._log_identity is None:
                 create_rooted_file_bytes(
                     root,
                     Path("log.md"),
-                    empty_log_content().encode("utf-8") + row,
+                    _EMPTY_LOG_CONTENT + prepared._log_row,
                     root_identity,
                 )
             else:
@@ -826,7 +853,7 @@ def apply_write(
                 append_rooted_bytes(
                     root,
                     Path("log.md"),
-                    separator + row,
+                    separator + prepared._log_row,
                     root_identity,
                     prepared._log_identity,
                 )

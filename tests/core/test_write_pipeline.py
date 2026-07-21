@@ -599,6 +599,103 @@ def test_prepare_rejects_mutation_at_implicit_pipeline_path_before_writes(
     assert {path: path.read_bytes() for path in root.rglob("*") if path.is_file()} == before
 
 
+def test_prepare_owns_exact_log_bytes_and_apply_does_not_render_again(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    import kb.core.write_pipeline as pipeline
+
+    root = initialized(tmp_path)
+    log = root / "log.md"
+    before = {path: path.read_bytes() for path in root.rglob("*") if path.is_file()}
+    expected = (
+        b"- 2026-07-20T12:00:00Z | created | test | KB-000001 | "
+        b"synthetic/planned.md\n"
+    )
+
+    prepared = prepare_write(
+        load_write_context(root),
+        WriteIntent(
+            birth=DocumentBirth(
+                path=Path("synthetic/planned.md"),
+                content=document_bytes(),
+            ),
+            log_entry=log_entry(),
+        ),
+    )
+
+    assert prepared._log_row == expected
+    assert {path: path.read_bytes() for path in root.rglob("*") if path.is_file()} == before
+
+    def forbidden_render(_entry: LogEntry) -> str:
+        raise AssertionError("apply_write must consume prepared log bytes")
+
+    monkeypatch.setattr(pipeline, "format_log_entry", forbidden_render)
+    apply_write(prepared)
+
+    assert log.read_bytes() == before[log] + expected
+
+
+def test_prepare_wraps_unencodable_log_row_as_typed_preflight_failure(
+    tmp_path,
+) -> None:
+    root = initialized(tmp_path)
+    before = {path: path.read_bytes() for path in root.rglob("*") if path.is_file()}
+    entry = log_entry()
+    entry.actor = "actor-\udcff"
+
+    with pytest.raises(WriteFailure) as raised:
+        prepare_write(
+            load_write_context(root),
+            WriteIntent(
+                birth=DocumentBirth(
+                    path=Path("synthetic/planned.md"),
+                    content=document_bytes(),
+                ),
+                log_entry=entry,
+            ),
+        )
+
+    assert raised.value.phase == "preflight"
+    assert raised.value.operation == "render"
+    assert raised.value.role == "log"
+    assert raised.value.path == Path("log.md")
+    assert type(raised.value.cause) is OSError
+    assert raised.value.cause.errno == errno.EILSEQ
+    assert "UTF-8" in str(raised.value.cause)
+    assert {path: path.read_bytes() for path in root.rglob("*") if path.is_file()} == before
+
+
+def test_prepare_wraps_log_formatting_failure_as_typed_preflight_failure(
+    tmp_path,
+) -> None:
+    root = initialized(tmp_path)
+    before = {path: path.read_bytes() for path in root.rglob("*") if path.is_file()}
+    entry = log_entry()
+    entry.doc_ids = [None]  # type: ignore[list-item]
+
+    with pytest.raises(WriteFailure) as raised:
+        prepare_write(
+            load_write_context(root),
+            WriteIntent(
+                birth=DocumentBirth(
+                    path=Path("synthetic/planned.md"),
+                    content=document_bytes(),
+                ),
+                log_entry=entry,
+            ),
+        )
+
+    assert raised.value.phase == "preflight"
+    assert raised.value.operation == "render"
+    assert raised.value.role == "log"
+    assert raised.value.path == Path("log.md")
+    assert type(raised.value.cause) is OSError
+    assert raised.value.cause.errno == errno.EINVAL
+    assert "formatted" in str(raised.value.cause)
+    assert {path: path.read_bytes() for path in root.rglob("*") if path.is_file()} == before
+
+
 def test_apply_creates_nested_indexes_document_updates_ancestor_and_logs(
     tmp_path,
 ) -> None:
