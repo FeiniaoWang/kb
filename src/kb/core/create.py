@@ -16,7 +16,7 @@ from kb.core.indexing import (
     render_index,
     subdirectory_listing_line,
 )
-from kb.core.ingest import slug
+from kb.core.naming import slug
 from kb.core.model import (
     Config,
     ConfigLoadError,

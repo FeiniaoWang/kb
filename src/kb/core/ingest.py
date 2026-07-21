@@ -5,7 +5,6 @@ import re
 import shutil
 import subprocess
 import sys
-import unicodedata
 from collections.abc import Callable
 from pathlib import Path, PurePosixPath
 from typing import Literal
@@ -17,6 +16,7 @@ from kb.core.housekeeping import LogEntry, append_log, utc_now
 from kb.core.ids import next_id
 from kb.core.indexing import create_directory_index, regenerate_directory_index
 from kb.core.model import ConfigLoadError, RawClass, RawFrontmatter, load_config
+from kb.core.naming import slug
 from kb.core.safeio import create_file_bytes
 from kb.core.scan import KB, RootDiscoveryError, discover_root, resolve_ref, scan
 
@@ -152,14 +152,6 @@ ADAPTERS: dict[str, Adapter] = {
     "stdin": _stdin_adapter,
     "clipboard": _clipboard_adapter,
 }
-
-
-def slug(value: str, fallback: str) -> str:
-    ascii_value = unicodedata.normalize("NFKD", value).encode(
-        "ascii", "ignore"
-    ).decode()
-    candidate = re.sub(r"[^a-z0-9]+", "-", ascii_value.lower()).strip("-")
-    return candidate or fallback.lower()
 
 
 def _normalized_input(
