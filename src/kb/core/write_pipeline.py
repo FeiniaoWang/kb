@@ -8,7 +8,7 @@ from typing import Literal
 import yaml
 from pydantic import BaseModel, Field, PrivateAttr
 
-from kb.core.housekeeping import LogEntry, append_log
+from kb.core.housekeeping import LogEntry, empty_log_content, format_log_entry
 from kb.core.indexing import (
     file_listing_line,
     regenerate_directory_index,
@@ -18,10 +18,14 @@ from kb.core.indexing import (
 from kb.core.model import Config, load_config
 from kb.core.safeio import (
     FileIdentity,
-    create_file_bytes,
-    inspect_mutable_file,
-    overwrite_mutable_bytes,
-    read_mutable_bytes,
+    append_rooted_bytes,
+    create_rooted_directory,
+    create_rooted_file_bytes,
+    inspect_root,
+    inspect_rooted_directory,
+    inspect_rooted_file,
+    overwrite_rooted_bytes,
+    read_rooted_bytes,
 )
 from kb.core.scan import KB, discover_root, scan
 
@@ -82,8 +86,11 @@ class MutationSource(BaseModel):
 class PreparedWrite(BaseModel):
     sources: dict[str, MutationSource]
     _root: Path = PrivateAttr()
+    _root_identity: FileIdentity = PrivateAttr()
     _intent: WriteIntent = PrivateAttr()
     _mutation_identities: dict[str, FileIdentity] = PrivateAttr(default_factory=dict)
+    _birth_relative: Path = PrivateAttr()
+    _companion_relatives: list[Path] = PrivateAttr(default_factory=list)
     _new_directories: list[Path] = PrivateAttr(default_factory=list)
     _new_indexes: dict[Path, bytes] = PrivateAttr(default_factory=dict)
     _refresh_index: Path = PrivateAttr()
@@ -189,42 +196,60 @@ def _document_listing(content: bytes, filename: str) -> str:
     return file_listing_line(filename, doc_id, title, description)
 
 
-def _missing_directories(root: Path, target_dir: Path) -> list[Path]:
+def _missing_directories(
+    root: Path,
+    target_dir: Path,
+    root_identity: FileIdentity,
+) -> list[Path]:
     missing: list[Path] = []
-    current = root
-    for part in target_dir.relative_to(root).parts:
+    current = Path()
+    found_missing = False
+    for part in target_dir.parts:
         current /= part
-        if _is_link_or_junction(current):
-            raise ValueError(
-                f"write destination contains a symlink or junction: "
-                f"{current.relative_to(root).as_posix()}"
+        if found_missing:
+            missing.append(current)
+            continue
+        try:
+            identity = inspect_rooted_directory(
+                root,
+                current,
+                root_identity,
+                allow_missing=True,
             )
-        if current.exists() and not current.is_dir():
-            raise ValueError(
-                f"write destination component is not a directory: "
-                f"{current.relative_to(root).as_posix()}"
-            )
-        if not current.exists():
+        except OSError as error:
+            if error.errno in {errno.ELOOP, errno.ENOTDIR}:
+                raise ValueError(
+                    f"write destination component is not a directory: "
+                    f"{current.as_posix()}"
+                ) from error
+            raise WriteFailure(
+                "preflight",
+                "inspect",
+                "directory",
+                current,
+                error,
+            ) from error
+        if identity is None:
+            found_missing = True
             missing.append(current)
     return missing
 
 
 def _render_born_indexes(
-    root: Path,
     missing: list[Path],
     birth_relative: Path,
     document_listing: str,
 ) -> dict[Path, bytes]:
-    if missing and birth_relative.parent != missing[-1].relative_to(root):
+    if missing and birth_relative.parent != missing[-1]:
         raise ValueError("planned document parent does not match write destination")
     contents: dict[Path, bytes] = {}
     for offset, directory in enumerate(reversed(missing)):
-        relative = directory.relative_to(root).as_posix()
+        relative = directory.as_posix()
         if offset == 0:
             listing = "## Files\n" + document_listing
         else:
             child = missing[len(missing) - offset]
-            child_relative = child.relative_to(root).as_posix()
+            child_relative = child.as_posix()
             listing = "## Subdirectories\n" + subdirectory_listing_line(
                 child.name,
                 f"Documents under {child_relative}/.",
@@ -241,7 +266,17 @@ def _render_born_indexes(
 
 
 def prepare_write(context: WriteContext, intent: WriteIntent) -> PreparedWrite:
-    root = context.root.resolve()
+    root = context.root
+    try:
+        root_identity = inspect_root(root)
+    except OSError as error:
+        raise WriteFailure(
+            "preflight",
+            "inspect",
+            "directory",
+            Path("."),
+            error,
+        ) from error
     birth_relative = _relative_path(root, intent.birth.path)
     if birth_relative.suffix != ".md":
         raise ValueError("citable document birth must end in .md")
@@ -262,24 +297,52 @@ def prepare_write(context: WriteContext, intent: WriteIntent) -> PreparedWrite:
     keys = [mutation.key for mutation in intent.mutations]
     if len(set(keys)) != len(keys):
         raise ValueError("mutation keys must be unique")
-    for relative in [birth_relative, *companion_relatives]:
-        absolute = root / relative
-        if absolute.exists() and not absolute.is_file():
-            raise ValueError(
-                f"write birth must be a file path: {relative.as_posix()}"
-            )
-
-    target_dir = root / birth_relative.parent
-    new_directories = _missing_directories(root, target_dir)
-    refresh_directory = new_directories[0].parent if new_directories else target_dir
+    new_directories = _missing_directories(
+        root,
+        birth_relative.parent,
+        root_identity,
+    )
+    refresh_directory = (
+        new_directories[0].parent if new_directories else birth_relative.parent
+    )
     refresh_index = refresh_directory / "index.md"
+    born_indexes = {directory / "index.md" for directory in new_directories}
+    implicit_paths = {Path("log.md"), refresh_index, *born_indexes}
+    conflicts = sorted(set(all_paths) & implicit_paths)
+    if conflicts:
+        shown = ", ".join(path.as_posix() for path in conflicts)
+        raise ValueError(f"write intent collides with implicit pipeline path: {shown}")
+
+    if not new_directories:
+        for role, relative in [
+            ("document", birth_relative),
+            *(("companion", path) for path in companion_relatives),
+        ]:
+            try:
+                inspect_rooted_file(
+                    root,
+                    relative,
+                    root_identity,
+                    allow_missing=True,
+                )
+            except OSError as error:
+                if error.errno in {errno.EINVAL, errno.ELOOP, errno.ENOTDIR}:
+                    raise ValueError(
+                        f"write birth must be a file path: {relative.as_posix()}"
+                    ) from error
+                raise WriteFailure(
+                    "preflight",
+                    "inspect",
+                    role,
+                    relative,
+                    error,
+                ) from error
 
     sources: dict[str, MutationSource] = {}
     mutation_identities: dict[str, FileIdentity] = {}
     for mutation, relative in zip(intent.mutations, mutation_relatives, strict=True):
-        absolute = root / relative
         try:
-            identity = inspect_mutable_file(absolute)
+            identity = inspect_rooted_file(root, relative, root_identity)
         except OSError as error:
             raise WriteFailure(
                 "preflight",
@@ -291,7 +354,7 @@ def prepare_write(context: WriteContext, intent: WriteIntent) -> PreparedWrite:
             ) from error
         assert identity is not None
         try:
-            content = read_mutable_bytes(absolute, identity)
+            content = read_rooted_bytes(root, relative, root_identity, identity)
         except OSError as error:
             raise WriteFailure(
                 "preflight",
@@ -309,28 +372,38 @@ def prepare_write(context: WriteContext, intent: WriteIntent) -> PreparedWrite:
         )
 
     try:
-        refresh_identity = inspect_mutable_file(refresh_index)
+        refresh_identity = inspect_rooted_file(root, refresh_index, root_identity)
     except OSError as error:
         raise WriteFailure(
             "preflight",
             "inspect",
             "index",
-            refresh_index.relative_to(root),
+            refresh_index,
             error,
         ) from error
     assert refresh_identity is not None
     try:
-        refresh_source = read_mutable_bytes(refresh_index, refresh_identity)
+        refresh_source = read_rooted_bytes(
+            root,
+            refresh_index,
+            root_identity,
+            refresh_identity,
+        )
     except OSError as error:
         raise WriteFailure(
             "preflight",
             "read",
             "index",
-            refresh_index.relative_to(root),
+            refresh_index,
             error,
         ) from error
     try:
-        log_identity = inspect_mutable_file(root / "log.md", allow_missing=True)
+        log_identity = inspect_rooted_file(
+            root,
+            Path("log.md"),
+            root_identity,
+            allow_missing=True,
+        )
     except OSError as error:
         raise WriteFailure(
             "preflight", "inspect", "log", Path("log.md"), error
@@ -338,7 +411,6 @@ def prepare_write(context: WriteContext, intent: WriteIntent) -> PreparedWrite:
 
     listing = _document_listing(intent.birth.content, birth_relative.name)
     new_indexes = _render_born_indexes(
-        root,
         new_directories,
         birth_relative,
         listing,
@@ -351,14 +423,14 @@ def prepare_write(context: WriteContext, intent: WriteIntent) -> PreparedWrite:
             new_directories[0].name: subdirectory_listing_line(
                 new_directories[0].name,
                 f"Documents under "
-                f"{new_directories[0].relative_to(root).as_posix()}/.",
+                f"{new_directories[0].as_posix()}/.",
             )
         }
     )
     try:
         refresh_content = regenerate_directory_index(
             root,
-            refresh_directory,
+            root / refresh_directory,
             source=refresh_source,
             planned_files=planned_files,
             planned_subdirectories=planned_subdirectories,
@@ -369,14 +441,17 @@ def prepare_write(context: WriteContext, intent: WriteIntent) -> PreparedWrite:
             "preflight",
             "render",
             "index",
-            refresh_index.relative_to(root),
+            refresh_index,
             cause,
         ) from error
 
     prepared = PreparedWrite(sources=sources)
     prepared._root = root
+    prepared._root_identity = root_identity
     prepared._intent = intent.model_copy(deep=True)
     prepared._mutation_identities = mutation_identities
+    prepared._birth_relative = birth_relative
+    prepared._companion_relatives = companion_relatives
     prepared._new_directories = new_directories
     prepared._new_indexes = new_indexes
     prepared._refresh_index = refresh_index
@@ -387,13 +462,13 @@ def prepare_write(context: WriteContext, intent: WriteIntent) -> PreparedWrite:
         [
             birth_relative.as_posix(),
             *(path.as_posix() for path in companion_relatives),
-            *(path.relative_to(root).as_posix() for path in new_indexes),
+            *(path.as_posix() for path in new_indexes),
         ]
     )
     prepared._updated = sorted(
         [
             *(path.as_posix() for path in mutation_relatives),
-            refresh_index.relative_to(root).as_posix(),
+            refresh_index.as_posix(),
         ]
     )
     return prepared
@@ -411,64 +486,75 @@ def apply_write(
         raise ValueError("replacement keys must exactly match prepared mutation keys")
     prepared._consumed = True
     root = prepared._root
+    root_identity = prepared._root_identity
     intent = prepared._intent
     try:
         for directory in prepared._new_directories:
-            relative_directory = directory.relative_to(root)
             try:
-                directory.mkdir()
+                create_rooted_directory(root, directory, root_identity)
             except OSError as error:
                 raise WriteFailure(
                     "write",
                     "mkdir",
                     "directory",
-                    relative_directory,
+                    directory,
                     error,
                 ) from error
-            index_path = directory / "index.md"
+            index_relative = directory / "index.md"
             try:
-                create_file_bytes(index_path, prepared._new_indexes[index_path])
+                create_rooted_file_bytes(
+                    root,
+                    index_relative,
+                    prepared._new_indexes[index_relative],
+                    root_identity,
+                )
             except OSError as error:
                 raise WriteFailure(
                     "write",
                     "create",
                     "index",
-                    index_path.relative_to(root),
+                    index_relative,
                     error,
                 ) from error
-        for companion in intent.birth.companions_before:
-            relative = _relative_path(root, companion.path)
+        for companion, relative in zip(
+            intent.birth.companions_before,
+            prepared._companion_relatives,
+            strict=True,
+        ):
             try:
-                create_file_bytes(root / relative, companion.content)
+                create_rooted_file_bytes(
+                    root,
+                    relative,
+                    companion.content,
+                    root_identity,
+                )
             except OSError as error:
                 raise WriteFailure(
                     "write", "create", "companion", relative, error
                 ) from error
-        birth_relative = _relative_path(root, intent.birth.path)
         try:
-            create_file_bytes(root / birth_relative, intent.birth.content)
+            create_rooted_file_bytes(
+                root,
+                prepared._birth_relative,
+                intent.birth.content,
+                root_identity,
+            )
         except OSError as error:
             raise WriteFailure(
-                "write", "create", "document", birth_relative, error
+                "write",
+                "create",
+                "document",
+                prepared._birth_relative,
+                error,
             ) from error
         for mutation in intent.mutations:
             source = prepared.sources[mutation.key]
             try:
-                relative = _relative_path(root, source.path)
-            except ValueError as error:
-                cause = OSError(errno.ELOOP, str(error), root / source.path)
-                raise WriteFailure(
-                    "write",
-                    "overwrite",
-                    "mutation",
+                overwrite_rooted_bytes(
+                    root,
                     source.path,
-                    cause,
-                    key=mutation.key,
-                ) from error
-            try:
-                overwrite_mutable_bytes(
-                    root / relative,
                     replacement_map[mutation.key],
+                    root_identity,
                     prepared._mutation_identities[mutation.key],
                 )
             except OSError as error:
@@ -481,9 +567,11 @@ def apply_write(
                     key=mutation.key,
                 ) from error
         try:
-            overwrite_mutable_bytes(
+            overwrite_rooted_bytes(
+                root,
                 prepared._refresh_index,
                 prepared._refresh_content,
+                root_identity,
                 prepared._refresh_identity,
             )
         except OSError as error:
@@ -491,15 +579,33 @@ def apply_write(
                 "write",
                 "overwrite",
                 "index",
-                prepared._refresh_index.relative_to(root),
+                prepared._refresh_index,
                 error,
             ) from error
         try:
-            append_log(
-                root,
-                intent.log_entry,
-                expected_identity=prepared._log_identity,
-            )
+            row = f"{format_log_entry(intent.log_entry)}\n".encode("utf-8")
+            if prepared._log_identity is None:
+                create_rooted_file_bytes(
+                    root,
+                    Path("log.md"),
+                    empty_log_content().encode("utf-8") + row,
+                    root_identity,
+                )
+            else:
+                existing = read_rooted_bytes(
+                    root,
+                    Path("log.md"),
+                    root_identity,
+                    prepared._log_identity,
+                )
+                separator = b"" if existing.endswith(b"\n") else b"\n"
+                append_rooted_bytes(
+                    root,
+                    Path("log.md"),
+                    separator + row,
+                    root_identity,
+                    prepared._log_identity,
+                )
         except OSError as error:
             raise WriteFailure(
                 "write", "append", "log", Path("log.md"), error

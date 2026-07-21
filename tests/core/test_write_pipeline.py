@@ -64,6 +64,35 @@ def test_load_context_blocks_malformed_documents_without_writes(tmp_path) -> Non
     assert {path: path.read_bytes() for path in root.rglob("*") if path.is_file()} == before
 
 
+def test_prepare_does_not_follow_root_replacement_link(tmp_path) -> None:
+    root = initialized(tmp_path)
+    context = load_write_context(root)
+    moved = tmp_path / "kb-moved"
+    root.rename(moved)
+    try:
+        root.symlink_to(moved, target_is_directory=True)
+    except (NotImplementedError, OSError) as error:
+        pytest.skip(f"symlinks unsupported: {error}")
+
+    with pytest.raises(WriteFailure) as raised:
+        prepare_write(
+            context,
+            WriteIntent(
+                birth=DocumentBirth(
+                    path=Path("synthetic/planned.md"),
+                    content=document_bytes(),
+                ),
+                log_entry=log_entry(),
+            ),
+        )
+
+    assert raised.value.phase == "preflight"
+    assert raised.value.operation == "inspect"
+    assert raised.value.role == "directory"
+    assert raised.value.path == Path(".")
+    assert not (moved / "synthetic/planned.md").exists()
+
+
 @pytest.mark.parametrize(
     "relative",
     [Path("/absolute.md"), Path("../escape.md"), Path(r"synthetic\escape.md")],
@@ -156,6 +185,56 @@ def test_prepare_rejects_directory_at_birth_path_before_writes(tmp_path) -> None
     assert {path: path.read_bytes() for path in root.rglob("*") if path.is_file()} == before
 
 
+def test_prepare_rejects_birth_at_would_be_born_index_before_writes(
+    tmp_path,
+) -> None:
+    root = initialized(tmp_path)
+    context = load_write_context(root)
+    before = {path: path.read_bytes() for path in root.rglob("*") if path.is_file()}
+
+    with pytest.raises(ValueError, match="implicit pipeline path"):
+        prepare_write(
+            context,
+            WriteIntent(
+                birth=DocumentBirth(
+                    path=Path("synthetic/a/index.md"),
+                    content=document_bytes(),
+                ),
+                log_entry=log_entry(),
+            ),
+        )
+
+    assert {path: path.read_bytes() for path in root.rglob("*") if path.is_file()} == before
+
+
+@pytest.mark.parametrize(
+    "reserved",
+    [Path("synthetic/index.md"), Path("log.md")],
+)
+def test_prepare_rejects_mutation_at_implicit_pipeline_path_before_writes(
+    tmp_path,
+    reserved,
+) -> None:
+    root = initialized(tmp_path)
+    context = load_write_context(root)
+    before = {path: path.read_bytes() for path in root.rglob("*") if path.is_file()}
+
+    with pytest.raises(ValueError, match="implicit pipeline path"):
+        prepare_write(
+            context,
+            WriteIntent(
+                birth=DocumentBirth(
+                    path=Path("synthetic/planned.md"),
+                    content=document_bytes(),
+                ),
+                mutations=[MutationTarget(key="reserved", path=reserved)],
+                log_entry=log_entry(),
+            ),
+        )
+
+    assert {path: path.read_bytes() for path in root.rglob("*") if path.is_file()} == before
+
+
 def test_apply_creates_nested_indexes_document_updates_ancestor_and_logs(
     tmp_path,
 ) -> None:
@@ -198,13 +277,18 @@ def test_companion_is_created_before_document_and_excluded_from_index(
 
     root = initialized(tmp_path)
     seen: list[str] = []
-    real_create = pipeline.create_file_bytes
+    real_create = pipeline.create_rooted_file_bytes
 
-    def record(path: Path, content: bytes) -> None:
-        seen.append(path.relative_to(root).as_posix())
-        real_create(path, content)
+    def record(
+        rooted_at: Path,
+        relative: Path,
+        content: bytes,
+        root_identity,
+    ) -> None:
+        seen.append(relative.as_posix())
+        real_create(rooted_at, relative, content, root_identity)
 
-    monkeypatch.setattr(pipeline, "create_file_bytes", record)
+    monkeypatch.setattr(pipeline, "create_rooted_file_bytes", record)
     prepared = prepare_write(
         load_write_context(root),
         WriteIntent(
@@ -453,6 +537,72 @@ def test_prepare_rejects_symlink_birth_without_touching_target(
     assert outside.read_bytes() == b"outside"
 
 
+@pytest.mark.parametrize(
+    ("with_companion", "expected_role", "expected_path"),
+    [
+        (True, "companion", Path("raw/sources/evidence.pdf")),
+        (False, "document", Path("raw/sources/evidence.md")),
+    ],
+)
+def test_late_birth_parent_link_is_role_specific_write_failure(
+    tmp_path,
+    with_companion,
+    expected_role,
+    expected_path,
+) -> None:
+    root = initialized(tmp_path)
+    companions = (
+        [
+            CompanionBirth(
+                path=Path("raw/sources/evidence.pdf"),
+                content=b"%PDF",
+            )
+        ]
+        if with_companion
+        else []
+    )
+    prepared = prepare_write(
+        load_write_context(root),
+        WriteIntent(
+            birth=DocumentBirth(
+                path=Path("raw/sources/evidence.md"),
+                content=(
+                    b"---\nid: RAW-000001\ntype: raw-source\n"
+                    b"title: Evidence\n---\nStub\n"
+                ),
+                companions_before=companions,
+            ),
+            log_entry=LogEntry(
+                at="2026-07-20T12:00:00Z",
+                action="ingested",
+                actor="test",
+                doc_ids=["RAW-000001"],
+                note="raw/sources/evidence.md",
+            ),
+        ),
+    )
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "evidence.md").write_bytes(b"external document")
+    (outside / "evidence.pdf").write_bytes(b"external companion")
+    moved = root / "raw/sources-moved"
+    (root / "raw/sources").rename(moved)
+    try:
+        (root / "raw/sources").symlink_to(outside, target_is_directory=True)
+    except (NotImplementedError, OSError) as error:
+        pytest.skip(f"symlinks unsupported: {error}")
+
+    with pytest.raises(WriteFailure) as raised:
+        apply_write(prepared)
+
+    assert raised.value.phase == "write"
+    assert raised.value.operation == "create"
+    assert raised.value.role == expected_role
+    assert raised.value.path == expected_path
+    assert (outside / "evidence.md").read_bytes() == b"external document"
+    assert (outside / "evidence.pdf").read_bytes() == b"external companion"
+
+
 def test_document_failure_leaves_companion_but_not_index_or_log(
     tmp_path,
     monkeypatch,
@@ -462,15 +612,20 @@ def test_document_failure_leaves_companion_but_not_index_or_log(
     root = initialized(tmp_path)
     index_before = (root / "raw/sources/index.md").read_bytes()
     log_before = (root / "log.md").read_bytes()
-    real_create = pipeline.create_file_bytes
-    document = root / "raw/sources/evidence.md"
+    real_create = pipeline.create_rooted_file_bytes
+    document = Path("raw/sources/evidence.md")
 
-    def fail_document(path: Path, content: bytes) -> None:
-        if path == document:
+    def fail_document(
+        rooted_at: Path,
+        relative: Path,
+        content: bytes,
+        root_identity,
+    ) -> None:
+        if relative == document:
             raise OSError("document failure")
-        real_create(path, content)
+        real_create(rooted_at, relative, content, root_identity)
 
-    monkeypatch.setattr(pipeline, "create_file_bytes", fail_document)
+    monkeypatch.setattr(pipeline, "create_rooted_file_bytes", fail_document)
     prepared = prepare_write(
         load_write_context(root),
         WriteIntent(
@@ -501,7 +656,7 @@ def test_document_failure_leaves_companion_but_not_index_or_log(
 
     assert raised.value.role == "document"
     assert (root / "raw/sources/evidence.pdf").read_bytes() == b"%PDF"
-    assert not document.exists()
+    assert not (root / document).exists()
     assert (root / "raw/sources/index.md").read_bytes() == index_before
     assert (root / "log.md").read_bytes() == log_before
 
@@ -511,14 +666,19 @@ def test_late_born_index_occupant_is_preserved(tmp_path, monkeypatch) -> None:
 
     root = initialized(tmp_path)
     born_index = root / "synthetic/a/index.md"
-    real_create = pipeline.create_file_bytes
+    real_create = pipeline.create_rooted_file_bytes
 
-    def occupy_index(path: Path, content: bytes) -> None:
-        if path == born_index:
-            real_create(path, b"late index")
-        real_create(path, content)
+    def occupy_index(
+        rooted_at: Path,
+        relative: Path,
+        content: bytes,
+        root_identity,
+    ) -> None:
+        if rooted_at / relative == born_index:
+            real_create(rooted_at, relative, b"late index", root_identity)
+        real_create(rooted_at, relative, content, root_identity)
 
-    monkeypatch.setattr(pipeline, "create_file_bytes", occupy_index)
+    monkeypatch.setattr(pipeline, "create_rooted_file_bytes", occupy_index)
     prepared = prepare_write(
         load_write_context(root),
         WriteIntent(
