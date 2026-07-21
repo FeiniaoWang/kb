@@ -33,6 +33,61 @@ and log failures retain their respective `mkdir`/`create`/`overwrite`/`append`
 operation and role attribution. The fixed partial-write order and no-rollback
 contract remain unchanged.
 
+### Root-bound context acquisition
+
+The same containment guarantee applies before preparation. A short-lived,
+internal rooted snapshot session opens the discovered KB root with no-follow
+directory semantics and captures its `FileIdentity` before any config or scan
+input is consumed. Configuration bytes, directory traversal, and every
+Markdown file read used for allocation are performed relative to descriptors
+descending from that captured root. Each directory component and final file is
+opened no-follow and checked for the required kind. The root pathname is
+reopened and matched against the captured identity throughout acquisition and
+once more before the snapshot is returned. A platform that cannot provide
+these operations fails before mutation; there is no path-based fallback.
+
+The rooted session remains an internal seam rather than a public filesystem
+adapter. It returns owned bytes and root-relative metadata, then closes every
+descriptor on success and failure. Existing config and frontmatter parsers are
+refactored to accept those bytes, and the ordinary path-based loaders delegate
+to the same parsers; the pipeline does not create a second schema or parser.
+The scan is still rebuilt once per invocation and is not persisted or cached.
+
+`WriteContext` remains a Pydantic model and privately stores the captured root
+identity. It stores no descriptor. `prepare_write()` reopens the root before
+using the context and rejects an identity mismatch as a neutral typed preflight
+failure. Consequently a root replaced between staged public calls cannot
+receive ids or reference intent derived from the previously scanned KB. A
+rename-away-and-back during acquisition cannot introduce bytes from the
+temporary pathname: all acquisition remains anchored to the original root
+descriptor, and any observable root-identity mismatch fails the acquisition.
+
+### Rooted projected-index snapshot
+
+Projected index preparation collects the affected directory's complete
+listing input through the same descriptor discipline: verified directory
+descriptors enumerate child names and kinds, subdirectory `index.md` files and
+Markdown children are opened no-follow, and their bytes are parsed through the
+existing frontmatter parser. Symlinks, junctions, unexpected child kinds, and
+root identity changes are refused before rendering. The collected metadata
+contains every existing subdirectory listing field (name, heading, and
+description) and Markdown file listing field (filename, id, title,
+description, and type), so later formatting needs no pathname access.
+
+Index formatting is pure over the identity-checked index source bytes, this
+complete existing-listing metadata, and the planned file/subdirectory
+overlays. The pipeline path does not call `Path.iterdir`, `Path.glob`,
+path-based `read_frontmatter`, or path-based heading reads. Existing
+non-pipeline callers may keep their path-acquiring convenience entry point,
+but it delegates to the same pure renderer after collecting equivalent
+metadata. Successful listing grammar, filename-key ordering, born-current
+indexes, and nearest-existing-index behavior remain byte-for-byte unchanged.
+
+No live descriptor crosses `load_write_context()`, `prepare_write()`, or
+`apply_write()`. Each stage independently opens, verifies, uses, and closes
+the descriptors it needs while carrying only immutable identities, bytes, and
+typed metadata between stages.
+
 ## Goal
 
 Extract the duplicated create/ingest filesystem commit orchestration into one deep core module while preserving every observable `kb create` and `kb ingest` contract. The extraction also strengthens ingest's mutable index and log handling to match create's identity-checked safety without adding rollback or changing documented partial-write semantics.
