@@ -2,9 +2,9 @@
 
 The [`Factory Model`](https://www.kaggle.com/whitepaper-the-new-SDLC-with-vibe-coding):
 
-* Engineering team build the system that produces the software.
+* The engineering team builds the system that produces the software.
 * AI agents perform much of the heavy lifting.
-* Human act as architects, reviewers, and quality arbiters.
+* Humans act as architects, reviewers, and quality arbiters.
 
 ## Software Development Life Cycle
 
@@ -16,56 +16,56 @@ Requirements → Design → Implementation → Testing → Deploy → Maintenanc
 
 ### Goal
 
-The goal is to discover, analyze, and define what for who and why.
+Discover, analyze, and define what to build, for whom, and why.
 
 ### Output
 
-`PRD + C4 Context diagram`: serve as a high-level specification of the system to be built with precise acceptance criteria.
+`PRD + C4 Context Diagram`: together they form the high-level specification of the system to be built, with precise acceptance criteria.
 
 #### PRD
 
-A Product Requirements Document (PRD) acts as the single source of truth for the team, outlining what to build, why it matters, and how success will be measured.
-But "single source of truth" doesn't mean that the PRD is static. It evolves as the team learns more about the problem space, user needs, and technical constraints.
+A Product Requirements Document (PRD) is the team's single source of truth: what to build, why it matters, and how success will be measured.
+"Single source of truth" doesn't mean static — the PRD evolves as the team learns more about the problem space, user needs, and technical constraints.
 
 ##### Key Sections
 
 * **Objective & Background**: The core problem being solved and the business goals the product aims to achieve.
-* **Features & Requirements**: Functional behaviors and non-functional requirements(e.g., performance or security).
-* **User stories**: The biggest section of the PRD or a separate document. A comprehensive set of user stories that describe the expected behavior of the system from the user's perspective. It serves as the specification of functional behaviors.
+* **Features & Requirements**: Functional behaviors and non-functional requirements (e.g., performance, security).
+* **User Stories**: Usually the largest section of the PRD (or a separate document). A comprehensive set of user stories describing the expected behavior of the system from the user's perspective, each with precise acceptance criteria — together they are the specification of functional behavior.
 
 #### C4 Context Diagram
 
-A C4 Context Diagram provides a high-level, 10,000-foot view of how a software system fits into its surrounding environment. It serves as a satellite map identifying exactly who uses the software (actors) and which external systems or third-party services it depends on, completely omitting low-level technical details.
+A C4 Context Diagram provides a high-level, 10,000-foot view of how a software system fits into its surrounding environment. Like a satellite map, it shows exactly who uses the software (actors) and which external systems or third-party services it depends on, while omitting all low-level technical detail.
 
 ##### Key Purposes
 
-* **Sets Boundaries**: Clearly defines the exact scope of your software system and distinguishes it from the rest of the world.
-* **Identifies Integration Points**: Exposes all external dependencies, such as external system APIs and events.
-* **Bridging the Communication Gap**: Because it avoids code, protocols, and technology stacks, it is designed to be easily understood by both highly technical developers and non-technical business stakeholders.
-* **Onboarding Tool**: Acts as the perfect introductory map for new team members or external partners to understand the business context before diving into the code.
+* **Sets Boundaries**: Defines the exact scope of the system and distinguishes it from the rest of the world.
+* **Identifies Integration Points**: Exposes all external dependencies, such as third-party APIs and events.
+* **Bridges the Communication Gap**: Because it avoids code, protocols, and technology stacks, it is equally understandable to developers and non-technical business stakeholders.
+* **Onboards New People**: Serves as the introductory map for new team members or external partners to understand the business context before diving into the code.
 
 ### Roles & Responsibilities
 
-#### Product Manager/Business Analyst
+#### Product Manager / Business Analyst
 
-* Leads the draft of the PRD.
+* Leads the drafting of the PRD.
 * Creates the C4 Context Diagram with the `C4 Modeling` skill.
-* Use the `Grill Me` skill to rigorously stress-test the problem statement and ensure that the team is solving the right problem.
-* Use the `Storyteller` skill to brainstorm and generate comprehensive user stories and edge cases.
+* Uses the `Grill Me` skill to rigorously stress-test the problem statement and ensure the team is solving the right problem.
+* Uses the `Storyteller` skill to brainstorm and generate comprehensive user stories and edge cases.
 
 #### Software Engineer
 
-* Provides technical `guidance`.
-* Validates and confirms external integration `interfaces`.
-* Build `POCs` to validate technical feasibility.
+* Provides technical guidance.
+* Validates and confirms external integration interfaces.
+* Builds POCs to prove technical feasibility.
 
 #### UX Designer
 
-* Use AI tools to create prototypes of key user flows.
+* Uses AI tools to prototype key user flows.
 
 #### QA Engineer
 
-* Work with UX Designer to turn key user stories into AI-controlled test automation.
+* Works with the UX Designer to turn key user stories into AI-driven test automation.
 
 ## Design
 
