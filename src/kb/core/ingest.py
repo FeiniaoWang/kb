@@ -3,6 +3,7 @@ from __future__ import annotations
 import platform
 import re
 import shutil
+import stat
 import subprocess
 import sys
 from collections.abc import Callable
@@ -217,13 +218,6 @@ def _destination_parts(value: str | None) -> tuple[str, ...]:
     return candidate.parts
 
 
-def _is_link_or_junction(path: Path) -> bool:
-    if path.is_symlink():
-        return True
-    is_junction = getattr(path, "is_junction", None)
-    return bool(is_junction is not None and is_junction())
-
-
 def _target_directory(
     root: Path,
     raw_class: RawClass,
@@ -237,27 +231,23 @@ def _target_directory(
         for part in (None, *destination_parts):
             if part is not None:
                 current /= part
-            if _is_link_or_junction(current):
-                raise OSError("destination contains a symlink or junction")
-            if current.exists() and not current.is_dir():
-                raise OSError("destination component is not a directory")
-            if not current.exists():
+            try:
+                metadata = current.lstat()
+            except FileNotFoundError:
                 break
-        resolved_class_dir = class_dir.resolve(strict=True)
-        resolved_target_dir = target_dir.resolve(strict=False)
+            if stat.S_ISLNK(metadata.st_mode) or (
+                getattr(metadata, "st_file_attributes", 0)
+                & stat.FILE_ATTRIBUTE_REPARSE_POINT
+            ):
+                raise OSError("destination contains a symlink or junction")
+            if not stat.S_ISDIR(metadata.st_mode):
+                raise OSError("destination component is not a directory")
     except (OSError, RuntimeError) as error:
         raise IngestFailure(
             "E_INGEST_DEST_INVALID",
             f"invalid --dest: {destination_value}: {error}",
             2,
         ) from error
-    if (
-        resolved_target_dir != resolved_class_dir
-        and not resolved_target_dir.is_relative_to(resolved_class_dir)
-    ):
-        raise IngestFailure(
-            "E_INGEST_DEST_INVALID", f"invalid --dest: {destination_value}", 2
-        )
     return class_dir, target_dir
 
 

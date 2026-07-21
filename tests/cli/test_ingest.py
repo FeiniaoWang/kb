@@ -4,8 +4,10 @@ import errno
 import json
 import os
 import re
+import stat
 from datetime import datetime
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import yaml
@@ -970,14 +972,18 @@ def test_ac32_unsafe_or_escaping_dest_is_rejected_without_writes(
         encoding="utf-8",
     )
     before_junction = snapshot(initialized_kb)
-    real_is_junction = getattr(Path, "is_junction", None)
+    real_lstat = Path.lstat
 
-    def simulated_is_junction(path: Path) -> bool:
+    def simulated_junction_lstat(path: Path):
+        metadata = real_lstat(path)
         if path == junction:
-            return True
-        return bool(real_is_junction is not None and real_is_junction(path))
+            return SimpleNamespace(
+                st_mode=metadata.st_mode,
+                st_file_attributes=stat.FILE_ATTRIBUTE_REPARSE_POINT,
+            )
+        return metadata
 
-    monkeypatch.setattr(Path, "is_junction", simulated_is_junction, raising=False)
+    monkeypatch.setattr(Path, "lstat", simulated_junction_lstat)
     for value in ("junction", "junction/child"):
         result = ingest_file(
             invoke_ingest,
@@ -993,25 +999,6 @@ def test_ac32_unsafe_or_escaping_dest_is_rejected_without_writes(
         assert snapshot(initialized_kb) == before_junction
         assert source.read_bytes() == source_before
 
-    class_dir = initialized_kb / "raw/sources"
-    target_dir = class_dir / "escaping"
-    outside = tmp_path / "outside"
-    real_resolve = Path.resolve
-    before_escape = snapshot(initialized_kb)
-
-    def escaping_resolve(path: Path, *args, **kwargs) -> Path:
-        if path == class_dir:
-            return class_dir
-        if path == target_dir:
-            return outside
-        return real_resolve(path, *args, **kwargs)
-
-    monkeypatch.setattr(Path, "resolve", escaping_resolve)
-    result = ingest_file(invoke_ingest, initialized_kb, source, "--dest", "escaping")
-    assert result.exit_code == 2
-    assert "E_INGEST_DEST_INVALID" in result.stderr
-    assert "escaping" in result.stderr
-    assert snapshot(initialized_kb) == before_escape
     assert acquired == []
 
 
@@ -1069,6 +1056,67 @@ def test_destination_preflight_preserves_context_and_surface_validation_order(
     assert "--about is required" in usage.stderr
     assert "E_INGEST_DEST_INVALID" not in usage.stderr
     assert snapshot(initialized_kb) == before
+
+
+@pytest.mark.parametrize("json_output", [False, True], ids=["text", "json"])
+def test_destination_metadata_error_is_exact_before_adapter(
+    json_output, initialized_kb, tmp_path, invoke_ingest, monkeypatch
+) -> None:
+    source = tmp_path / "metadata-source.md"
+    source.write_text("source", encoding="utf-8")
+    source_before = source.read_bytes()
+    inaccessible = initialized_kb / "raw/sources/inaccessible"
+    inaccessible.mkdir()
+    (inaccessible / "index.md").write_text(
+        "---\ntype: index\ndescription: Inaccessible target.\n---\n# inaccessible\n",
+        encoding="utf-8",
+    )
+    sentinel = inaccessible / "sentinel.bin"
+    sentinel.write_bytes(b"target bytes")
+    before = snapshot(initialized_kb)
+    real_lstat = Path.lstat
+
+    def denied_lstat(path: Path):
+        if path == inaccessible:
+            raise PermissionError(errno.EACCES, "component metadata denied", path)
+        return real_lstat(path)
+
+    monkeypatch.setattr(Path, "lstat", denied_lstat)
+    import kb.core.ingest as ingest_core
+
+    acquired: list[str | None] = []
+
+    def forbidden_adapter(value: str | None):
+        acquired.append(value)
+        raise AssertionError("destination metadata failure must precede acquisition")
+
+    monkeypatch.setitem(ingest_core.ADAPTERS, "file", forbidden_adapter)
+    arguments = ["--dest", "inaccessible/child"]
+    if json_output:
+        arguments.append("--json")
+
+    result = ingest_file(
+        invoke_ingest,
+        initialized_kb,
+        source,
+        *arguments,
+    )
+
+    assert result.exit_code == 2
+    assert isinstance(result.exception, SystemExit)
+    if json_output:
+        error = json.loads(result.stdout)["error"]
+        assert error["code"] == "E_INGEST_DEST_INVALID"
+        assert "component metadata denied" in error["message"]
+        assert result.stderr == ""
+    else:
+        assert "E_INGEST_DEST_INVALID" in result.stderr
+        assert "component metadata denied" in result.stderr
+        assert result.stdout == ""
+    assert acquired == []
+    assert snapshot(initialized_kb) == before
+    assert sentinel.read_bytes() == b"target bytes"
+    assert source.read_bytes() == source_before
 
 
 def test_ac33_feedback_path_ref_stores_canonical_id(initialized_kb, invoke_ingest) -> None:

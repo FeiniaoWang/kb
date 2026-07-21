@@ -237,8 +237,14 @@ def qualified_called_names(text: str) -> set[str]:
 
 PATH_MUTATORS = {
     "chmod",
+    "copy",
+    "copy_into",
     "hardlink_to",
+    "lchmod",
+    "link_to",
     "mkdir",
+    "move",
+    "move_into",
     "rename",
     "replace",
     "rmdir",
@@ -250,111 +256,141 @@ PATH_MUTATORS = {
 }
 FILE_MUTATORS = {"truncate", "write", "writelines"}
 OS_MUTATORS = {
+    "chflags",
     "chmod",
+    "chown",
+    "copy_file_range",
     "fchmod",
+    "fchown",
     "fdopen",
+    "ftruncate",
+    "lchflags",
+    "lchmod",
+    "lchown",
     "link",
     "makedirs",
+    "mkfifo",
     "mkdir",
+    "mknod",
     "open",
+    "posix_fallocate",
+    "pwrite",
+    "pwritev",
     "remove",
+    "removexattr",
     "removedirs",
     "rename",
     "renames",
     "replace",
     "rmdir",
+    "sendfile",
+    "setxattr",
+    "splice",
     "symlink",
     "truncate",
     "unlink",
+    "utime",
     "write",
+    "writev",
 }
 SHUTIL_MUTATORS = {
     "chown",
     "copy",
     "copy2",
     "copyfile",
+    "copyfileobj",
     "copymode",
     "copystat",
     "copytree",
+    "make_archive",
     "move",
     "rmtree",
+    "unpack_archive",
 }
 READ_ONLY_OPEN_MODES = {"r", "rb", "rt"}
 
 
 def filesystem_write_violations(text: str) -> set[str]:
     tree = parsed(text)
-    origins: dict[str, str] = {"open": "builtins.open"}
+    origins: dict[str, set[str]] = {"open": {"builtins.open"}}
+
+    def add_origin(name: str, origin: str) -> None:
+        origins.setdefault(name, set()).add(origin)
 
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             for alias in node.names:
                 bound = alias.asname or alias.name.split(".", 1)[0]
-                origins[bound] = alias.name if alias.asname else bound
+                add_origin(bound, alias.name if alias.asname else bound)
         elif isinstance(node, ast.ImportFrom) and node.module is not None:
             module = resolved_import_from_module(node)
             for alias in node.names:
                 if alias.name != "*":
-                    origins[alias.asname or alias.name] = f"{module}.{alias.name}"
+                    add_origin(alias.asname or alias.name, f"{module}.{alias.name}")
 
-    def expression_origin(node: ast.expr | None) -> str | None:
+    def expression_origins(node: ast.expr | None) -> set[str]:
         if node is None:
-            return None
+            return set()
         if isinstance(node, ast.Constant) and isinstance(node.value, str):
-            return "Scalar"
+            return {"Scalar"}
         if isinstance(node, ast.JoinedStr):
-            return "Scalar"
+            return {"Scalar"}
         if isinstance(node, ast.Name):
-            return origins.get(node.id, node.id)
+            return set(origins.get(node.id, {node.id}))
         if isinstance(node, ast.Attribute):
-            base = expression_origin(node.value)
-            if base == "PathInstance" and node.attr in {
-                "anchor",
-                "drive",
-                "name",
-                "stem",
-                "suffix",
-            }:
-                return "Scalar"
-            return None if base is None else f"{base}.{node.attr}"
+            result: set[str] = set()
+            for base in expression_origins(node.value):
+                if base == "PathInstance" and node.attr in {
+                    "anchor",
+                    "drive",
+                    "name",
+                    "stem",
+                    "suffix",
+                }:
+                    result.add("Scalar")
+                else:
+                    result.add(f"{base}.{node.attr}")
+            return result
         if isinstance(node, ast.Call):
-            called = expression_origin(node.func)
-            if called == "pathlib.Path":
-                return "PathInstance"
-            if called is not None and called.startswith("PathInstance."):
-                if called.rsplit(".", 1)[-1] in {
+            result: set[str] = set()
+            for called in expression_origins(node.func):
+                attribute = called.rsplit(".", 1)[-1]
+                if called == "pathlib.Path":
+                    result.add("PathInstance")
+                elif called.startswith("PathInstance.") and attribute in {
                     "absolute",
                     "expanduser",
                     "resolve",
                     "with_name",
                     "with_suffix",
                 }:
-                    return "PathInstance"
-            if called in {"builtins.open", "io.open"}:
-                return "FileObject"
-            if called is not None and called.rsplit(".", 1)[-1] in {
-                "decode",
-                "lower",
-                "lstrip",
-                "replace",
-                "rstrip",
-                "strip",
-                "upper",
-            }:
-                return "Scalar"
-            return None
+                    result.add("PathInstance")
+                elif called in {"builtins.open", "io.open"}:
+                    result.add("FileObject")
+                elif attribute in {
+                    "decode",
+                    "lower",
+                    "lstrip",
+                    "rstrip",
+                    "strip",
+                    "upper",
+                } or (attribute == "replace" and called.startswith("Scalar.")):
+                    result.add("Scalar")
+                elif attribute == "replace" and called.startswith("PathInstance."):
+                    result.add("PathInstance")
+            return result
         if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div):
-            if expression_origin(node.left) == "PathInstance":
-                return "PathInstance"
-        return None
+            if "PathInstance" in expression_origins(node.left):
+                return {"PathInstance"}
+        return set()
 
-    def bind(target: ast.expr, origin: str | None) -> bool:
-        if origin is None or not isinstance(target, ast.Name):
+    def bind(target: ast.expr, new_origins: set[str]) -> bool:
+        if not new_origins or not isinstance(target, ast.Name):
             return False
-        if origins.get(target.id) == origin:
-            return False
-        origins[target.id] = origin
-        return True
+        bound = origins.setdefault(target.id, set())
+        before = len(bound)
+        bound.update(new_origins)
+        return len(bound) != before
 
     assignments = [
         node
@@ -365,13 +401,15 @@ def filesystem_write_violations(text: str) -> set[str]:
         changed = False
         for node in assignments:
             if isinstance(node, ast.Assign):
-                origin = expression_origin(node.value)
-                changed |= any(bind(target, origin) for target in node.targets)
+                new_origins = expression_origins(node.value)
+                changed |= any(bind(target, new_origins) for target in node.targets)
             else:
-                origin = expression_origin(node.value)
-                if origin is None and expression_origin(node.annotation) == "pathlib.Path":
-                    origin = "PathInstance"
-                changed |= bind(node.target, origin)
+                new_origins = expression_origins(node.value)
+                if not new_origins and "pathlib.Path" in expression_origins(
+                    node.annotation
+                ):
+                    new_origins = {"PathInstance"}
+                changed |= bind(node.target, new_origins)
         if not changed:
             break
 
@@ -379,8 +417,8 @@ def filesystem_write_violations(text: str) -> set[str]:
         if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             continue
         for argument in (*node.args.posonlyargs, *node.args.args, *node.args.kwonlyargs):
-            if expression_origin(argument.annotation) == "pathlib.Path":
-                origins[argument.arg] = "PathInstance"
+            if "pathlib.Path" in expression_origins(argument.annotation):
+                add_origin(argument.arg, "PathInstance")
 
     def open_mode(
         node: ast.Call,
@@ -401,42 +439,42 @@ def filesystem_write_violations(text: str) -> set[str]:
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
             continue
-        qualified = expression_origin(node.func) or ""
-        attribute = qualified.rsplit(".", 1)[-1]
+        for qualified in expression_origins(node.func):
+            attribute = qualified.rsplit(".", 1)[-1]
 
-        if qualified.startswith("os.") and attribute in OS_MUTATORS:
-            violations.add(f"os.{attribute}")
-            continue
-        if qualified.startswith("shutil.") and attribute in SHUTIL_MUTATORS:
-            violations.add(f"shutil.{attribute}")
-            continue
-        if attribute in FILE_MUTATORS:
-            violations.add(f"file.{attribute}")
-            continue
-        if attribute in PATH_MUTATORS and not (
-            attribute == "replace" and qualified.startswith("Scalar.")
-        ):
-            violations.add(f"Path.{attribute}")
-            continue
+            if qualified.startswith("os.") and attribute in OS_MUTATORS:
+                violations.add(f"os.{attribute}")
+                continue
+            if qualified.startswith("shutil.") and attribute in SHUTIL_MUTATORS:
+                violations.add(f"shutil.{attribute}")
+                continue
+            if attribute in FILE_MUTATORS:
+                violations.add(f"file.{attribute}")
+                continue
+            if attribute in PATH_MUTATORS and not (
+                attribute == "replace" and qualified.startswith("Scalar.")
+            ):
+                violations.add(f"Path.{attribute}")
+                continue
 
-        open_label: str | None = None
-        if qualified == "builtins.open":
-            open_label = "builtins.open"
-        elif qualified == "io.open":
-            open_label = "io.open"
-        elif attribute == "open":
-            open_label = "Path.open"
-        if open_label is None:
-            continue
-        mode = open_mode(node, qualified, open_label)
-        if mode is None:
-            continue
-        if not (
-            isinstance(mode, ast.Constant)
-            and isinstance(mode.value, str)
-            and mode.value in READ_ONLY_OPEN_MODES
-        ):
-            violations.add(open_label)
+            open_label: str | None = None
+            if qualified == "builtins.open":
+                open_label = "builtins.open"
+            elif qualified == "io.open":
+                open_label = "io.open"
+            elif attribute == "open":
+                open_label = "Path.open"
+            if open_label is None:
+                continue
+            mode = open_mode(node, qualified, open_label)
+            if mode is None:
+                continue
+            if not (
+                isinstance(mode, ast.Constant)
+                and isinstance(mode.value, str)
+                and mode.value in READ_ONLY_OPEN_MODES
+            ):
+                violations.add(open_label)
     return violations
 
 
@@ -633,6 +671,11 @@ target.write_text("content")
 target.mkdir()
 target.replace(P("replacement.md"))
 P("mode.md").chmod(0o600)
+target.copy(P("copy.md"))
+target.copy_into(P("copies"))
+target.move(P("moved.md"))
+target.move_into(P("moves"))
+target.lchmod(0o600)
 """
 
     assert {
@@ -640,6 +683,11 @@ P("mode.md").chmod(0o600)
         "Path.mkdir",
         "Path.replace",
         "Path.chmod",
+        "Path.copy",
+        "Path.copy_into",
+        "Path.move",
+        "Path.move_into",
+        "Path.lchmod",
     } <= filesystem_write_violations(text)
 
 
@@ -701,18 +749,89 @@ from shutil import move as relocate
 
 operating.open("target", flags)
 operating.rename("before", "after")
+operating.pwrite(fd, content, offset)
+operating.pwritev(fd, buffers, offset)
+operating.writev(fd, buffers)
+operating.sendfile(out_fd, in_fd, offset, count)
+operating.copy_file_range(in_fd, out_fd, count)
+operating.ftruncate(fd, length)
 erase("target")
 transfers.copy2("source", "target")
+transfers.copyfileobj(source_stream, target_stream)
 relocate("source", "target")
 """
 
     assert {
         "os.open",
         "os.rename",
+        "os.pwrite",
+        "os.pwritev",
+        "os.writev",
+        "os.sendfile",
+        "os.copy_file_range",
+        "os.ftruncate",
         "os.remove",
         "shutil.copy2",
+        "shutil.copyfileobj",
         "shutil.move",
     } <= filesystem_write_violations(text)
+
+
+def test_direct_write_gate_preserves_dangerous_aliases_after_reassignment() -> None:
+    text = """
+import os
+from pathlib import Path
+
+erase = os.remove
+erase("target")
+erase = domain.harmless
+persist = Path.write_text
+persist(Path("target"), "content")
+persist = domain.harmless
+"""
+
+    assert {
+        "os.remove",
+        "Path.write_text",
+    } <= filesystem_write_violations(text)
+
+
+def test_direct_write_gate_preserves_dangerous_aliases_across_scope_reuse() -> None:
+    text = """
+import os
+from pathlib import Path
+
+def dangerous():
+    operation = os.remove
+    operation("target")
+
+def also_dangerous():
+    operation = Path.write_text
+    operation(Path("target"), "content")
+
+def harmless():
+    operation = domain.harmless
+    operation()
+"""
+
+    assert {
+        "os.remove",
+        "Path.write_text",
+    } <= filesystem_write_violations(text)
+
+
+def test_direct_write_gate_alias_cycles_terminate_and_retain_dangerous_edges() -> None:
+    text = """
+import os
+
+erase = os.remove
+wrapped = erase
+erase = wrapped
+wrapped = erase
+wrapped("target")
+"""
+
+    assert "os.remove" in filesystem_write_violations(text)
 
 
 def test_direct_write_gate_detects_file_object_mutation_calls() -> None:
