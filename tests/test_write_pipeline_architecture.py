@@ -1,4 +1,5 @@
 import ast
+from importlib.util import resolve_name
 from pathlib import Path
 
 
@@ -9,6 +10,32 @@ HOUSEKEEPING_INDEXING_PERSISTENCE = {
     "regenerate_directory_index",
 }
 RETIRED_ORCHESTRATION_HELPERS = {"_new_directories", "_new_index_contents"}
+WRITE_PIPELINE_IMPORT_ALLOWLISTS = {
+    "src/kb/core/create.py": frozenset(
+        {
+            "AllocationBlocked",
+            "DocumentBirth",
+            "MutationTarget",
+            "WriteFailure",
+            "WriteIntent",
+            "apply_write",
+            "load_write_context",
+            "prepare_write",
+        }
+    ),
+    "src/kb/core/ingest.py": frozenset(
+        {
+            "AllocationBlocked",
+            "CompanionBirth",
+            "DocumentBirth",
+            "WriteFailure",
+            "WriteIntent",
+            "apply_write",
+            "load_write_context",
+            "prepare_write",
+        }
+    ),
+}
 
 
 def source(relative: str) -> str:
@@ -49,28 +76,32 @@ def wildcard_imports(text: str) -> set[str]:
     }
 
 
+def resolved_import_from_module(
+    node: ast.ImportFrom,
+    package: str = "kb.core",
+) -> str:
+    module = node.module or ""
+    if node.level == 0:
+        return module
+    try:
+        return resolve_name(f"{'.' * node.level}{module}", package)
+    except ImportError:
+        return ""
+
+
 def safeio_import_dependencies(text: str) -> set[str]:
     dependencies: set[str] = set()
     for node in ast.walk(parsed(text)):
         if isinstance(node, ast.ImportFrom):
-            module = node.module or ""
-            absolute_safeio = node.level == 0 and (
+            module = resolved_import_from_module(node)
+            if (
                 module == "kb.core.safeio"
                 or module.startswith("kb.core.safeio.")
                 or (
                     module == "kb.core"
                     and any(alias.name == "safeio" for alias in node.names)
                 )
-            )
-            relative_safeio = node.level == 1 and (
-                module == "safeio"
-                or module.startswith("safeio.")
-                or (
-                    not module
-                    and any(alias.name == "safeio" for alias in node.names)
-                )
-            )
-            if absolute_safeio or relative_safeio:
+            ):
                 dependencies.add("kb.core.safeio")
         elif isinstance(node, ast.Import) and any(
             alias.name == "kb.core.safeio"
@@ -79,6 +110,35 @@ def safeio_import_dependencies(text: str) -> set[str]:
         ):
             dependencies.add("kb.core.safeio")
     return dependencies
+
+
+def write_pipeline_import_violations(
+    text: str,
+    allowed: set[str] | frozenset[str],
+) -> set[str]:
+    module_name = "kb.core.write_pipeline"
+    violations: set[str] = set()
+    for node in ast.walk(parsed(text)):
+        if isinstance(node, ast.ImportFrom):
+            module = resolved_import_from_module(node)
+            if module == module_name:
+                violations.update(
+                    f"{module_name}.{alias.name}"
+                    for alias in node.names
+                    if alias.name == "*" or alias.name not in allowed
+                )
+            elif module == "kb.core" and any(
+                alias.name == "write_pipeline" for alias in node.names
+            ):
+                violations.add(module_name)
+        elif isinstance(node, ast.Import):
+            violations.update(
+                alias.name
+                for alias in node.names
+                if alias.name == module_name
+                or alias.name.startswith(f"{module_name}.")
+            )
+    return violations
 
 
 def _simple_callable_bindings(tree: ast.Module) -> dict[str, set[str]]:
@@ -231,6 +291,44 @@ def test_ast_gate_detects_wildcard_and_parent_module_safeio_dependencies() -> No
     }
 
 
+def test_ast_gate_resolves_deeper_relative_safeio_dependencies() -> None:
+    assert safeio_import_dependencies(
+        "from ..core.safeio import read_rooted_bytes as read\n"
+    ) == {"kb.core.safeio"}
+    assert safeio_import_dependencies(
+        "from ..core import safeio as storage\n"
+    ) == {"kb.core.safeio"}
+
+
+def test_ast_gate_rejects_write_pipeline_reexports_and_module_bypasses() -> None:
+    allowed = {
+        "AllocationBlocked",
+        "DocumentBirth",
+        "MutationTarget",
+        "WriteFailure",
+        "WriteIntent",
+        "apply_write",
+        "load_write_context",
+        "prepare_write",
+    }
+    assert write_pipeline_import_violations(
+        "from kb.core.write_pipeline import create_rooted_file_bytes as persist\n",
+        allowed,
+    ) == {"kb.core.write_pipeline.create_rooted_file_bytes"}
+    assert write_pipeline_import_violations(
+        "import kb.core.write_pipeline as pipeline\n",
+        allowed,
+    ) == {"kb.core.write_pipeline"}
+    assert write_pipeline_import_violations(
+        "from ..core import write_pipeline as pipeline\n",
+        allowed,
+    ) == {"kb.core.write_pipeline"}
+    assert write_pipeline_import_violations(
+        "from kb.core.write_pipeline import *\n",
+        allowed,
+    ) == {"kb.core.write_pipeline.*"}
+
+
 def test_ast_names_follow_module_attribute_callable_rebinding() -> None:
     text = """
 import kb.core.safeio as safeio
@@ -311,6 +409,10 @@ def test_create_and_ingest_do_not_own_persistence_primitives() -> None:
         assert not (imported_names(text) & forbidden_names)
         assert not (directly_called_names(text) & forbidden_names)
         assert not (set(function_definitions(text)) & forbidden_names)
+        assert not write_pipeline_import_violations(
+            text,
+            WRITE_PIPELINE_IMPORT_ALLOWLISTS[path],
+        )
 
 
 def test_slug_has_one_definition_and_both_commands_import_it() -> None:

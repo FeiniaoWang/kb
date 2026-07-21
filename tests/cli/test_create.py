@@ -683,7 +683,7 @@ def test_ac33_empty_slug_uses_lowercase_id_filename(
 
 
 def test_ac34_collision_suffixes_id_without_overwriting_existing_file(
-    initialized_kb, invoke_create
+    initialized_kb, tmp_path, invoke_create
 ) -> None:
     add_chat(initialized_kb)
     existing = add_synthetic(initialized_kb, relative="synthetic/notes.md")
@@ -696,6 +696,54 @@ def test_ac34_collision_suffixes_id_without_overwriting_existing_file(
     assert result.exit_code == 0
     assert (initialized_kb / "synthetic/notes-kb-000002.md").is_file()
     assert existing.read_bytes() == before
+
+    from typer.testing import CliRunner
+    from kb.cli.app import app
+
+    for json_output in (False, True):
+        nested_root = tmp_path / f"nested-create-{'json' if json_output else 'text'}"
+        assert (
+            CliRunner().invoke(app, ["init", "--root", str(nested_root)]).exit_code
+            == 0
+        )
+        add_chat(nested_root)
+        arguments = [
+            "--type", "spec",
+            "--title", "Index",
+            "--description", "Reserved filename.",
+            "--derived-from", "CHAT-000001",
+            "--dest", "a/b",
+        ]
+        if json_output:
+            arguments.append("--json")
+        nested = invoke_create(nested_root, *arguments)
+        document_relative = "synthetic/a/b/index-kb-000001.md"
+        nested_index = nested_root / "synthetic/a/b/index.md"
+        created = [
+            document_relative,
+            "synthetic/a/b/index.md",
+            "synthetic/a/index.md",
+        ]
+        assert nested.exit_code == 0
+        assert (nested_root / document_relative).is_file()
+        assert "[Index](index-kb-000001.md)" in nested_index.read_text(
+            encoding="utf-8"
+        )
+        if json_output:
+            assert json.loads(nested.stdout) == {
+                "ok": True,
+                "id": "KB-000001",
+                "path": document_relative,
+                "superseded": None,
+                "created": created,
+                "updated": ["synthetic/index.md"],
+            }
+        else:
+            assert nested.stdout.splitlines() == [
+                *(f"created  {path}" for path in created),
+                "updated  synthetic/index.md",
+                f"created KB-000001 as {document_relative}",
+            ]
 
 
 def test_ac35_new_dest_gets_exact_index_and_updates_synthetic_index_only(
