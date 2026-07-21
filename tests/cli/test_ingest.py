@@ -4,6 +4,7 @@ import errno
 import json
 import os
 import re
+import shutil
 import stat
 from datetime import datetime
 from pathlib import Path
@@ -1117,6 +1118,60 @@ def test_destination_metadata_error_is_exact_before_adapter(
     assert snapshot(initialized_kb) == before
     assert sentinel.read_bytes() == b"target bytes"
     assert source.read_bytes() == source_before
+
+
+@pytest.mark.parametrize(
+    ("raw_class", "class_relative"),
+    [
+        ("source", "raw/sources"),
+        ("chat", "raw/chats"),
+        ("feedback", "raw/feedback"),
+    ],
+)
+def test_missing_required_class_root_is_invalid_before_adapter(
+    raw_class,
+    class_relative,
+    initialized_kb,
+    tmp_path,
+    invoke_ingest,
+    monkeypatch,
+) -> None:
+    source = tmp_path / f"missing-{raw_class}-root.md"
+    source.write_text("source", encoding="utf-8")
+    write_existing(
+        initialized_kb,
+        "synthetic/about.md",
+        "id: KB-000001\ntype: spec\n",
+    )
+    shutil.rmtree(initialized_kb / class_relative)
+    before = snapshot(initialized_kb)
+    import kb.core.ingest as ingest_core
+
+    acquired: list[str | None] = []
+
+    def forbidden_adapter(value: str | None):
+        acquired.append(value)
+        raise AssertionError("missing class root must precede acquisition")
+
+    monkeypatch.setitem(ingest_core.ADAPTERS, "file", forbidden_adapter)
+    arguments = [
+        "--class",
+        raw_class,
+        "--from",
+        "file",
+        str(source),
+    ]
+    if raw_class == "feedback":
+        arguments.extend(["--about", "KB-000001"])
+
+    result = invoke_ingest(initialized_kb, *arguments)
+
+    assert result.exit_code == 2
+    assert isinstance(result.exception, SystemExit)
+    assert "E_INGEST_DEST_INVALID" in result.stderr
+    assert acquired == []
+    assert snapshot(initialized_kb) == before
+    assert not (initialized_kb / class_relative).exists()
 
 
 def test_ac33_feedback_path_ref_stores_canonical_id(initialized_kb, invoke_ingest) -> None:

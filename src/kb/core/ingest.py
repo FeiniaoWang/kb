@@ -234,6 +234,8 @@ def _target_directory(
             try:
                 metadata = current.lstat()
             except FileNotFoundError:
+                if current == class_dir:
+                    raise
                 break
             if stat.S_ISLNK(metadata.st_mode) or (
                 getattr(metadata, "st_file_attributes", 0)
