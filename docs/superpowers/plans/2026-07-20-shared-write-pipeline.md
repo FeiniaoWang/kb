@@ -56,7 +56,16 @@ matches the held identity before returning it. Darwin uses
 `renameat2(..., RENAME_NOREPLACE)`; ordinary rename is never an acceptable
 fallback because it may overwrite an empty late occupant. Unsupported
 platforms fail safely. Failed publication preserves the final occupant and
-identity-checks any private staging cleanup.
+performs no path-based staging deletion: a separate `stat`/`rmdir` pair cannot
+bind deletion to the held descriptor and could delete a replacement.
+
+Failure after staging creation may therefore leave a randomized
+`.kb-born-<high-entropy>` directory as permitted no-rollback partial state.
+The prefix identifies the orphan for operational inspection; it is not hidden
+from normal scan/index semantics. `kb index --check` can surface its missing
+`index.md`, and a steward removes or repairs it only after confirming no live
+write owns it and inspecting its contents. Successful exclusive publication
+renames the staging entry away, leaving no staging pathname.
 
 `apply_write()` keeps returned identities, not descriptors, as local state and
 requires the expected immediate-parent identity for every subsequent
@@ -82,7 +91,8 @@ directory-birth operation on every path.
   directory before atomic exclusive publication, required for all later
   child/index/companion/document births below it, and verified before success;
   no descriptor survives an individual rooted operation and no ordinary rename
-  fallback may overwrite a late occupant.
+  fallback may overwrite a late occupant. Failed staging is never path-deleted
+  after a separate check and remains identifiable partial state when present.
 - Every existing mutation target, existing affected index, and existing `log.md` is inspected before the write boundary and updated using the captured `FileIdentity`.
 - The fixed application order is: missing directories and born indexes root-to-leaf; companions in declared order; citable document; mutations in declared order; nearest pre-existing affected index; log last.
 - Binary ingest represents the byte-identical original as a companion, so the original is created before the Markdown stub.

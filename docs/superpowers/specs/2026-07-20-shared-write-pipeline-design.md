@@ -113,8 +113,20 @@ directory to the final name with a kernel atomic no-replace primitive
 the held identity, and only then returns it. Ordinary rename is forbidden
 because it may overwrite an empty late occupant. A platform without a reliable
 descriptor-relative atomic no-replace publication primitive fails safely; a
-failed publication preserves the late occupant and removes only a staging
-entry whose identity still matches the held directory.
+failed publication preserves the late occupant. It never path-deletes the
+staging name after a separate identity check: no portable directory removal
+primitive binds deletion to the held descriptor, so `stat` followed by
+`rmdir` would recreate the same replacement race.
+
+Consequently a failed operation after staging creation may leave a randomized
+`.kb-born-<high-entropy>` directory as documented no-rollback partial state.
+The prefix identifies it for operational inspection; it is not excluded from
+normal KB traversal or granted a hidden namespace. An owned empty staging
+directory can therefore make the directory invariant fail (`kb index --check`
+reports the missing `index.md`) until a steward, after confirming no concurrent
+write owns it and inspecting its contents/identity, deliberately removes or
+repairs it. Successful exclusive publication renames the staging entry away and
+leaves no staging pathname.
 
 During `apply_write()`, every returned born directory identity is retained as
 immutable local state and is required as the expected immediate-parent
@@ -125,8 +137,8 @@ Every born directory is identity-verified again before success is returned.
 
 Only identities cross individual rooted operations. Parent and staging
 descriptors remain operation-local and are closed before the next pipeline
-effect, including on success, publication failure, verification failure, and
-cleanup failure. A born-directory identity mismatch is a typed write-phase
+effect, including on success, publication failure, and verification failure.
+A born-directory identity mismatch is a typed write-phase
 `WriteFailure`; prior published effects remain as documented because the
 pipeline does not roll back.
 
