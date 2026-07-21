@@ -114,6 +114,23 @@ def test_projected_entries_merge_by_path_key_not_rendered_label(tmp_path) -> Non
     assert rendered.index("(alpha.md)") < rendered.index("(zulu.md)")
 
 
+def test_path_projection_decodes_only_large_child_frontmatter_prefix(tmp_path) -> None:
+    init_kb(tmp_path)
+    directory = tmp_path / "synthetic"
+    prefix = (
+        b"---\nid: KB-000009\ntype: spec\ntitle: Prefix Only\n"
+        b"description: Metadata stays small.\n---\n"
+    )
+    (directory / "large.md").write_bytes(prefix + b"\xff" * (4 * 1024 * 1024))
+
+    rendered = regenerate_directory_index(tmp_path, directory)
+
+    assert (
+        "* [KB-000009][Prefix Only](large.md) - Metadata stays small."
+        in rendered
+    )
+
+
 def test_projected_index_missing_closing_delimiter_raises_value_error() -> None:
     with pytest.raises(ValueError, match="closing frontmatter delimiter"):
         render_projected_directory_index(

@@ -54,6 +54,45 @@ def initialized(tmp_path: Path) -> Path:
     return root
 
 
+def _create_descriptor_relative_deep_tree(root: Path, depth: int) -> Path:
+    directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    descriptor = os.open(root / "synthetic", directory_flags)
+    parts = ["synthetic"]
+    try:
+        for _ in range(depth):
+            os.mkdir("d", dir_fd=descriptor)
+            child = os.open("d", directory_flags, dir_fd=descriptor)
+            os.close(descriptor)
+            descriptor = child
+            parts.append("d")
+            index = os.open(
+                "index.md",
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                0o644,
+                dir_fd=descriptor,
+            )
+            try:
+                os.write(index, b"---\ntype: index\n---\n# Deep\n")
+            finally:
+                os.close(index)
+        document = os.open(
+            "deep.md",
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+            0o644,
+            dir_fd=descriptor,
+        )
+        try:
+            os.write(
+                document,
+                document_bytes("KB-999999", "Deep", "Deep tree document."),
+            )
+        finally:
+            os.close(document)
+    finally:
+        os.close(descriptor)
+    return Path(*parts, "deep.md")
+
+
 def test_load_context_blocks_malformed_documents_without_writes(tmp_path) -> None:
     root = initialized(tmp_path)
     malformed = root / "synthetic/bad.md"
@@ -65,6 +104,34 @@ def test_load_context_blocks_malformed_documents_without_writes(tmp_path) -> Non
 
     assert raised.value.paths == (Path("synthetic/bad.md"),)
     assert {path: path.read_bytes() for path in root.rglob("*") if path.is_file()} == before
+
+
+def test_load_context_traverses_beyond_recursion_limit_without_root_reopen_growth(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    import kb.core.safeio as safeio
+
+    root = initialized(tmp_path)
+    deep_document = _create_descriptor_relative_deep_tree(root, 1_025)
+    root_to_relative_reopens = 0
+    real_open_directory = safeio._RootedReader._open_directory
+
+    def count_root_to_relative_reopen(reader, relative, expected=None):
+        nonlocal root_to_relative_reopens
+        root_to_relative_reopens += 1
+        return real_open_directory(reader, relative, expected)
+
+    monkeypatch.setattr(
+        safeio._RootedReader,
+        "_open_directory",
+        count_root_to_relative_reopen,
+    )
+
+    context = load_write_context(root)
+
+    assert context.kb.by_id["KB-999999"].path == deep_document
+    assert root_to_relative_reopens <= 4
 
 
 def test_prepare_does_not_follow_root_replacement_link(tmp_path) -> None:
@@ -455,6 +522,32 @@ def test_prepare_acquires_full_supersession_bytes_after_lazy_context(
     )
 
     assert prepared.sources["superseded"].content == original
+
+
+def test_prepare_projected_index_decodes_only_large_child_frontmatter_prefix(
+    tmp_path,
+) -> None:
+    root = initialized(tmp_path)
+    prefix = (
+        b"---\nid: KB-000007\ntype: spec\ntitle: Prefix Only\n"
+        b"description: Metadata stays small.\n---\n"
+    )
+    (root / "synthetic/large.md").write_bytes(
+        prefix + b"\xff" * (4 * 1024 * 1024)
+    )
+
+    prepared = prepare_write(
+        load_write_context(root),
+        WriteIntent(
+            birth=DocumentBirth(
+                path=Path("synthetic/planned.md"),
+                content=document_bytes(),
+            ),
+            log_entry=log_entry(),
+        ),
+    )
+
+    assert b"[KB-000007][Prefix Only](large.md)" in prepared._refresh_content
 
 
 def test_prepare_classifies_final_mutation_symlink_as_inspect_failure(tmp_path) -> None:
@@ -1388,6 +1481,7 @@ def test_final_verification_rejects_replaced_born_directory(
     root = initialized(tmp_path)
     born = root / "synthetic/a"
     original = root / "synthetic/a-original"
+    log_before = (root / "log.md").read_bytes()
     real_create_file = pipeline.create_rooted_file_bytes
 
     def replace_after_document(*args, **kwargs):
@@ -1424,6 +1518,7 @@ def test_final_verification_rejects_replaced_born_directory(
     assert list(born.iterdir()) == []
     assert (original / "index.md").is_file()
     assert (original / "planned.md").is_file()
+    assert (root / "log.md").read_bytes() == log_before
 
 
 def test_prepare_rejects_temporary_index_directory_swap_during_snapshot(

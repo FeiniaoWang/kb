@@ -75,6 +75,13 @@ class RootedDirectoryListing:
     entries: tuple[RootedEntry, ...]
 
 
+@dataclass(frozen=True)
+class RootedAcquiredEntry:
+    path: Path
+    kind: Literal["file", "symlink", "other"]
+    content: bytes | None = None
+
+
 class RootedContainmentError(OSError):
     """A rooted operation could no longer prove its acquisition boundary."""
 
@@ -193,6 +200,42 @@ def verify_root(root: Path, expected: FileIdentity) -> None:
     os.close(descriptor)
 
 
+def _list_open_directory(
+    descriptor: int,
+    expected: FileIdentity,
+    relative: Path,
+) -> RootedDirectoryListing:
+    status = os.fstat(descriptor)
+    identity = _identity(status)
+    if not stat.S_ISDIR(status.st_mode):
+        raise OSError(errno.ENOTDIR, "rooted path is not a directory", relative)
+    if identity != expected:
+        raise _stale_error(relative)
+    entries: list[RootedEntry] = []
+    for name in sorted(os.listdir(descriptor)):
+        child_status = os.stat(
+            name,
+            dir_fd=descriptor,
+            follow_symlinks=False,
+        )
+        if stat.S_ISDIR(child_status.st_mode):
+            kind: Literal["directory", "file", "symlink", "other"] = "directory"
+        elif stat.S_ISREG(child_status.st_mode):
+            kind = "file"
+        elif stat.S_ISLNK(child_status.st_mode):
+            kind = "symlink"
+        else:
+            kind = "other"
+        entries.append(
+            RootedEntry(
+                name=name,
+                kind=kind,
+                identity=_identity(child_status),
+            )
+        )
+    return RootedDirectoryListing(identity=identity, entries=tuple(entries))
+
+
 class _RootedReader:
     def __init__(
         self,
@@ -273,6 +316,154 @@ class _RootedReader:
         os.close(verification)
         self.verify_root()
         return RootedDirectoryListing(identity=identity, entries=tuple(entries))
+
+    def acquire_tree_files(
+        self,
+        *,
+        suffix: str,
+        acquire: Callable[[BinaryIO], bytes],
+    ) -> tuple[RootedAcquiredEntry, ...]:
+        """Acquire matching files with iterative, descriptor-relative DFS."""
+        self.verify_root()
+        descriptor = os.dup(self._descriptor)
+        parts: tuple[str, ...] = ()
+        expected = self.identity
+        frames: list[
+            tuple[
+                tuple[str, ...],
+                FileIdentity,
+                tuple[RootedEntry, ...],
+                int,
+                RootedEntry,
+            ]
+        ] = []
+        acquired: list[RootedAcquiredEntry] = []
+        try:
+            listing = _list_open_directory(descriptor, expected, Path())
+            entries = listing.entries
+            offset = 0
+            while True:
+                self.verify_root()
+                if offset < len(entries):
+                    entry = entries[offset]
+                    offset += 1
+                    if entry.kind == "directory":
+                        child = os.open(
+                            entry.name,
+                            _directory_flags(),
+                            dir_fd=descriptor,
+                        )
+                        try:
+                            child_parts = (*parts, entry.name)
+                            child_listing = _list_open_directory(
+                                child,
+                                entry.identity,
+                                Path(*child_parts),
+                            )
+                        except BaseException:
+                            os.close(child)
+                            raise
+                        frames.append(
+                            (
+                                parts,
+                                listing.identity,
+                                entries,
+                                offset,
+                                entry,
+                            )
+                        )
+                        os.close(descriptor)
+                        descriptor = child
+                        parts = child_parts
+                        expected = entry.identity
+                        listing = child_listing
+                        entries = listing.entries
+                        offset = 0
+                        continue
+                    if not entry.name.endswith(suffix):
+                        continue
+                    relative = Path(*parts, entry.name)
+                    if entry.kind != "file":
+                        acquired.append(
+                            RootedAcquiredEntry(
+                                path=relative,
+                                kind=entry.kind,
+                            )
+                        )
+                        continue
+                    file_descriptor = os.open(
+                        entry.name,
+                        os.O_RDONLY | os.O_NOFOLLOW,
+                        dir_fd=descriptor,
+                    )
+                    try:
+                        status = os.fstat(file_descriptor)
+                        if not stat.S_ISREG(status.st_mode):
+                            raise OSError(
+                                errno.EINVAL,
+                                "rooted path is not a regular file",
+                                relative,
+                            )
+                        if _identity(status) != entry.identity:
+                            raise _stale_error(relative)
+                        with os.fdopen(os.dup(file_descriptor), "rb") as stream:
+                            content = acquire(stream)
+                    finally:
+                        os.close(file_descriptor)
+                    if _identity(os.fstat(descriptor)) != listing.identity:
+                        raise _stale_error(Path(*parts))
+                    acquired.append(
+                        RootedAcquiredEntry(
+                            path=relative,
+                            kind="file",
+                            content=content,
+                        )
+                    )
+                    continue
+                if _identity(os.fstat(descriptor)) != expected:
+                    raise _stale_error(Path(*parts))
+                if not frames:
+                    break
+                (
+                    parent_parts,
+                    parent_identity,
+                    parent_entries,
+                    parent_offset,
+                    entered_child,
+                ) = frames.pop()
+                parent = os.open("..", _directory_flags(), dir_fd=descriptor)
+                try:
+                    if _identity(os.fstat(parent)) != parent_identity:
+                        raise _stale_error(Path(*parent_parts))
+                    child_status = os.stat(
+                        entered_child.name,
+                        dir_fd=parent,
+                        follow_symlinks=False,
+                    )
+                    if (
+                        not stat.S_ISDIR(child_status.st_mode)
+                        or _identity(child_status) != entered_child.identity
+                    ):
+                        raise _stale_error(
+                            Path(*parent_parts, entered_child.name)
+                        )
+                except BaseException:
+                    os.close(parent)
+                    raise
+                os.close(descriptor)
+                descriptor = parent
+                parts = parent_parts
+                expected = parent_identity
+                listing = RootedDirectoryListing(
+                    identity=parent_identity,
+                    entries=parent_entries,
+                )
+                entries = parent_entries
+                offset = parent_offset
+            self.verify_root()
+            return tuple(acquired)
+        finally:
+            os.close(descriptor)
 
     def read_file(
         self,

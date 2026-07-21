@@ -214,39 +214,29 @@ def load_write_context(kb_root: Path | None) -> WriteContext:
 def _snapshot_markdown_prefixes(reader: _RootedReader) -> dict[Path, bytes]:
     files: dict[Path, bytes] = {}
     unsafe: list[tuple[int, str, Path]] = []
-
-    def visit(directory: Path, expected: FileIdentity) -> None:
-        listing = reader.list_directory(directory, expected)
-        for entry in listing.entries:
-            relative = directory / entry.name
-            if entry.kind == "directory":
-                visit(relative, entry.identity)
-            elif entry.kind == "file" and relative.suffix == ".md":
-                files[relative] = reader.read_file(
-                    relative,
-                    expected=entry.identity,
-                    parent_expected=listing.identity,
-                    acquire=read_frontmatter_prefix,
+    for entry in reader.acquire_tree_files(
+        suffix=".md",
+        acquire=read_frontmatter_prefix,
+    ):
+        if entry.kind == "file":
+            assert entry.content is not None
+            files[entry.path] = entry.content
+        elif entry.kind == "symlink":
+            unsafe.append(
+                (
+                    getattr(errno, "ELOOP", errno.EINVAL),
+                    "Markdown scan path must not be a symlink or junction",
+                    entry.path,
                 )
-            elif entry.kind == "symlink" and relative.suffix == ".md":
-                unsafe.append(
-                    (
-                        getattr(errno, "ELOOP", errno.EINVAL),
-                        "Markdown scan path must not be a symlink or junction",
-                        relative,
-                    )
+            )
+        else:
+            unsafe.append(
+                (
+                    errno.EINVAL,
+                    "Markdown scan path is not a regular file",
+                    entry.path,
                 )
-            elif entry.kind == "other" and relative.suffix == ".md":
-                unsafe.append(
-                    (
-                        errno.EINVAL,
-                        "Markdown scan path is not a regular file",
-                        relative,
-                    )
-                )
-        reader.list_directory(directory, listing.identity)
-
-    visit(Path(), reader.identity)
+            )
     if unsafe:
         error_number, message, path = unsafe[0]
         raise _MarkdownSnapshotError(
@@ -445,6 +435,7 @@ def _rooted_index_snapshot(
                     relative,
                     expected=entry.identity,
                     parent_expected=listing.identity,
+                    acquire=read_frontmatter_prefix,
                 )
                 files.append(file_listing_metadata(entry.name, content))
         reader.list_directory(directory, listing.identity)
@@ -834,6 +825,22 @@ def apply_write(
                 prepared._refresh_index,
                 error,
             ) from error
+        for directory, identity in born_identities.items():
+            try:
+                inspect_rooted_directory(
+                    root,
+                    directory,
+                    root_identity,
+                    expected=identity,
+                )
+            except OSError as error:
+                raise WriteFailure(
+                    "write",
+                    "inspect",
+                    "directory",
+                    directory,
+                    error,
+                ) from error
         try:
             if prepared._log_identity is None:
                 create_rooted_file_bytes(
@@ -861,22 +868,6 @@ def apply_write(
             raise WriteFailure(
                 "write", "append", "log", Path("log.md"), error
             ) from error
-        for directory, identity in born_identities.items():
-            try:
-                inspect_rooted_directory(
-                    root,
-                    directory,
-                    root_identity,
-                    expected=identity,
-                )
-            except OSError as error:
-                raise WriteFailure(
-                    "write",
-                    "inspect",
-                    "directory",
-                    directory,
-                    error,
-                ) from error
     except WriteFailure:
         raise
     except OSError as error:
