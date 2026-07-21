@@ -331,7 +331,7 @@ def test_ac14_file_stem_derives_slug_and_title(
 
 
 def test_ac15_collision_suffixes_without_overwrite(
-    initialized_kb, tmp_path, invoke_ingest
+    initialized_kb, tmp_path, invoke_ingest, monkeypatch
 ) -> None:
     existing = write_existing(
         initialized_kb,
@@ -393,6 +393,51 @@ def test_ac15_collision_suffixes_without_overwrite(
                 "updated  raw/sources/index.md",
                 f"ingested RAW-000001 as {document_relative}",
             ]
+
+    import kb.core.ingest as ingest_core
+
+    real_prepare = ingest_core.prepare_write
+    prepared_births: list[Path] = []
+
+    def record_birth(context, intent):
+        prepared_births.append(intent.birth.path)
+        return real_prepare(context, intent)
+
+    monkeypatch.setattr(ingest_core, "prepare_write", record_birth)
+    source_before = index_source.read_bytes()
+    for json_output in (False, True):
+        damaged_root = tmp_path / f"damaged-ingest-{'json' if json_output else 'text'}"
+        assert (
+            CliRunner().invoke(app, ["init", "--root", str(damaged_root)]).exit_code
+            == 0
+        )
+        damaged = damaged_root / "raw/sources/damaged"
+        damaged.mkdir()
+        before_damaged = snapshot(damaged_root)
+        arguments = ["--dest", "damaged"]
+        if json_output:
+            arguments.append("--json")
+
+        result = ingest_file(
+            invoke_ingest,
+            damaged_root,
+            index_source,
+            *arguments,
+        )
+
+        assert result.exit_code == 2
+        assert isinstance(result.exception, SystemExit)
+        if json_output:
+            assert json.loads(result.stdout)["error"]["code"] == "E_INGEST_IO"
+            assert result.stderr == ""
+        else:
+            assert "E_INGEST_IO" in result.stderr
+            assert result.stdout == ""
+        assert prepared_births[-1] == Path(
+            "raw/sources/damaged/index-raw-000001.md"
+        )
+        assert snapshot(damaged_root) == before_damaged
+        assert index_source.read_bytes() == source_before
 
 
 def test_ac16_empty_slug_falls_back_to_lowercase_id(
@@ -848,7 +893,17 @@ def test_ac32_unsafe_or_escaping_dest_is_rejected_without_writes(
 ) -> None:
     source = tmp_path / "doc.md"
     source.write_text("doc", encoding="utf-8")
+    source_before = source.read_bytes()
     before = snapshot(initialized_kb)
+    import kb.core.ingest as ingest_core
+
+    acquired: list[str | None] = []
+
+    def forbidden_adapter(value: str | None):
+        acquired.append(value)
+        raise AssertionError("destination validation must precede acquisition")
+
+    monkeypatch.setitem(ingest_core.ADAPTERS, "file", forbidden_adapter)
     invalid_values = [
         "/abs",
         "../escape",
@@ -866,10 +921,83 @@ def test_ac32_unsafe_or_escaping_dest_is_rejected_without_writes(
         assert value in result.stderr
         assert snapshot(initialized_kb) == before
 
+    in_class_target = initialized_kb / "raw/sources/in-class-target"
+    in_class_target.mkdir()
+    (in_class_target / "index.md").write_text(
+        "---\ntype: index\ndescription: In-class target.\n---\n# target\n",
+        encoding="utf-8",
+    )
+    sentinel = in_class_target / "sentinel.bin"
+    sentinel.write_bytes(b"target bytes")
+    linked = initialized_kb / "raw/sources/linked"
+    try:
+        linked.symlink_to(in_class_target, target_is_directory=True)
+    except (NotImplementedError, OSError) as error:
+        pytest.skip(f"symlinks unsupported: {error}")
+    link_text = os.readlink(linked)
+    before_links = snapshot(initialized_kb)
+    for value in ("linked", "linked/child"):
+        for json_output in (False, True):
+            arguments = ["--dest", value]
+            if json_output:
+                arguments.append("--json")
+            result = ingest_file(
+                invoke_ingest,
+                initialized_kb,
+                source,
+                *arguments,
+            )
+            assert result.exit_code == 2
+            assert isinstance(result.exception, SystemExit)
+            if json_output:
+                error = json.loads(result.stdout)["error"]
+                assert error["code"] == "E_INGEST_DEST_INVALID"
+                assert value in error["message"]
+                assert result.stderr == ""
+            else:
+                assert "E_INGEST_DEST_INVALID" in result.stderr
+                assert value in result.stderr
+                assert result.stdout == ""
+            assert snapshot(initialized_kb) == before_links
+            assert linked.is_symlink() and os.readlink(linked) == link_text
+            assert sentinel.read_bytes() == b"target bytes"
+            assert source.read_bytes() == source_before
+
+    junction = initialized_kb / "raw/sources/junction"
+    junction.mkdir()
+    (junction / "index.md").write_text(
+        "---\ntype: index\ndescription: Junction target.\n---\n# junction\n",
+        encoding="utf-8",
+    )
+    before_junction = snapshot(initialized_kb)
+    real_is_junction = getattr(Path, "is_junction", None)
+
+    def simulated_is_junction(path: Path) -> bool:
+        if path == junction:
+            return True
+        return bool(real_is_junction is not None and real_is_junction(path))
+
+    monkeypatch.setattr(Path, "is_junction", simulated_is_junction, raising=False)
+    for value in ("junction", "junction/child"):
+        result = ingest_file(
+            invoke_ingest,
+            initialized_kb,
+            source,
+            "--dest",
+            value,
+        )
+        assert result.exit_code == 2
+        assert isinstance(result.exception, SystemExit)
+        assert "E_INGEST_DEST_INVALID" in result.stderr
+        assert value in result.stderr
+        assert snapshot(initialized_kb) == before_junction
+        assert source.read_bytes() == source_before
+
     class_dir = initialized_kb / "raw/sources"
-    target_dir = class_dir / "linked"
+    target_dir = class_dir / "escaping"
     outside = tmp_path / "outside"
     real_resolve = Path.resolve
+    before_escape = snapshot(initialized_kb)
 
     def escaping_resolve(path: Path, *args, **kwargs) -> Path:
         if path == class_dir:
@@ -879,10 +1007,67 @@ def test_ac32_unsafe_or_escaping_dest_is_rejected_without_writes(
         return real_resolve(path, *args, **kwargs)
 
     monkeypatch.setattr(Path, "resolve", escaping_resolve)
-    result = ingest_file(invoke_ingest, initialized_kb, source, "--dest", "linked")
+    result = ingest_file(invoke_ingest, initialized_kb, source, "--dest", "escaping")
     assert result.exit_code == 2
     assert "E_INGEST_DEST_INVALID" in result.stderr
-    assert "linked" in result.stderr
+    assert "escaping" in result.stderr
+    assert snapshot(initialized_kb) == before_escape
+    assert acquired == []
+
+
+def test_destination_preflight_preserves_context_and_surface_validation_order(
+    initialized_kb, tmp_path, invoke_ingest
+) -> None:
+    from kb.cli.app import app
+    from typer.testing import CliRunner
+
+    source = tmp_path / "ordering-source.md"
+    source.write_text("source", encoding="utf-8")
+    malformed_root = tmp_path / "malformed-ordering-kb"
+    assert (
+        CliRunner().invoke(app, ["init", "--root", str(malformed_root)]).exit_code
+        == 0
+    )
+    write_existing(malformed_root, "synthetic/broken.md", "id: [\ntype: spec\n")
+    malformed_before = snapshot(malformed_root)
+
+    malformed = ingest_file(
+        invoke_ingest,
+        malformed_root,
+        source,
+        "--dest",
+        "../escape",
+    )
+
+    assert malformed.exit_code == 2
+    assert "E_INGEST_MALFORMED" in malformed.stderr
+    assert "E_INGEST_DEST_INVALID" not in malformed.stderr
+    assert snapshot(malformed_root) == malformed_before
+
+    target = initialized_kb / "raw/feedback/in-class-target"
+    target.mkdir()
+    linked = initialized_kb / "raw/feedback/linked"
+    try:
+        linked.symlink_to(target, target_is_directory=True)
+    except (NotImplementedError, OSError) as error:
+        pytest.skip(f"symlinks unsupported: {error}")
+    before = snapshot(initialized_kb)
+
+    usage = invoke_ingest(
+        initialized_kb,
+        "--class",
+        "feedback",
+        "--from",
+        "file",
+        str(source),
+        "--dest",
+        "linked",
+    )
+
+    assert usage.exit_code == 2
+    assert "E_INGEST_USAGE" in usage.stderr
+    assert "--about is required" in usage.stderr
+    assert "E_INGEST_DEST_INVALID" not in usage.stderr
     assert snapshot(initialized_kb) == before
 
 

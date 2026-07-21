@@ -217,6 +217,13 @@ def _destination_parts(value: str | None) -> tuple[str, ...]:
     return candidate.parts
 
 
+def _is_link_or_junction(path: Path) -> bool:
+    if path.is_symlink():
+        return True
+    is_junction = getattr(path, "is_junction", None)
+    return bool(is_junction is not None and is_junction())
+
+
 def _target_directory(
     root: Path,
     raw_class: RawClass,
@@ -226,6 +233,16 @@ def _target_directory(
     class_dir = root / CLASS_DIR[raw_class]
     target_dir = class_dir.joinpath(*destination_parts)
     try:
+        current = class_dir
+        for part in (None, *destination_parts):
+            if part is not None:
+                current /= part
+            if _is_link_or_junction(current):
+                raise OSError("destination contains a symlink or junction")
+            if current.exists() and not current.is_dir():
+                raise OSError("destination component is not a directory")
+            if not current.exists():
+                break
         resolved_class_dir = class_dir.resolve(strict=True)
         resolved_target_dir = target_dir.resolve(strict=False)
     except (OSError, RuntimeError) as error:
@@ -343,9 +360,7 @@ def ingest(request: IngestRequest) -> IngestResult:
     if original_bytes is not None and payload.source_filename is not None:
         extension = Path(payload.source_filename).suffix.lower()
     document_path = target_dir / f"{stem}.md"
-    implicit_index_path = (
-        target_dir / "index.md" if not target_dir.exists() else None
-    )
+    implicit_index_path = target_dir / "index.md"
     original_path = (
         _non_text_original_path(target_dir, stem, extension)
         if original_bytes is not None

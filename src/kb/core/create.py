@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import errno
 import re
 import sys
 from pathlib import Path, PurePosixPath
@@ -19,7 +18,7 @@ from kb.core.model import (
     Document,
     SyntheticFrontmatter,
 )
-from kb.core.scan import KB, RootDiscoveryError, resolve_ref
+from kb.core.scan import ID_REF_PATTERN, KB, RootDiscoveryError, resolve_ref
 from kb.core.write_pipeline import (
     AllocationBlocked,
     DocumentBirth,
@@ -226,6 +225,27 @@ def _resolve_supersedes(kb: KB, ref: str | None) -> Document | None:
     return document
 
 
+def _unsafe_path_is_supersedes_target(
+    error: WriteFailure,
+    ref: str | None,
+) -> bool:
+    if ref is None or error.snapshot_kb is None:
+        return False
+    if ID_REF_PATTERN.fullmatch(ref):
+        document = resolve_ref(error.snapshot_kb, ref)
+        return document is not None and document.path == error.path
+    candidate = PurePosixPath(ref)
+    if (
+        candidate.is_absolute()
+        or "\\" in ref
+        or any(part in {".", ".."} for part in candidate.parts)
+    ):
+        return False
+    if candidate.suffix != ".md":
+        candidate = PurePosixPath(f"{candidate}.md")
+    return Path(*candidate.parts) == error.path
+
+
 def create(request: CreateRequest) -> CreateResult:
     try:
         context = load_write_context(request.kb_root)
@@ -234,12 +254,7 @@ def create(request: CreateRequest) -> CreateResult:
     except ConfigLoadError as error:
         raise CreateFailure(error.code, error.message, 2) from error
     except WriteFailure as error:
-        if (
-            request.supersedes is not None
-            and error.cause.errno == getattr(errno, "ELOOP", errno.EINVAL)
-            and error.snapshot_kb is not None
-            and resolve_ref(error.snapshot_kb, request.supersedes) is None
-        ):
+        if _unsafe_path_is_supersedes_target(error, request.supersedes):
             raise CreateFailure(
                 "E_CREATE_SUPERSEDES_INVALID",
                 f"supersedes target cannot be updated safely: "
@@ -257,7 +272,7 @@ def create(request: CreateRequest) -> CreateResult:
     root = context.root
     config = context.config
     kb = context.kb
-    target_dir, missing_directories = _target_directory(root, request.dest)
+    target_dir, _ = _target_directory(root, request.dest)
     tags = _stable_unique(request.tags)
     warnings = _warnings(config, request, tags)
     body = _body(request)
@@ -269,7 +284,7 @@ def create(request: CreateRequest) -> CreateResult:
     doc_id = next_id(kb, config.id_prefixes["synthetic"]).format()
     stem = slug(request.title, doc_id)
     path = target_dir / f"{stem}.md"
-    implicit_index_path = target_dir / "index.md" if missing_directories else None
+    implicit_index_path = target_dir / "index.md"
     superseded_path = (
         root / superseded_document.path if superseded_document is not None else None
     )

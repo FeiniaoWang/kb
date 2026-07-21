@@ -2,6 +2,8 @@ import ast
 from importlib.util import resolve_name
 from pathlib import Path
 
+import pytest
+
 
 COMMAND_MODULES = ("src/kb/core/create.py", "src/kb/core/ingest.py")
 HOUSEKEEPING_INDEXING_PERSISTENCE = {
@@ -233,6 +235,211 @@ def qualified_called_names(text: str) -> set[str]:
     }
 
 
+PATH_MUTATORS = {
+    "chmod",
+    "hardlink_to",
+    "mkdir",
+    "rename",
+    "replace",
+    "rmdir",
+    "symlink_to",
+    "touch",
+    "unlink",
+    "write_bytes",
+    "write_text",
+}
+FILE_MUTATORS = {"truncate", "write", "writelines"}
+OS_MUTATORS = {
+    "chmod",
+    "fchmod",
+    "fdopen",
+    "link",
+    "makedirs",
+    "mkdir",
+    "open",
+    "remove",
+    "removedirs",
+    "rename",
+    "renames",
+    "replace",
+    "rmdir",
+    "symlink",
+    "truncate",
+    "unlink",
+    "write",
+}
+SHUTIL_MUTATORS = {
+    "chown",
+    "copy",
+    "copy2",
+    "copyfile",
+    "copymode",
+    "copystat",
+    "copytree",
+    "move",
+    "rmtree",
+}
+READ_ONLY_OPEN_MODES = {"r", "rb", "rt"}
+
+
+def filesystem_write_violations(text: str) -> set[str]:
+    tree = parsed(text)
+    origins: dict[str, str] = {"open": "builtins.open"}
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                bound = alias.asname or alias.name.split(".", 1)[0]
+                origins[bound] = alias.name if alias.asname else bound
+        elif isinstance(node, ast.ImportFrom) and node.module is not None:
+            module = resolved_import_from_module(node)
+            for alias in node.names:
+                if alias.name != "*":
+                    origins[alias.asname or alias.name] = f"{module}.{alias.name}"
+
+    def expression_origin(node: ast.expr | None) -> str | None:
+        if node is None:
+            return None
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            return "Scalar"
+        if isinstance(node, ast.JoinedStr):
+            return "Scalar"
+        if isinstance(node, ast.Name):
+            return origins.get(node.id, node.id)
+        if isinstance(node, ast.Attribute):
+            base = expression_origin(node.value)
+            if base == "PathInstance" and node.attr in {
+                "anchor",
+                "drive",
+                "name",
+                "stem",
+                "suffix",
+            }:
+                return "Scalar"
+            return None if base is None else f"{base}.{node.attr}"
+        if isinstance(node, ast.Call):
+            called = expression_origin(node.func)
+            if called == "pathlib.Path":
+                return "PathInstance"
+            if called is not None and called.startswith("PathInstance."):
+                if called.rsplit(".", 1)[-1] in {
+                    "absolute",
+                    "expanduser",
+                    "resolve",
+                    "with_name",
+                    "with_suffix",
+                }:
+                    return "PathInstance"
+            if called in {"builtins.open", "io.open"}:
+                return "FileObject"
+            if called is not None and called.rsplit(".", 1)[-1] in {
+                "decode",
+                "lower",
+                "lstrip",
+                "replace",
+                "rstrip",
+                "strip",
+                "upper",
+            }:
+                return "Scalar"
+            return None
+        if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div):
+            if expression_origin(node.left) == "PathInstance":
+                return "PathInstance"
+        return None
+
+    def bind(target: ast.expr, origin: str | None) -> bool:
+        if origin is None or not isinstance(target, ast.Name):
+            return False
+        if origins.get(target.id) == origin:
+            return False
+        origins[target.id] = origin
+        return True
+
+    assignments = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, (ast.Assign, ast.AnnAssign))
+    ]
+    for _ in range(len(assignments) + 1):
+        changed = False
+        for node in assignments:
+            if isinstance(node, ast.Assign):
+                origin = expression_origin(node.value)
+                changed |= any(bind(target, origin) for target in node.targets)
+            else:
+                origin = expression_origin(node.value)
+                if origin is None and expression_origin(node.annotation) == "pathlib.Path":
+                    origin = "PathInstance"
+                changed |= bind(node.target, origin)
+        if not changed:
+            break
+
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        for argument in (*node.args.posonlyargs, *node.args.args, *node.args.kwonlyargs):
+            if expression_origin(argument.annotation) == "pathlib.Path":
+                origins[argument.arg] = "PathInstance"
+
+    def open_mode(
+        node: ast.Call,
+        qualified: str,
+        label: str,
+    ) -> ast.expr | None:
+        for keyword in node.keywords:
+            if keyword.arg == "mode":
+                return keyword.value
+        position = (
+            1
+            if label == "Path.open" and qualified == "pathlib.Path.open"
+            else 0 if label == "Path.open" else 1
+        )
+        return node.args[position] if len(node.args) > position else None
+
+    violations: set[str] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        qualified = expression_origin(node.func) or ""
+        attribute = qualified.rsplit(".", 1)[-1]
+
+        if qualified.startswith("os.") and attribute in OS_MUTATORS:
+            violations.add(f"os.{attribute}")
+            continue
+        if qualified.startswith("shutil.") and attribute in SHUTIL_MUTATORS:
+            violations.add(f"shutil.{attribute}")
+            continue
+        if attribute in FILE_MUTATORS:
+            violations.add(f"file.{attribute}")
+            continue
+        if attribute in PATH_MUTATORS and not (
+            attribute == "replace" and qualified.startswith("Scalar.")
+        ):
+            violations.add(f"Path.{attribute}")
+            continue
+
+        open_label: str | None = None
+        if qualified == "builtins.open":
+            open_label = "builtins.open"
+        elif qualified == "io.open":
+            open_label = "io.open"
+        elif attribute == "open":
+            open_label = "Path.open"
+        if open_label is None:
+            continue
+        mode = open_mode(node, qualified, open_label)
+        if mode is None:
+            continue
+        if not (
+            isinstance(mode, ast.Constant)
+            and isinstance(mode.value, str)
+            and mode.value in READ_ONLY_OPEN_MODES
+        ):
+            violations.add(open_label)
+    return violations
+
+
 def function_definitions(text: str) -> list[str]:
     return [
         node.name
@@ -392,6 +599,136 @@ naming.slug("Title", "fallback")
     assert "kb.core.naming.slug" in qualified_called_names(text)
 
 
+def test_direct_write_gate_allows_current_read_only_external_acquisition() -> None:
+    text = """
+import io
+from pathlib import Path
+
+Path("source.md").read_bytes()
+Path("source.md").read_text(encoding="utf-8")
+open("source.md")
+open("source.md", "rb")
+io.open("source.md", mode="rt")
+Path("source.md").open()
+Path("source.md").open("r")
+Path("source.md").open(mode="rb")
+Path.open(Path("source.md"), "rt")
+reader = Path.open
+reader(Path("source.md"), "rb")
+value = "old"
+value.replace("old", "new")
+model.model_dump()
+LogEntry(action="created")
+"""
+
+    assert filesystem_write_violations(text) == set()
+
+
+def test_direct_write_gate_detects_mutating_path_methods_through_aliases() -> None:
+    text = """
+from pathlib import Path as P
+
+target: P = P("target.md")
+target.write_text("content")
+target.mkdir()
+target.replace(P("replacement.md"))
+P("mode.md").chmod(0o600)
+"""
+
+    assert {
+        "Path.write_text",
+        "Path.mkdir",
+        "Path.replace",
+        "Path.chmod",
+    } <= filesystem_write_violations(text)
+
+
+def test_direct_write_gate_treats_unproven_replace_as_path_mutation() -> None:
+    text = """
+target = request.kb_root / "target.md"
+target.replace(request.kb_root / "replacement.md")
+"""
+
+    assert "Path.replace" in filesystem_write_violations(text)
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ('open("target", "w")', "builtins.open"),
+        (
+            "from builtins import open as acquire\n"
+            "mode = choose_mode()\n"
+            'acquire("target", mode)',
+            "builtins.open",
+        ),
+        (
+            "import io as streams\n"
+            'streams.open("target", "a")',
+            "io.open",
+        ),
+        (
+            "from pathlib import Path as P\n"
+            'P("target").open("r+")',
+            "Path.open",
+        ),
+        (
+            "from pathlib import Path\n"
+            "mode = choose_mode()\n"
+            'Path("target").open(mode=mode)',
+            "Path.open",
+        ),
+        (
+            "from pathlib import Path as P\n"
+            'P.open(P("target"), "w")',
+            "Path.open",
+        ),
+    ],
+)
+def test_direct_write_gate_rejects_write_capable_or_dynamic_open_modes(
+    text: str,
+    expected: str,
+) -> None:
+    assert expected in filesystem_write_violations(text)
+
+
+def test_direct_write_gate_detects_low_level_and_shutil_mutators() -> None:
+    text = """
+import os as operating
+from os import remove as erase
+import shutil as transfers
+from shutil import move as relocate
+
+operating.open("target", flags)
+operating.rename("before", "after")
+erase("target")
+transfers.copy2("source", "target")
+relocate("source", "target")
+"""
+
+    assert {
+        "os.open",
+        "os.rename",
+        "os.remove",
+        "shutil.copy2",
+        "shutil.move",
+    } <= filesystem_write_violations(text)
+
+
+def test_direct_write_gate_detects_file_object_mutation_calls() -> None:
+    text = """
+stream.write(content)
+stream.writelines(lines)
+stream.truncate(0)
+"""
+
+    assert {
+        "file.write",
+        "file.writelines",
+        "file.truncate",
+    } <= filesystem_write_violations(text)
+
+
 def test_create_consumes_shared_write_pipeline() -> None:
     assert "kb.core.write_pipeline" in imported_modules(source(COMMAND_MODULES[0]))
 
@@ -413,6 +750,7 @@ def test_create_and_ingest_do_not_own_persistence_primitives() -> None:
             text,
             WRITE_PIPELINE_IMPORT_ALLOWLISTS[path],
         )
+        assert not filesystem_write_violations(text)
 
 
 def test_slug_has_one_definition_and_both_commands_import_it() -> None:

@@ -683,7 +683,7 @@ def test_ac33_empty_slug_uses_lowercase_id_filename(
 
 
 def test_ac34_collision_suffixes_id_without_overwriting_existing_file(
-    initialized_kb, tmp_path, invoke_create
+    initialized_kb, tmp_path, invoke_create, monkeypatch
 ) -> None:
     add_chat(initialized_kb)
     existing = add_synthetic(initialized_kb, relative="synthetic/notes.md")
@@ -744,6 +744,51 @@ def test_ac34_collision_suffixes_id_without_overwriting_existing_file(
                 "updated  synthetic/index.md",
                 f"created KB-000001 as {document_relative}",
             ]
+
+    import kb.core.create as create_core
+
+    real_prepare = create_core.prepare_write
+    prepared_births: list[Path] = []
+
+    def record_birth(context, intent):
+        prepared_births.append(intent.birth.path)
+        return real_prepare(context, intent)
+
+    monkeypatch.setattr(create_core, "prepare_write", record_birth)
+    for json_output in (False, True):
+        damaged_root = tmp_path / f"damaged-create-{'json' if json_output else 'text'}"
+        assert (
+            CliRunner().invoke(app, ["init", "--root", str(damaged_root)]).exit_code
+            == 0
+        )
+        add_chat(damaged_root)
+        damaged = damaged_root / "synthetic/damaged"
+        damaged.mkdir()
+        before_damaged = snapshot(damaged_root)
+        arguments = [
+            "--type", "spec",
+            "--title", "Index",
+            "--description", "Reserved filename.",
+            "--derived-from", "CHAT-000001",
+            "--dest", "damaged",
+        ]
+        if json_output:
+            arguments.append("--json")
+
+        result = invoke_create(damaged_root, *arguments)
+
+        assert result.exit_code == 2
+        assert isinstance(result.exception, SystemExit)
+        if json_output:
+            assert json.loads(result.stdout)["error"]["code"] == "E_CREATE_IO"
+            assert result.stderr == ""
+        else:
+            assert "E_CREATE_IO" in result.stderr
+            assert result.stdout == ""
+        assert prepared_births[-1] == Path(
+            "synthetic/damaged/index-kb-000001.md"
+        )
+        assert snapshot(damaged_root) == before_damaged
 
 
 def test_ac35_new_dest_gets_exact_index_and_updates_synthetic_index_only(
@@ -1582,13 +1627,64 @@ def test_symlinked_supersession_target_outside_is_invalid_without_writes(
     outside_before = snapshot(outside)
     link_target = os.readlink(target)
 
-    result = supersede(invoke_create, initialized_kb)
+    result = invoke_create(
+        initialized_kb,
+        "--type", "spec",
+        "--title", "Replacement",
+        "--description", "Replacement.",
+        "--supersedes", "synthetic/old.md",
+    )
 
     assert result.exit_code == 1
     assert "E_CREATE_SUPERSEDES_INVALID" in result.stderr
     assert snapshot(initialized_kb) == kb_before
     assert snapshot(outside) == outside_before
     assert target.is_symlink() and os.readlink(target) == link_target
+
+
+@pytest.mark.parametrize("json_output", [False, True], ids=["text", "json"])
+def test_unknown_supersedes_id_with_unrelated_unsafe_markdown_is_generic_io(
+    json_output, tmp_path, initialized_kb, invoke_create
+) -> None:
+    add_chat(initialized_kb)
+    outside = tmp_path / "outside-unknown-supersedes"
+    external = add_synthetic(
+        outside,
+        relative="external.md",
+        doc_id="KB-900001",
+    )
+    unrelated = initialized_kb / "synthetic/unrelated.md"
+    try:
+        unrelated.symlink_to(external)
+    except (NotImplementedError, OSError) as error:
+        pytest.skip(f"symlinks unsupported: {error}")
+    kb_before = snapshot(initialized_kb)
+    outside_before = snapshot(outside)
+    arguments = [
+        "--type", "spec",
+        "--title", "Replacement",
+        "--description", "Replacement.",
+        "--supersedes", "KB-999999",
+    ]
+    if json_output:
+        arguments.append("--json")
+
+    result = invoke_create(initialized_kb, *arguments)
+
+    assert result.exit_code == 2
+    assert isinstance(result.exception, SystemExit)
+    if json_output:
+        error = json.loads(result.stdout)["error"]
+        assert error["code"] == "E_CREATE_IO"
+        assert "supersedes target" not in error["message"]
+        assert result.stderr == ""
+    else:
+        assert "E_CREATE_IO" in result.stderr
+        assert "E_CREATE_SUPERSEDES_INVALID" not in result.stderr
+        assert "supersedes target" not in result.stderr
+        assert result.stdout == ""
+    assert snapshot(initialized_kb) == kb_before
+    assert snapshot(outside) == outside_before
 
 
 def test_regular_supersession_with_unrelated_markdown_symlink_maps_to_create_io(
