@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 from collections.abc import Iterable, Mapping
 from pathlib import Path, PurePosixPath
-from typing import Any
+from typing import Any, BinaryIO
 
 import yaml
 from pydantic import BaseModel, Field
@@ -85,8 +85,24 @@ def read_frontmatter_bytes(content: bytes) -> Frontmatter:
     return Frontmatter.model_validate(parsed)
 
 
+def read_frontmatter_prefix(stream: BinaryIO) -> bytes:
+    prefix = bytearray()
+    first = stream.readline()
+    prefix.extend(first)
+    if first.rstrip(b"\r\n") != b"---":
+        return bytes(prefix)
+    while True:
+        line = stream.readline()
+        if not line:
+            return bytes(prefix)
+        prefix.extend(line)
+        if line.rstrip(b"\r\n") == b"---":
+            return bytes(prefix)
+
+
 def read_frontmatter(path: Path) -> Frontmatter:
-    return read_frontmatter_bytes(path.read_bytes())
+    with path.open("rb") as stream:
+        return read_frontmatter_bytes(read_frontmatter_prefix(stream))
 
 
 def doc_class_from_type(type_name: str) -> DocClass | None:
@@ -106,13 +122,13 @@ def _scan_sources(
     sources: Iterable[tuple[Path, bytes | None]],
 ) -> KB:
     kb = KB(root=resolved)
-    for relative, source_bytes in sources:
+    for relative, frontmatter_prefix in sources:
         source_path = resolved / relative
         try:
             frontmatter = (
                 read_frontmatter(source_path)
-                if source_bytes is None
-                else read_frontmatter_bytes(source_bytes)
+                if frontmatter_prefix is None
+                else read_frontmatter_bytes(frontmatter_prefix)
             )
         except (OSError, UnicodeError, ValueError, yaml.YAMLError) as error:
             message = str(error)
@@ -132,7 +148,6 @@ def _scan_sources(
             relative_path=relative,
             doc_class=doc_class,
             frontmatter=frontmatter,
-            source_bytes=source_bytes,
         )
         kb.documents.append(document)
         if document.id is not None:

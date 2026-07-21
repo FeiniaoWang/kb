@@ -6,7 +6,7 @@ import stat
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterator, Literal
+from typing import BinaryIO, Callable, Iterator, Literal
 
 _ROOTED_SUPPORTED = (
     hasattr(os, "O_DIRECTORY")
@@ -215,6 +215,7 @@ class _RootedReader:
         *,
         expected: FileIdentity | None = None,
         parent_expected: FileIdentity | None = None,
+        acquire: Callable[[BinaryIO], bytes] | None = None,
     ) -> bytes:
         parts = _relative_parts(relative)
         self.verify_root()
@@ -236,7 +237,7 @@ class _RootedReader:
                 if expected is not None and _identity(status) != expected:
                     raise _stale_error(relative)
                 with os.fdopen(os.dup(descriptor), "rb") as stream:
-                    content = stream.read()
+                    content = stream.read() if acquire is None else acquire(stream)
             finally:
                 os.close(descriptor)
             parent_identity = _identity(os.fstat(parent))
@@ -278,6 +279,7 @@ def _open_rooted_parent(
     root: Path,
     relative: Path,
     root_identity: FileIdentity,
+    parent_expected: FileIdentity | None = None,
 ) -> Iterator[tuple[int, str]]:
     parts = _relative_parts(relative)
     descriptors = [_open_verified_root(root, root_identity)]
@@ -299,6 +301,11 @@ def _open_rooted_parent(
                 os.close(descriptor)
                 raise
             descriptors.append(descriptor)
+        if (
+            parent_expected is not None
+            and _identity(os.fstat(descriptors[-1])) != parent_expected
+        ):
+            raise _stale_error(relative.parent)
         yield descriptors[-1], parts[-1]
     finally:
         for descriptor in reversed(descriptors):
@@ -309,12 +316,31 @@ def create_rooted_directory(
     root: Path,
     relative: Path,
     root_identity: FileIdentity,
-) -> None:
-    with _open_rooted_parent(root, relative, root_identity) as (
+    *,
+    parent_expected: FileIdentity | None = None,
+) -> FileIdentity:
+    with _open_rooted_parent(
+        root,
+        relative,
+        root_identity,
+        parent_expected,
+    ) as (
         parent_descriptor,
         name,
     ):
         os.mkdir(name, dir_fd=parent_descriptor)
+        descriptor = os.open(name, _directory_flags(), dir_fd=parent_descriptor)
+        try:
+            status = os.fstat(descriptor)
+            if not stat.S_ISDIR(status.st_mode):
+                raise OSError(
+                    errno.ENOTDIR,
+                    "created path is not a directory",
+                    relative,
+                )
+            return _identity(status)
+        finally:
+            os.close(descriptor)
 
 
 def create_rooted_file_bytes(
@@ -322,8 +348,15 @@ def create_rooted_file_bytes(
     relative: Path,
     content: bytes,
     root_identity: FileIdentity,
+    *,
+    parent_expected: FileIdentity | None = None,
 ) -> None:
-    with _open_rooted_parent(root, relative, root_identity) as (
+    with _open_rooted_parent(
+        root,
+        relative,
+        root_identity,
+        parent_expected,
+    ) as (
         parent_descriptor,
         name,
     ):
@@ -377,6 +410,7 @@ def inspect_rooted_directory(
     root_identity: FileIdentity,
     *,
     allow_missing: bool = False,
+    expected: FileIdentity | None = None,
 ) -> FileIdentity | None:
     with _open_rooted_parent(root, relative, root_identity) as (
         parent_descriptor,
@@ -400,7 +434,10 @@ def inspect_rooted_directory(
                     "rooted path is not a directory",
                     relative,
                 )
-            return _identity(status)
+            identity = _identity(status)
+            if expected is not None and identity != expected:
+                raise _stale_error(relative)
+            return identity
         finally:
             os.close(descriptor)
 

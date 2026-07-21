@@ -7,6 +7,7 @@ import pytest
 import kb.core.safeio as safeio
 from kb.core.safeio import (
     append_mutable_bytes,
+    create_rooted_directory,
     create_rooted_file_bytes,
     inspect_root,
     inspect_mutable_file,
@@ -198,3 +199,44 @@ def test_rooted_directory_inspection_distinguishes_existing_and_missing(
 
     assert existing is not None
     assert missing is None
+
+
+def test_rooted_directory_birth_returns_its_identity(tmp_path) -> None:
+    root = tmp_path / "kb"
+    root.mkdir()
+    root_identity = inspect_root(root)
+
+    born_identity = create_rooted_directory(
+        root,
+        Path("born"),
+        root_identity,
+        parent_expected=root_identity,
+    )
+
+    assert born_identity == inspect_rooted_directory(
+        root,
+        Path("born"),
+        root_identity,
+    )
+
+
+def test_rooted_file_birth_rejects_replaced_expected_parent(tmp_path) -> None:
+    root = tmp_path / "kb"
+    parent = root / "born"
+    parent.mkdir(parents=True)
+    root_identity = inspect_root(root)
+    parent_identity = inspect_rooted_directory(root, Path("born"), root_identity)
+    assert parent_identity is not None
+    parent.rename(root / "born-original")
+    parent.mkdir()
+
+    with pytest.raises(OSError, match="identity changed"):
+        create_rooted_file_bytes(
+            root,
+            Path("born/index.md"),
+            b"index",
+            root_identity,
+            parent_expected=parent_identity,
+        )
+
+    assert list(parent.iterdir()) == []

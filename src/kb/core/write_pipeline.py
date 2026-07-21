@@ -34,7 +34,12 @@ from kb.core.safeio import (
     rooted_reader,
     verify_root,
 )
-from kb.core.scan import KB, discover_root, scan_snapshot
+from kb.core.scan import (
+    KB,
+    discover_root,
+    read_frontmatter_prefix,
+    scan_snapshot,
+)
 
 WritePhase = Literal["preflight", "write"]
 WriteOperation = Literal[
@@ -177,7 +182,7 @@ def load_write_context(kb_root: Path | None) -> WriteContext:
                     f"invalid kb-config.json: {error}",
                 ) from error
             config = parse_config_bytes(config_content)
-            kb = scan_snapshot(root, _snapshot_markdown(reader))
+            kb = scan_snapshot(root, _snapshot_markdown_prefixes(reader))
     except _MarkdownSnapshotError as error:
         raise WriteFailure(
             "preflight",
@@ -203,7 +208,7 @@ def load_write_context(kb_root: Path | None) -> WriteContext:
     return context
 
 
-def _snapshot_markdown(reader: _RootedReader) -> dict[Path, bytes]:
+def _snapshot_markdown_prefixes(reader: _RootedReader) -> dict[Path, bytes]:
     files: dict[Path, bytes] = {}
     unsafe: list[tuple[int, str, Path]] = []
 
@@ -218,6 +223,7 @@ def _snapshot_markdown(reader: _RootedReader) -> dict[Path, bytes]:
                     relative,
                     expected=entry.identity,
                     parent_expected=listing.identity,
+                    acquire=read_frontmatter_prefix,
                 )
             elif entry.kind == "symlink" and relative.suffix == ".md":
                 unsafe.append(
@@ -668,10 +674,26 @@ def apply_write(
     root = prepared._root
     root_identity = prepared._root_identity
     intent = prepared._intent
+    born_identities: dict[Path, FileIdentity] = {}
     try:
         for directory in prepared._new_directories:
+            parent_expected = born_identities.get(directory.parent)
+            if not directory.parent.parts:
+                parent_expected = root_identity
             try:
-                create_rooted_directory(root, directory, root_identity)
+                if parent_expected is None:
+                    born_identity = create_rooted_directory(
+                        root,
+                        directory,
+                        root_identity,
+                    )
+                else:
+                    born_identity = create_rooted_directory(
+                        root,
+                        directory,
+                        root_identity,
+                        parent_expected=parent_expected,
+                    )
             except OSError as error:
                 raise WriteFailure(
                     "write",
@@ -680,6 +702,7 @@ def apply_write(
                     directory,
                     error,
                 ) from error
+            born_identities[directory] = born_identity
             index_relative = directory / "index.md"
             try:
                 create_rooted_file_bytes(
@@ -687,6 +710,7 @@ def apply_write(
                     index_relative,
                     prepared._new_indexes[index_relative],
                     root_identity,
+                    parent_expected=born_identity,
                 )
             except OSError as error:
                 raise WriteFailure(
@@ -701,24 +725,44 @@ def apply_write(
             prepared._companion_relatives,
             strict=True,
         ):
+            parent_expected = born_identities.get(relative.parent)
             try:
-                create_rooted_file_bytes(
-                    root,
-                    relative,
-                    companion.content,
-                    root_identity,
-                )
+                if parent_expected is None:
+                    create_rooted_file_bytes(
+                        root,
+                        relative,
+                        companion.content,
+                        root_identity,
+                    )
+                else:
+                    create_rooted_file_bytes(
+                        root,
+                        relative,
+                        companion.content,
+                        root_identity,
+                        parent_expected=parent_expected,
+                    )
             except OSError as error:
                 raise WriteFailure(
                     "write", "create", "companion", relative, error
                 ) from error
+        birth_parent_expected = born_identities.get(prepared._birth_relative.parent)
         try:
-            create_rooted_file_bytes(
-                root,
-                prepared._birth_relative,
-                intent.birth.content,
-                root_identity,
-            )
+            if birth_parent_expected is None:
+                create_rooted_file_bytes(
+                    root,
+                    prepared._birth_relative,
+                    intent.birth.content,
+                    root_identity,
+                )
+            else:
+                create_rooted_file_bytes(
+                    root,
+                    prepared._birth_relative,
+                    intent.birth.content,
+                    root_identity,
+                    parent_expected=birth_parent_expected,
+                )
         except OSError as error:
             raise WriteFailure(
                 "write",
@@ -790,6 +834,22 @@ def apply_write(
             raise WriteFailure(
                 "write", "append", "log", Path("log.md"), error
             ) from error
+        for directory, identity in born_identities.items():
+            try:
+                inspect_rooted_directory(
+                    root,
+                    directory,
+                    root_identity,
+                    expected=identity,
+                )
+            except OSError as error:
+                raise WriteFailure(
+                    "write",
+                    "inspect",
+                    "directory",
+                    directory,
+                    error,
+                ) from error
     except WriteFailure:
         raise
     except OSError as error:

@@ -87,7 +87,6 @@ class Document(BaseModel):
     doc_class: DocClass
     frontmatter: Frontmatter
     _source_path: Path = PrivateAttr()
-    _source_bytes: bytes | None = PrivateAttr(default=None)
 
     @classmethod
     def from_scan(
@@ -97,7 +96,6 @@ class Document(BaseModel):
         relative_path: Path,
         doc_class: DocClass,
         frontmatter: Frontmatter,
-        source_bytes: bytes | None = None,
     ) -> Document:
         raw_id = frontmatter.root.get("id")
         document = cls(
@@ -107,16 +105,11 @@ class Document(BaseModel):
             frontmatter=frontmatter,
         )
         document._source_path = source_path
-        document._source_bytes = source_bytes
         return document
 
     @property
     def body(self) -> str:
-        text = (
-            self._source_path.read_text(encoding="utf-8")
-            if self._source_bytes is None
-            else self._source_bytes.decode("utf-8", errors="strict")
-        )
+        text = self._source_path.read_text(encoding="utf-8")
         lines = text.splitlines(keepends=True)
         for index, line in enumerate(lines[1:], start=1):
             if line.rstrip("\r\n") == "---":

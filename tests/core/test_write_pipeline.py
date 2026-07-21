@@ -298,6 +298,91 @@ def test_load_context_snapshot_does_not_resolve_root_after_acquisition(
     )
 
 
+def test_load_context_reads_only_rooted_frontmatter_prefixes(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    import kb.core.write_pipeline as pipeline
+
+    root = initialized(tmp_path)
+    path = root / "synthetic/large.md"
+    prefix = b"---\nid: KB-000007\ntype: spec\ntitle: Large\n---\n"
+    body = b"rooted body bytes that allocation must not read\n" * 100_000
+    path.write_bytes(prefix + body)
+    bytes_read: list[int] = []
+
+    def observed_prefix(stream) -> bytes:
+        assert stream.tell() == 0
+        content = bytearray()
+        first = stream.readline()
+        content.extend(first)
+        if first.rstrip(b"\r\n") == b"---":
+            while True:
+                line = stream.readline()
+                if not line:
+                    break
+                content.extend(line)
+                if line.rstrip(b"\r\n") == b"---":
+                    break
+        bytes_read.append(len(content))
+        return bytes(content)
+
+    monkeypatch.setattr(
+        pipeline,
+        "read_frontmatter_prefix",
+        observed_prefix,
+        raising=False,
+    )
+
+    context = load_write_context(root)
+
+    assert len(prefix) in bytes_read
+    assert len(prefix + body) not in bytes_read
+    document = context.kb.by_id["KB-000007"]
+    assert not hasattr(document, "_source_bytes")
+
+
+def test_load_context_documents_keep_body_access_lazy(tmp_path) -> None:
+    root = initialized(tmp_path)
+    path = root / "synthetic/lazy.md"
+    path.write_bytes(document_bytes("KB-000007", "Lazy", "Lazy.") + b"one\n")
+
+    context = load_write_context(root)
+    path.write_bytes(document_bytes("KB-000007", "Lazy", "Lazy.") + b"two\n")
+
+    assert context.kb.by_id["KB-000007"].body == "Body\ntwo\n"
+
+
+def test_load_context_unclosed_frontmatter_reads_to_eof_deterministically(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    import kb.core.write_pipeline as pipeline
+
+    root = initialized(tmp_path)
+    content = b"---\nid: KB-000007\ntype: spec\n" + (b"not closed\n" * 500)
+    (root / "synthetic/unclosed.md").write_bytes(content)
+    bytes_read: list[int] = []
+
+    def observed_prefix(stream) -> bytes:
+        acquired = stream.read()
+        bytes_read.append(len(acquired))
+        return acquired
+
+    monkeypatch.setattr(
+        pipeline,
+        "read_frontmatter_prefix",
+        observed_prefix,
+        raising=False,
+    )
+
+    with pytest.raises(AllocationBlocked) as raised:
+        load_write_context(root)
+
+    assert raised.value.paths == (Path("synthetic/unclosed.md"),)
+    assert len(content) in bytes_read
+
+
 @pytest.mark.parametrize(
     "relative",
     [Path("/absolute.md"), Path("../escape.md"), Path(r"synthetic\escape.md")],
@@ -340,6 +425,36 @@ def test_prepare_exposes_identity_checked_mutation_source_without_writes(
 
     assert prepared.sources["superseded"].content == old.read_bytes()
     assert not (root / "synthetic/planned.md").exists()
+
+
+def test_prepare_acquires_full_supersession_bytes_after_lazy_context(
+    tmp_path,
+) -> None:
+    root = initialized(tmp_path)
+    old = root / "synthetic/old.md"
+    original = (
+        b"---\r\nid: KB-000002\r\ntype: spec\r\ntitle: Old\r\n"
+        b"description: Old.\r\ncustom: preserved\r\n---\r\n"
+        + (b"lossless body\x00bytes\r\n" * 20_000)
+    )
+    old.write_bytes(original)
+    context = load_write_context(root)
+
+    prepared = prepare_write(
+        context,
+        WriteIntent(
+            birth=DocumentBirth(
+                path=Path("synthetic/planned.md"),
+                content=document_bytes(),
+            ),
+            mutations=[
+                MutationTarget(key="superseded", path=Path("synthetic/old.md"))
+            ],
+            log_entry=log_entry(),
+        ),
+    )
+
+    assert prepared.sources["superseded"].content == original
 
 
 def test_prepare_classifies_final_mutation_symlink_as_inspect_failure(tmp_path) -> None:
@@ -960,10 +1075,24 @@ def test_late_born_index_occupant_is_preserved(tmp_path, monkeypatch) -> None:
         relative: Path,
         content: bytes,
         root_identity,
+        *,
+        parent_expected=None,
     ) -> None:
         if rooted_at / relative == born_index:
-            real_create(rooted_at, relative, b"late index", root_identity)
-        real_create(rooted_at, relative, content, root_identity)
+            real_create(
+                rooted_at,
+                relative,
+                b"late index",
+                root_identity,
+                parent_expected=parent_expected,
+            )
+        real_create(
+            rooted_at,
+            relative,
+            content,
+            root_identity,
+            parent_expected=parent_expected,
+        )
 
     monkeypatch.setattr(pipeline, "create_rooted_file_bytes", occupy_index)
     prepared = prepare_write(
@@ -982,6 +1111,145 @@ def test_late_born_index_occupant_is_preserved(tmp_path, monkeypatch) -> None:
     assert raised.value.operation == "create"
     assert raised.value.role == "index"
     assert born_index.read_bytes() == b"late index"
+
+
+def test_replaced_just_born_directory_receives_no_index_or_document_bytes(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    import kb.core.write_pipeline as pipeline
+
+    root = initialized(tmp_path)
+    born = root / "synthetic/a"
+    original = root / "synthetic/a-original"
+    real_create_directory = pipeline.create_rooted_directory
+
+    def replace_after_mkdir(*args, **kwargs):
+        identity = real_create_directory(*args, **kwargs)
+        relative = args[1]
+        if relative == Path("synthetic/a"):
+            born.rename(original)
+            born.mkdir()
+        return identity
+
+    monkeypatch.setattr(
+        pipeline,
+        "create_rooted_directory",
+        replace_after_mkdir,
+    )
+    prepared = prepare_write(
+        load_write_context(root),
+        WriteIntent(
+            birth=DocumentBirth(
+                path=Path("synthetic/a/planned.md"),
+                content=document_bytes(),
+            ),
+            log_entry=log_entry(),
+        ),
+    )
+
+    with pytest.raises(WriteFailure) as raised:
+        apply_write(prepared)
+
+    assert raised.value.phase == "write"
+    assert raised.value.operation == "create"
+    assert raised.value.role == "index"
+    assert raised.value.path == Path("synthetic/a/index.md")
+    assert list(born.iterdir()) == []
+    assert original.is_dir()
+
+
+def test_nested_child_birth_requires_captured_born_parent_identity(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    import kb.core.write_pipeline as pipeline
+
+    root = initialized(tmp_path)
+    parent = root / "synthetic/a"
+    original = root / "synthetic/a-original"
+    real_create_file = pipeline.create_rooted_file_bytes
+
+    def replace_after_parent_index(*args, **kwargs):
+        result = real_create_file(*args, **kwargs)
+        relative = args[1]
+        if relative == Path("synthetic/a/index.md"):
+            parent.rename(original)
+            parent.mkdir()
+        return result
+
+    monkeypatch.setattr(
+        pipeline,
+        "create_rooted_file_bytes",
+        replace_after_parent_index,
+    )
+    prepared = prepare_write(
+        load_write_context(root),
+        WriteIntent(
+            birth=DocumentBirth(
+                path=Path("synthetic/a/b/planned.md"),
+                content=document_bytes(),
+            ),
+            log_entry=log_entry(),
+        ),
+    )
+
+    with pytest.raises(WriteFailure) as raised:
+        apply_write(prepared)
+
+    assert raised.value.phase == "write"
+    assert raised.value.operation == "mkdir"
+    assert raised.value.role == "directory"
+    assert raised.value.path == Path("synthetic/a/b")
+    assert list(parent.iterdir()) == []
+    assert (original / "index.md").is_file()
+
+
+def test_final_verification_rejects_replaced_born_directory(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    import kb.core.write_pipeline as pipeline
+
+    root = initialized(tmp_path)
+    born = root / "synthetic/a"
+    original = root / "synthetic/a-original"
+    real_create_file = pipeline.create_rooted_file_bytes
+
+    def replace_after_document(*args, **kwargs):
+        result = real_create_file(*args, **kwargs)
+        relative = args[1]
+        if relative == Path("synthetic/a/planned.md"):
+            born.rename(original)
+            born.mkdir()
+        return result
+
+    monkeypatch.setattr(
+        pipeline,
+        "create_rooted_file_bytes",
+        replace_after_document,
+    )
+    prepared = prepare_write(
+        load_write_context(root),
+        WriteIntent(
+            birth=DocumentBirth(
+                path=Path("synthetic/a/planned.md"),
+                content=document_bytes(),
+            ),
+            log_entry=log_entry(),
+        ),
+    )
+
+    with pytest.raises(WriteFailure) as raised:
+        apply_write(prepared)
+
+    assert raised.value.phase == "write"
+    assert raised.value.operation == "inspect"
+    assert raised.value.role == "directory"
+    assert raised.value.path == Path("synthetic/a")
+    assert list(born.iterdir()) == []
+    assert (original / "index.md").is_file()
+    assert (original / "planned.md").is_file()
 
 
 def test_prepare_rejects_temporary_index_directory_swap_during_snapshot(
