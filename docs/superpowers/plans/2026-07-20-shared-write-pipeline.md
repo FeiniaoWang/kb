@@ -75,6 +75,33 @@ receives no pipeline bytes; failure is typed and prior completed effects remain
 without rollback. Parent and staging descriptors close within the one rooted
 directory-birth operation on every path.
 
+## Command-Contract Reconciliation Amendment
+
+This amendment supersedes the narrower born-directory collision and
+architecture-gate wording below. Create and ingest collision
+naming always reserve `<target>/index.md`, whether present, implicit for a new
+directory, or missing from a damaged existing directory. A damaged directory
+therefore reaches typed pipeline preparation with the deterministic suffixed
+document path and never leaks the pipeline's programmer-misuse `ValueError`.
+
+Ingest destination preflight rejects every existing symlink or junction
+component from the raw-class directory through the target before external
+acquisition, including in-class links. The exact command result is
+`E_INGEST_DEST_INVALID`, exit 2, with no KB or target mutation.
+
+Supersession-specific classification requires exact unsafe-target provenance:
+path references may match the unsafe root-relative path, while id references
+need a safely parsed matching document/path. An unresolved id plus unrelated
+unsafe Markdown path remains generic `E_CREATE_IO`; an `ELOOP` plus failed
+resolution is not proof.
+
+The architecture gate is semantic over direct filesystem writes as well as
+the existing helper/import graph. It rejects mutating `Path`, built-in file,
+`os`, and `shutil` calls, aliases/module qualification, dynamic or write-capable
+open modes, and file-object writes. Provably read-only external acquisition in
+the current command modules remains allowed until the separate input-seam
+plan.
+
 ## Global Constraints
 
 - The root source of truth is `docs/prd.md`; command behavior remains governed by `docs/specs/commands/00-shared.md`, `docs/specs/commands/kb-create.md`, and `docs/specs/commands/kb-ingest.md` in that precedence order.
@@ -100,7 +127,7 @@ directory-birth operation on every path.
 - All public core data models introduced here are Pydantic 2.x `BaseModel`s. Private implementation state may use `PrivateAttr` and ordinary private helper types.
 - `src/kb/core/create.py` and `src/kb/core/ingest.py` retain their existing failure classes and map neutral pipeline failures to their stable command contracts.
 - Keep destination grammar, reference resolution, id allocation, collision policy, frontmatter rendering, and result models outside the write pipeline.
-- When create or ingest will create the target directory, command collision policy treats its implicit born `index.md` as occupied before choosing the document filename; a direct pipeline intent that still collides with that implicit path remains programmer misuse rejected by `prepare_write()`.
+- Create and ingest command collision policy always treats the target directory's CLI-maintained `index.md` as occupied before choosing the document filename, whether it exists, would be born, or is missing from a damaged existing directory; a direct pipeline intent that still collides with an implicit path remains programmer misuse rejected by `prepare_write()`.
 - Keep external file/stdin/clipboard/create-body acquisition unchanged; the
   root-bound lazy allocation snapshot is in this plan, while the later
   `2026-07-20-cli-core-input-seam.md` plan owns external command input.

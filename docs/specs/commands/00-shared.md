@@ -87,6 +87,18 @@ Resolution rules:
 - No stored index. Ids live in the files; the id→path map is rebuilt by each scan.
 - **CLI-only access discipline.** The CLI is the sole KB data interface for skills: document content is read through `kb show` (and `search` snippets), never by opening KB files directly. This keeps the NFR-8 access-control hooks in the query layer effective. Skills carry the corresponding mandate (PRD §5.2). Symmetrically, documents are **created** through the CLI — `kb ingest` for raw, `kb create` for synthetic — so id allocation and the frontmatter schema stay CLI-authoritative; skills supply content and metadata as arguments rather than hand-writing document files.
 
+### 5.1 Allocating-write persistence ownership
+
+`core/create.py` and `core/ingest.py` own command policy and construct typed
+write intents, but all KB filesystem persistence is owned by the shared
+`core/write_pipeline.py` seam. The command modules MUST NOT mutate KB paths
+directly through `Path`, built-in file handles, `os`, `shutil`, housekeeping,
+indexing, safe-I/O, or private write-pipeline primitives. Until the separate
+CLI/core input-seam work is implemented, they MAY continue to acquire external
+body/source input directly with provably read-only file operations and the
+documented clipboard subprocess; that temporary acquisition allowance does
+not permit writes to either the KB or the external input.
+
 ## 6. Id grammar and allocation
 
 - Id pattern: `<PREFIX>-<NNNNNN>` — an uppercase prefix, a hyphen, a zero-padded integer of at least 6 digits (`KB-000042`, `RAW-000113`; numbers above 999999 keep growing — `KB-1000001` is legal).

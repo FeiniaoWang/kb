@@ -142,6 +142,39 @@ A born-directory identity mismatch is a typed write-phase
 `WriteFailure`; prior published effects remain as documented because the
 pipeline does not roll back.
 
+### Command-contract reconciliation
+
+Command policy reserves every target directory's CLI-maintained `index.md`
+pathname during collision naming, regardless of whether the index exists,
+would be born, or is missing from a damaged existing directory. The latter
+case therefore selects the deterministic suffixed document name before
+pipeline preparation reports the missing required index as a typed preflight
+I/O failure; command-owned naming never submits a document birth at
+`index.md`, while the pipeline retains its `ValueError` as a programmer-misuse
+guard.
+
+Ingest destination preflight rejects every existing symlink or junction
+component from the raw-class directory through the requested destination,
+including links whose resolved targets remain within that class directory.
+This user-facing check runs before external acquisition and maps exactly to
+`E_INGEST_DEST_INVALID`; the shared pipeline's later no-follow validation
+remains defense in depth.
+
+Context-acquisition failures receive supersession-specific classification
+only with exact target provenance. A path reference may be compared with the
+unsafe root-relative path; an id reference requires a safely parsed document
+that binds that id to the unsafe path. An unresolved id plus an unrelated
+unsafe Markdown path maps to generic create I/O. The command never infers
+target provenance merely from `ELOOP` or from failure to resolve a reference.
+
+Create and ingest may persist KB bytes only through the public shared
+write-pipeline interface. A semantic AST architecture gate rejects direct
+mutating `Path`, built-in file, `os`, and `shutil` APIs, including aliases and
+dynamic open modes that cannot be proven read-only. Until the separate input
+seam lands, current external source/body acquisition remains legal only
+through provably read-only operations; clipboard subprocess acquisition is
+also unchanged.
+
 ## Goal
 
 Extract the duplicated create/ingest filesystem commit orchestration into one deep core module while preserving every observable `kb create` and `kb ingest` contract. The extraction also strengthens ingest's mutable index and log handling to match create's identity-checked safety without adding rollback or changing documented partial-write semantics.
@@ -363,7 +396,7 @@ Every path in an intent is a normalized KB-root-relative POSIX path. Before any 
 - a destination component is a symlink or junction; or
 - planned directory/file shapes conflict.
 
-Existing command destination validation remains the user-facing source of destination errors. Pipeline `ValueError`s indicate an internal caller defect rather than a second user-facing validation vocabulary.
+Existing command destination validation remains the user-facing source of destination errors. Ingest rejects all existing destination symlink/junction components before external acquisition, even when a link stays within the raw-class directory. Pipeline `ValueError`s indicate an internal caller defect rather than a second user-facing validation vocabulary.
 
 ### Preparation
 
@@ -460,6 +493,7 @@ Command modules retain all stable codes, messages, and exit codes:
 - shared root/config errors map exactly as they do today;
 - `AllocationBlocked` maps to the command's malformed-allocation error;
 - create preflight `operation="inspect"` failure for mutation key `superseded` maps to the existing `E_CREATE_SUPERSEDES_INVALID`, exit `1` message;
+- a context-acquisition scan failure maps to that supersession-specific error only when the unsafe path is proven to be the requested target (path equality for a path reference, or a safely parsed id-to-path match); without that proof it remains `E_CREATE_IO`, exit `2`;
 - create preflight `operation="read"` failure for that mutation remains `E_CREATE_IO`, exit `2`;
 - other create pipeline failures map to `E_CREATE_IO`, exit `2`;
 - ingest pipeline failures map to `E_INGEST_IO`, exit `2`; and
@@ -594,7 +628,7 @@ Direct pipeline coverage includes:
 
 Create AC01–AC52 and ingest AC01–AC50 remain end-to-end gates. Existing safe-I/O tests remain focused on the smaller internal module's interface. Command-private orchestration tests that become redundant move to `test_write_pipeline.py`; normative acceptance and error/output tests remain in the command suites.
 
-Architecture tests assert that `create.py` and `ingest.py` consume `write_pipeline.py`, import `slug` from `naming.py`, and no longer directly call index regeneration, log append, or safe write primitives.
+Architecture tests assert that `create.py` and `ingest.py` consume `write_pipeline.py`, import `slug` from `naming.py`, and no longer directly call index regeneration, log append, safe write primitives, or mutating filesystem APIs. Semantic fixtures cover aliases and module qualification; mutating and dynamic built-in/`Path.open` modes; mutating `Path`, `os`, and `shutil` calls; and file-object writes. They continue to allow the current provably read-only external file acquisition and avoid false positives for domain/Pydantic calls.
 
 ## Migration Order
 
@@ -615,7 +649,7 @@ Architecture tests assert that `create.py` and `ingest.py` consume `write_pipeli
 - no injectable public I/O callbacks;
 - no command-specific destination policy in the pipeline;
 - no `kb revise` interface before its normative spec;
-- no PRD or command-spec changes;
+- no PRD changes and no command-surface, successful-output, or AC-number changes;
 - no dependency additions; and
 - no external file/stdin/clipboard/create-body acquisition changes in this
   prerequisite; the root-bound lazy allocation snapshot is part of this
