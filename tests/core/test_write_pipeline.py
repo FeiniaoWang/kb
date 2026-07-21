@@ -1159,6 +1159,78 @@ def test_replaced_just_born_directory_receives_no_index_or_document_bytes(
     assert original.is_dir()
 
 
+def test_directory_replacement_before_identity_binding_is_typed_and_untouched(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    import kb.core.safeio as safeio
+
+    root = initialized(tmp_path)
+    parent = root / "synthetic"
+    parent_status = parent.stat()
+    born = parent / "a"
+    real_open = safeio.os.open
+    injected = False
+    late_identity = None
+
+    def install_replacement_before_identity_binding(
+        path,
+        flags,
+        mode=0o777,
+        *,
+        dir_fd=None,
+    ):
+        nonlocal injected, late_identity
+        is_parent = (
+            dir_fd is not None
+            and os.fstat(dir_fd).st_dev == parent_status.st_dev
+            and os.fstat(dir_fd).st_ino == parent_status.st_ino
+        )
+        is_staging = isinstance(path, str) and path.startswith(".kb-born-")
+        if not injected and is_parent and (path == "a" or is_staging):
+            injected = True
+            if path == "a":
+                os.rename(
+                    "a",
+                    "a-created",
+                    src_dir_fd=dir_fd,
+                    dst_dir_fd=dir_fd,
+                )
+            os.mkdir("a", dir_fd=dir_fd)
+            status = os.stat("a", dir_fd=dir_fd, follow_symlinks=False)
+            late_identity = (status.st_dev, status.st_ino)
+        return real_open(path, flags, mode, dir_fd=dir_fd)
+
+    prepared = prepare_write(
+        load_write_context(root),
+        WriteIntent(
+            birth=DocumentBirth(
+                path=Path("synthetic/a/planned.md"),
+                content=document_bytes(),
+            ),
+            log_entry=log_entry(),
+        ),
+    )
+    monkeypatch.setattr(
+        safeio.os,
+        "open",
+        install_replacement_before_identity_binding,
+    )
+
+    with pytest.raises(WriteFailure) as raised:
+        apply_write(prepared)
+
+    assert injected
+    assert raised.value.phase == "write"
+    assert raised.value.operation == "mkdir"
+    assert raised.value.role == "directory"
+    assert raised.value.path == Path("synthetic/a")
+    status = born.stat()
+    assert (status.st_dev, status.st_ino) == late_identity
+    assert list(born.iterdir()) == []
+    assert not any(path.name.startswith(".kb-born-") for path in parent.iterdir())
+
+
 def test_nested_child_birth_requires_captured_born_parent_identity(
     tmp_path,
     monkeypatch,

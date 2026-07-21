@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import ctypes
 import errno
 import os
+import secrets
 import stat
+import sys
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -13,6 +16,7 @@ _ROOTED_SUPPORTED = (
     and hasattr(os, "O_NOFOLLOW")
     and os.open in os.supports_dir_fd
     and os.mkdir in os.supports_dir_fd
+    and os.rmdir in os.supports_dir_fd
     and os.stat in os.supports_dir_fd
     and os.stat in os.supports_follow_symlinks
     and os.listdir in os.supports_fd
@@ -22,6 +26,35 @@ _UNSUPPORTED_ERRNO = getattr(
     "ENOTSUP",
     getattr(errno, "EOPNOTSUPP", errno.ENOSYS),
 )
+_BORN_STAGING_PREFIX = ".kb-born-"
+_STAGING_ATTEMPTS = 128
+_DARWIN_RENAME_EXCL = 0x00000004
+_LINUX_RENAME_NOREPLACE = 1
+_ExclusiveDirectoryPublish = tuple[Callable[..., int], int]
+
+
+def _load_exclusive_directory_publish() -> _ExclusiveDirectoryPublish | None:
+    libc = ctypes.CDLL(None, use_errno=True)
+    if sys.platform == "darwin" and hasattr(libc, "renameatx_np"):
+        function = libc.renameatx_np
+        flag = _DARWIN_RENAME_EXCL
+    elif sys.platform.startswith("linux") and hasattr(libc, "renameat2"):
+        function = libc.renameat2
+        flag = _LINUX_RENAME_NOREPLACE
+    else:
+        return None
+    function.argtypes = [
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_uint,
+    ]
+    function.restype = ctypes.c_int
+    return function, flag
+
+
+_EXCLUSIVE_DIRECTORY_PUBLISH = _load_exclusive_directory_publish()
 
 
 @dataclass(frozen=True)
@@ -66,6 +99,57 @@ def _require_rooted_support() -> None:
             _UNSUPPORTED_ERRNO,
             "root-anchored no-follow filesystem operations are unsupported",
         )
+
+
+def _require_exclusive_directory_publish() -> None:
+    if _EXCLUSIVE_DIRECTORY_PUBLISH is None:
+        raise RootedContainmentError(
+            _UNSUPPORTED_ERRNO,
+            "atomic exclusive directory publication is unsupported",
+        )
+
+
+def _publish_directory_exclusive(
+    parent_descriptor: int,
+    staging_name: str,
+    final_name: str,
+) -> None:
+    _require_exclusive_directory_publish()
+    assert _EXCLUSIVE_DIRECTORY_PUBLISH is not None
+    function, flag = _EXCLUSIVE_DIRECTORY_PUBLISH
+    ctypes.set_errno(0)
+    result = function(
+        parent_descriptor,
+        os.fsencode(staging_name),
+        parent_descriptor,
+        os.fsencode(final_name),
+        flag,
+    )
+    if result != 0:
+        error_number = ctypes.get_errno() or errno.EIO
+        raise OSError(
+            error_number,
+            os.strerror(error_number),
+            final_name,
+        )
+
+
+def _remove_staging_directory_if_owned(
+    parent_descriptor: int,
+    staging_name: str,
+    expected: FileIdentity,
+) -> None:
+    try:
+        status = os.stat(
+            staging_name,
+            dir_fd=parent_descriptor,
+            follow_symlinks=False,
+        )
+    except FileNotFoundError:
+        return
+    if not stat.S_ISDIR(status.st_mode) or _identity(status) != expected:
+        return
+    os.rmdir(staging_name, dir_fd=parent_descriptor)
 
 
 def _relative_parts(relative: Path) -> tuple[str, ...]:
@@ -319,6 +403,7 @@ def create_rooted_directory(
     *,
     parent_expected: FileIdentity | None = None,
 ) -> FileIdentity:
+    _require_exclusive_directory_publish()
     with _open_rooted_parent(
         root,
         relative,
@@ -328,19 +413,77 @@ def create_rooted_directory(
         parent_descriptor,
         name,
     ):
-        os.mkdir(name, dir_fd=parent_descriptor)
-        descriptor = os.open(name, _directory_flags(), dir_fd=parent_descriptor)
+        staging_name: str | None = None
+        for _ in range(_STAGING_ATTEMPTS):
+            candidate = f"{_BORN_STAGING_PREFIX}{secrets.token_hex(16)}"
+            try:
+                os.mkdir(candidate, dir_fd=parent_descriptor)
+            except FileExistsError:
+                continue
+            staging_name = candidate
+            break
+        if staging_name is None:
+            raise OSError(
+                errno.EEXIST,
+                "could not allocate a private directory staging name",
+                relative,
+            )
+        created_status = os.stat(
+            staging_name,
+            dir_fd=parent_descriptor,
+            follow_symlinks=False,
+        )
+        created_identity = _identity(created_status)
+        descriptor: int | None = None
         try:
-            status = os.fstat(descriptor)
-            if not stat.S_ISDIR(status.st_mode):
+            if not stat.S_ISDIR(created_status.st_mode):
                 raise OSError(
                     errno.ENOTDIR,
-                    "created path is not a directory",
+                    "created staging path is not a directory",
                     relative,
                 )
-            return _identity(status)
+            descriptor = os.open(
+                staging_name,
+                _directory_flags(),
+                dir_fd=parent_descriptor,
+            )
+            status = os.fstat(descriptor)
+            if (
+                not stat.S_ISDIR(status.st_mode)
+                or _identity(status) != created_identity
+            ):
+                raise _stale_error(relative)
+            _publish_directory_exclusive(
+                parent_descriptor,
+                staging_name,
+                name,
+            )
+            published_status = os.stat(
+                name,
+                dir_fd=parent_descriptor,
+                follow_symlinks=False,
+            )
+            if (
+                not stat.S_ISDIR(published_status.st_mode)
+                or _identity(published_status) != created_identity
+            ):
+                raise _stale_error(relative)
+            return created_identity
+        except BaseException:
+            try:
+                _remove_staging_directory_if_owned(
+                    parent_descriptor,
+                    staging_name,
+                    created_identity,
+                )
+            except OSError:
+                # Preserve the primary containment failure. Never delete a
+                # staging pathname whose identity cannot still be proven.
+                pass
+            raise
         finally:
-            os.close(descriptor)
+            if descriptor is not None:
+                os.close(descriptor)
 
 
 def create_rooted_file_bytes(
