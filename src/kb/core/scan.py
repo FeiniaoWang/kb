@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Iterable, Mapping
 from pathlib import Path, PurePosixPath
 from typing import Any
 
@@ -65,21 +66,27 @@ def discover_root(explicit: Path | None, *, cwd: Path | None = None) -> Path:
     raise RootDiscoveryError("E_NO_KB", NO_KB_MESSAGE)
 
 
-def read_frontmatter(path: Path) -> Frontmatter:
+def read_frontmatter_bytes(content: bytes) -> Frontmatter:
+    text = content.decode("utf-8", errors="strict")
     yaml_lines: list[str] = []
-    with path.open("r", encoding="utf-8", newline="") as stream:
-        if stream.readline().rstrip("\r\n") != "---":
-            raise ValueError("missing opening frontmatter delimiter")
-        for line in stream:
-            if line.rstrip("\r\n") == "---":
-                break
-            yaml_lines.append(line)
-        else:
-            raise ValueError("missing closing frontmatter delimiter")
+    lines = iter(text.splitlines(keepends=True))
+    first = next(lines, "")
+    if first.rstrip("\r\n") != "---":
+        raise ValueError("missing opening frontmatter delimiter")
+    for line in lines:
+        if line.rstrip("\r\n") == "---":
+            break
+        yaml_lines.append(line)
+    else:
+        raise ValueError("missing closing frontmatter delimiter")
     parsed: Any = yaml.load("".join(yaml_lines), Loader=_FrontmatterSafeLoader)
     if not isinstance(parsed, dict):
         raise ValueError("frontmatter must be a YAML mapping")
     return Frontmatter.model_validate(parsed)
+
+
+def read_frontmatter(path: Path) -> Frontmatter:
+    return read_frontmatter_bytes(path.read_bytes())
 
 
 def doc_class_from_type(type_name: str) -> DocClass | None:
@@ -94,13 +101,19 @@ def doc_class_from_type(type_name: str) -> DocClass | None:
     return DocClass.SYNTHETIC
 
 
-def scan(root: Path) -> KB:
-    resolved = root.resolve()
+def _scan_sources(
+    resolved: Path,
+    sources: Iterable[tuple[Path, bytes | None]],
+) -> KB:
     kb = KB(root=resolved)
-    for source_path in sorted(resolved.rglob("*.md")):
-        relative = source_path.relative_to(resolved)
+    for relative, source_bytes in sources:
+        source_path = resolved / relative
         try:
-            frontmatter = read_frontmatter(source_path)
+            frontmatter = (
+                read_frontmatter(source_path)
+                if source_bytes is None
+                else read_frontmatter_bytes(source_bytes)
+            )
         except (OSError, UnicodeError, ValueError, yaml.YAMLError) as error:
             message = str(error)
             kb.files.append(ScannedMarkdown(path=relative, parse_error=message))
@@ -119,11 +132,25 @@ def scan(root: Path) -> KB:
             relative_path=relative,
             doc_class=doc_class,
             frontmatter=frontmatter,
+            source_bytes=source_bytes,
         )
         kb.documents.append(document)
         if document.id is not None:
             kb.by_id.setdefault(document.id, document)
     return kb
+
+
+def scan(root: Path) -> KB:
+    resolved = root.resolve()
+    sources = (
+        (source_path.relative_to(resolved), None)
+        for source_path in sorted(resolved.rglob("*.md"))
+    )
+    return _scan_sources(resolved, sources)
+
+
+def scan_snapshot(root: Path, files: Mapping[Path, bytes]) -> KB:
+    return _scan_sources(root, sorted(files.items()))
 
 
 def resolve_ref(kb: KB, ref: str) -> Document | None:

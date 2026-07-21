@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import errno
 import re
 import sys
 from pathlib import Path, PurePosixPath
@@ -232,6 +233,20 @@ def create(request: CreateRequest) -> CreateResult:
         raise CreateFailure(error.code, error.message, 2) from error
     except ConfigLoadError as error:
         raise CreateFailure(error.code, error.message, 2) from error
+    except WriteFailure as error:
+        if (
+            request.supersedes is not None
+            and error.cause.errno == getattr(errno, "ELOOP", errno.EINVAL)
+            and error.snapshot_kb is not None
+            and resolve_ref(error.snapshot_kb, request.supersedes) is None
+        ):
+            raise CreateFailure(
+                "E_CREATE_SUPERSEDES_INVALID",
+                f"supersedes target cannot be updated safely: "
+                f"{request.supersedes}: {error.cause}",
+                1,
+            ) from error
+        raise CreateFailure("E_CREATE_IO", str(error.cause), 2) from error
     except AllocationBlocked as error:
         paths = ", ".join(path.as_posix() for path in error.paths)
         raise CreateFailure(

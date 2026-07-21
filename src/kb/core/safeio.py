@@ -6,7 +6,7 @@ import stat
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterator
+from typing import Iterator, Literal
 
 _ROOTED_SUPPORTED = (
     hasattr(os, "O_DIRECTORY")
@@ -15,6 +15,7 @@ _ROOTED_SUPPORTED = (
     and os.mkdir in os.supports_dir_fd
     and os.stat in os.supports_dir_fd
     and os.stat in os.supports_follow_symlinks
+    and os.listdir in os.supports_fd
 )
 _UNSUPPORTED_ERRNO = getattr(
     errno,
@@ -29,18 +30,39 @@ class FileIdentity:
     inode: int
 
 
+@dataclass(frozen=True)
+class RootedEntry:
+    name: str
+    kind: Literal["directory", "file", "symlink", "other"]
+    identity: FileIdentity
+
+
+@dataclass(frozen=True)
+class RootedDirectoryListing:
+    identity: FileIdentity
+    entries: tuple[RootedEntry, ...]
+
+
+class RootedContainmentError(OSError):
+    """A rooted operation could no longer prove its acquisition boundary."""
+
+
 def _identity(status: os.stat_result) -> FileIdentity:
     return FileIdentity(device=status.st_dev, inode=status.st_ino)
 
 
-def _stale_error(path: Path) -> OSError:
+def _stale_error(path: Path) -> RootedContainmentError:
     stale = getattr(errno, "ESTALE", errno.EIO)
-    return OSError(stale, "mutable file identity changed", path)
+    return RootedContainmentError(
+        stale,
+        "mutable file identity changed",
+        path,
+    )
 
 
 def _require_rooted_support() -> None:
     if not _ROOTED_SUPPORTED:
-        raise OSError(
+        raise RootedContainmentError(
             _UNSUPPORTED_ERRNO,
             "root-anchored no-follow filesystem operations are unsupported",
         )
@@ -90,6 +112,165 @@ def _open_verified_root(root: Path, expected: FileIdentity) -> int:
     except BaseException:
         os.close(descriptor)
         raise
+
+
+def verify_root(root: Path, expected: FileIdentity) -> None:
+    try:
+        descriptor = _open_verified_root(root, expected)
+    except RootedContainmentError:
+        raise
+    except OSError as error:
+        raise RootedContainmentError(
+            error.errno,
+            error.strerror or str(error),
+            root,
+        ) from error
+    os.close(descriptor)
+
+
+class _RootedReader:
+    def __init__(
+        self,
+        root: Path,
+        descriptor: int,
+        identity: FileIdentity,
+    ) -> None:
+        self.root = root
+        self._descriptor = descriptor
+        self.identity = identity
+
+    def verify_root(self) -> None:
+        verify_root(self.root, self.identity)
+
+    def _open_directory(
+        self,
+        relative: Path,
+        expected: FileIdentity | None = None,
+    ) -> int:
+        parts = relative.parts
+        descriptor = os.dup(self._descriptor)
+        try:
+            for part in parts:
+                child = os.open(part, _directory_flags(), dir_fd=descriptor)
+                os.close(descriptor)
+                descriptor = child
+            status = os.fstat(descriptor)
+            actual = _identity(status)
+            if not stat.S_ISDIR(status.st_mode):
+                raise OSError(
+                    errno.ENOTDIR,
+                    "rooted path is not a directory",
+                    relative,
+                )
+            if expected is not None and actual != expected:
+                raise _stale_error(relative)
+            return descriptor
+        except BaseException:
+            os.close(descriptor)
+            raise
+
+    def list_directory(
+        self,
+        relative: Path,
+        expected: FileIdentity | None = None,
+    ) -> RootedDirectoryListing:
+        self.verify_root()
+        descriptor = self._open_directory(relative, expected)
+        try:
+            identity = _identity(os.fstat(descriptor))
+            entries: list[RootedEntry] = []
+            for name in sorted(os.listdir(descriptor)):
+                status = os.stat(
+                    name,
+                    dir_fd=descriptor,
+                    follow_symlinks=False,
+                )
+                if stat.S_ISDIR(status.st_mode):
+                    kind: Literal["directory", "file", "symlink", "other"] = (
+                        "directory"
+                    )
+                elif stat.S_ISREG(status.st_mode):
+                    kind = "file"
+                elif stat.S_ISLNK(status.st_mode):
+                    kind = "symlink"
+                else:
+                    kind = "other"
+                entries.append(
+                    RootedEntry(
+                        name=name,
+                        kind=kind,
+                        identity=_identity(status),
+                    )
+                )
+        finally:
+            os.close(descriptor)
+        verification = self._open_directory(relative, identity)
+        os.close(verification)
+        self.verify_root()
+        return RootedDirectoryListing(identity=identity, entries=tuple(entries))
+
+    def read_file(
+        self,
+        relative: Path,
+        *,
+        expected: FileIdentity | None = None,
+        parent_expected: FileIdentity | None = None,
+    ) -> bytes:
+        parts = _relative_parts(relative)
+        self.verify_root()
+        parent = self._open_directory(Path(*parts[:-1]), parent_expected)
+        try:
+            descriptor = os.open(
+                parts[-1],
+                os.O_RDONLY | os.O_NOFOLLOW,
+                dir_fd=parent,
+            )
+            try:
+                status = os.fstat(descriptor)
+                if not stat.S_ISREG(status.st_mode):
+                    raise OSError(
+                        errno.EINVAL,
+                        "rooted path is not a regular file",
+                        relative,
+                    )
+                if expected is not None and _identity(status) != expected:
+                    raise _stale_error(relative)
+                with os.fdopen(os.dup(descriptor), "rb") as stream:
+                    content = stream.read()
+            finally:
+                os.close(descriptor)
+            parent_identity = _identity(os.fstat(parent))
+        finally:
+            os.close(parent)
+        verification = self._open_directory(
+            Path(*parts[:-1]),
+            parent_expected or parent_identity,
+        )
+        os.close(verification)
+        self.verify_root()
+        return content
+
+
+@contextmanager
+def rooted_reader(
+    root: Path,
+    expected: FileIdentity | None = None,
+) -> Iterator[_RootedReader]:
+    _require_rooted_support()
+    descriptor = os.open(root, _directory_flags())
+    try:
+        status = os.fstat(descriptor)
+        identity = _identity(status)
+        if not stat.S_ISDIR(status.st_mode):
+            raise OSError(errno.ENOTDIR, "KB root is not a directory", root)
+        if expected is not None and identity != expected:
+            raise _stale_error(root)
+        reader = _RootedReader(root, descriptor, identity)
+        reader.verify_root()
+        yield reader
+        reader.verify_root()
+    finally:
+        os.close(descriptor)
 
 
 @contextmanager

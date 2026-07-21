@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import errno
+import os
 from pathlib import Path
 
 import pytest
 
 from kb.core.housekeeping import LogEntry, init_kb
+from kb.core.model import ConfigLoadError
 from kb.core.write_pipeline import (
     AllocationBlocked,
     CompanionBirth,
@@ -91,6 +94,208 @@ def test_prepare_does_not_follow_root_replacement_link(tmp_path) -> None:
     assert raised.value.role == "directory"
     assert raised.value.path == Path(".")
     assert not (moved / "synthetic/planned.md").exists()
+
+
+def test_prepare_rejects_real_root_replacement_bound_to_loaded_context(
+    tmp_path,
+) -> None:
+    root = initialized(tmp_path)
+    context = load_write_context(root)
+    original = tmp_path / "kb-original"
+    root.rename(original)
+    replacement = initialized(tmp_path)
+
+    with pytest.raises(WriteFailure) as raised:
+        prepare_write(
+            context,
+            WriteIntent(
+                birth=DocumentBirth(
+                    path=Path("synthetic/planned.md"),
+                    content=document_bytes(),
+                ),
+                log_entry=log_entry(),
+            ),
+        )
+
+    assert raised.value.phase == "preflight"
+    assert raised.value.operation == "inspect"
+    assert raised.value.role == "directory"
+    assert raised.value.path == Path(".")
+    assert not (original / "synthetic/planned.md").exists()
+    assert not (replacement / "synthetic/planned.md").exists()
+
+
+def test_load_context_anchors_config_and_scan_during_swap_away_and_back(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    import kb.core.safeio as safeio
+
+    root = initialized(tmp_path)
+    (root / "kb-config.json").write_text(
+        '{"schema": 1, "types": ["original-type"]}',
+        encoding="utf-8",
+    )
+    (root / "synthetic/original.md").write_bytes(
+        document_bytes("KB-000007", "Original", "Original metadata.")
+    )
+    replacement = tmp_path / "replacement"
+    assert init_kb(replacement).root == replacement.resolve()
+    (replacement / "kb-config.json").write_text(
+        '{"schema": 1, "types": ["replacement-type"]}',
+        encoding="utf-8",
+    )
+    (replacement / "synthetic/replacement.md").write_bytes(
+        document_bytes("KB-999999", "Replacement", "Outside metadata.")
+    )
+    moved = tmp_path / "root-during-snapshot"
+    real_open = safeio.os.open
+    swapped = False
+
+    def swap_for_config_read(path, flags, mode=0o777, *, dir_fd=None):
+        nonlocal swapped
+        if path == "kb-config.json" and dir_fd is not None and not swapped:
+            swapped = True
+            root.rename(moved)
+            replacement.rename(root)
+            try:
+                return real_open(path, flags, mode, dir_fd=dir_fd)
+            finally:
+                root.rename(replacement)
+                moved.rename(root)
+        return real_open(path, flags, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr(safeio.os, "open", swap_for_config_read)
+
+    context = load_write_context(root)
+
+    assert swapped
+    assert context.config.types == ["original-type"]
+    assert "KB-000007" in context.kb.by_id
+    assert context.kb.by_id["KB-000007"].frontmatter.root["title"] == "Original"
+    assert "KB-999999" not in context.kb.by_id
+
+
+def test_load_context_closes_root_descriptor_when_snapshot_read_fails(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    import kb.core.safeio as safeio
+
+    root = initialized(tmp_path)
+    real_open = safeio.os.open
+    root_descriptor: int | None = None
+
+    def fail_config_read(path, flags, mode=0o777, *, dir_fd=None):
+        nonlocal root_descriptor
+        if path == "kb-config.json" and dir_fd is not None:
+            root_descriptor = dir_fd
+            raise OSError(errno.EIO, "snapshot read failure")
+        return real_open(path, flags, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr(safeio.os, "open", fail_config_read)
+
+    with pytest.raises(ConfigLoadError) as raised:
+        load_write_context(root)
+
+    assert raised.value.code == "E_CONFIG_INVALID"
+    assert root_descriptor is not None
+    with pytest.raises(OSError):
+        os.fstat(root_descriptor)
+
+
+def test_load_context_fails_safely_when_rooted_reads_are_unsupported(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    import kb.core.safeio as safeio
+
+    root = initialized(tmp_path)
+    before = {path: path.read_bytes() for path in root.rglob("*") if path.is_file()}
+    monkeypatch.setattr(safeio, "_ROOTED_SUPPORTED", False)
+
+    with pytest.raises(WriteFailure) as raised:
+        load_write_context(root)
+
+    assert raised.value.phase == "preflight"
+    assert raised.value.operation == "inspect"
+    assert raised.value.role == "directory"
+    assert raised.value.cause.errno == errno.ENOTSUP
+    assert {path: path.read_bytes() for path in root.rglob("*") if path.is_file()} == before
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        FileNotFoundError(errno.ENOENT, "config disappeared"),
+        PermissionError(errno.EACCES, "config unreadable"),
+    ],
+)
+def test_load_context_preserves_config_error_for_final_config_access_failure(
+    tmp_path,
+    monkeypatch,
+    error,
+) -> None:
+    import kb.core.safeio as safeio
+
+    root = initialized(tmp_path)
+    real_read = safeio._RootedReader.read_file
+
+    def fail_config_read(reader, relative, **kwargs):
+        if relative == Path("kb-config.json"):
+            raise error
+        return real_read(reader, relative, **kwargs)
+
+    monkeypatch.setattr(safeio._RootedReader, "read_file", fail_config_read)
+
+    with pytest.raises(ConfigLoadError) as raised:
+        load_write_context(root)
+
+    assert raised.value.code == "E_CONFIG_INVALID"
+    assert raised.value.message.startswith("invalid kb-config.json:")
+
+
+def test_load_context_snapshot_does_not_resolve_root_after_acquisition(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    import kb.core.write_pipeline as pipeline
+
+    root = initialized(tmp_path)
+    (root / "synthetic/original.md").write_bytes(
+        document_bytes("KB-000007", "Original", "Original metadata.")
+    )
+    replacement = tmp_path / "replacement-during-scan"
+    assert init_kb(replacement).root == replacement.resolve()
+    moved = tmp_path / "root-during-scan-build"
+    real_scan_snapshot = pipeline.scan_snapshot
+    swapped = False
+
+    def build_while_root_path_is_a_symlink(captured_root, files):
+        nonlocal swapped
+        swapped = True
+        root.rename(moved)
+        try:
+            root.symlink_to(replacement, target_is_directory=True)
+        except (NotImplementedError, OSError) as error:
+            moved.rename(root)
+            pytest.skip(f"symlinks unsupported: {error}")
+        try:
+            return real_scan_snapshot(captured_root, files)
+        finally:
+            root.unlink()
+            moved.rename(root)
+
+    monkeypatch.setattr(pipeline, "scan_snapshot", build_while_root_path_is_a_symlink)
+
+    context = load_write_context(root)
+
+    assert swapped
+    assert context.kb.root == context.root
+    assert all(
+        document._source_path == context.root / document.path
+        for document in context.kb.documents
+    )
 
 
 @pytest.mark.parametrize(
@@ -777,3 +982,264 @@ def test_late_born_index_occupant_is_preserved(tmp_path, monkeypatch) -> None:
     assert raised.value.operation == "create"
     assert raised.value.role == "index"
     assert born_index.read_bytes() == b"late index"
+
+
+def test_prepare_rejects_temporary_index_directory_swap_during_snapshot(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    import kb.core.safeio as safeio
+
+    root = initialized(tmp_path)
+    context = load_write_context(root)
+    synthetic = root / "synthetic"
+    moved = root / "synthetic-during-snapshot"
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    outside_index = outside / "index.md"
+    outside_document = outside / "outside.md"
+    outside_index.write_text(
+        "---\ntype: index\ndescription: Outside.\n---\n# Outside\n",
+        encoding="utf-8",
+    )
+    outside_document.write_bytes(
+        document_bytes("KB-888888", "Outside Secret", "Outside metadata.")
+    )
+    kb_before = {path: path.read_bytes() for path in root.rglob("*") if path.is_file()}
+    outside_before = {
+        path: path.read_bytes() for path in outside.rglob("*") if path.is_file()
+    }
+    synthetic_identity = os.stat(synthetic)
+    real_listdir = safeio.os.listdir
+    swapped = False
+
+    def swap_during_listing(path="."):
+        nonlocal swapped
+        if (
+            isinstance(path, int)
+            and os.fstat(path).st_dev == synthetic_identity.st_dev
+            and os.fstat(path).st_ino == synthetic_identity.st_ino
+            and not swapped
+        ):
+            swapped = True
+            synthetic.rename(moved)
+            synthetic.symlink_to(outside, target_is_directory=True)
+        return real_listdir(path)
+
+    monkeypatch.setattr(safeio.os, "listdir", swap_during_listing)
+    try:
+        with pytest.raises(WriteFailure) as raised:
+            prepare_write(
+                context,
+                WriteIntent(
+                    birth=DocumentBirth(
+                        path=Path("synthetic/planned.md"),
+                        content=document_bytes(),
+                    ),
+                    log_entry=log_entry(),
+                ),
+            )
+    finally:
+        if synthetic.is_symlink():
+            synthetic.unlink()
+            moved.rename(synthetic)
+
+    assert swapped
+    assert raised.value.phase == "preflight"
+    assert raised.value.role in {"directory", "index"}
+    assert {path: path.read_bytes() for path in root.rglob("*") if path.is_file()} == kb_before
+    assert {
+        path: path.read_bytes() for path in outside.rglob("*") if path.is_file()
+    } == outside_before
+    assert b"Outside Secret" not in (root / "synthetic/index.md").read_bytes()
+
+
+def test_prepare_rejects_external_tree_swap_before_index_listing_snapshot(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    import kb.core.safeio as safeio
+
+    root = initialized(tmp_path)
+    context = load_write_context(root)
+    synthetic = root / "synthetic"
+    moved = root / "synthetic-before-listing"
+    outside = tmp_path / "outside-tree"
+    outside.mkdir()
+    (outside / "index.md").write_text(
+        "---\ntype: index\ndescription: Outside.\n---\n# Outside\n",
+        encoding="utf-8",
+    )
+    (outside / "outside.md").write_bytes(
+        document_bytes("KB-777777", "Outside Secret", "Outside metadata.")
+    )
+    kb_before = {path: path.read_bytes() for path in root.rglob("*") if path.is_file()}
+    outside_before = {
+        path.name: path.read_bytes() for path in outside.iterdir() if path.is_file()
+    }
+    real_read = safeio._RootedReader.read_file
+    swapped = False
+
+    def swap_after_index_read(reader, relative, **kwargs):
+        nonlocal swapped
+        content = real_read(reader, relative, **kwargs)
+        if relative == Path("synthetic/index.md") and not swapped:
+            swapped = True
+            synthetic.rename(moved)
+            outside.rename(synthetic)
+        return content
+
+    monkeypatch.setattr(safeio._RootedReader, "read_file", swap_after_index_read)
+    try:
+        with pytest.raises(WriteFailure) as raised:
+            prepare_write(
+                context,
+                WriteIntent(
+                    birth=DocumentBirth(
+                        path=Path("synthetic/planned.md"),
+                        content=document_bytes(),
+                    ),
+                    log_entry=log_entry(),
+                ),
+            )
+    finally:
+        if synthetic.exists() and moved.exists():
+            synthetic.rename(outside)
+            moved.rename(synthetic)
+
+    assert swapped
+    assert raised.value.phase == "preflight"
+    assert raised.value.role in {"directory", "index"}
+    assert {path: path.read_bytes() for path in root.rglob("*") if path.is_file()} == kb_before
+    assert {
+        path.name: path.read_bytes() for path in outside.iterdir() if path.is_file()
+    } == outside_before
+    assert b"Outside Secret" not in (root / "synthetic/index.md").read_bytes()
+
+
+def test_prepare_rejects_directory_b_installed_during_bound_index_read(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    import kb.core.safeio as safeio
+
+    root = initialized(tmp_path)
+    context = load_write_context(root)
+    synthetic = root / "synthetic"
+    moved = root / "synthetic-during-index-read"
+    replacement = tmp_path / "replacement-synthetic"
+    replacement.mkdir()
+    (replacement / "index.md").write_text(
+        "---\ntype: index\ndescription: Replacement.\n---\n# Replacement\n",
+        encoding="utf-8",
+    )
+    (replacement / "outside.md").write_bytes(
+        document_bytes("KB-666666", "Outside Secret", "Outside metadata.")
+    )
+    kb_before = {path: path.read_bytes() for path in root.rglob("*") if path.is_file()}
+    replacement_before = {
+        path.name: path.read_bytes() for path in replacement.iterdir() if path.is_file()
+    }
+    real_read = safeio._RootedReader.read_file
+    swapped = False
+
+    def swap_before_bound_index_read(reader, relative, **kwargs):
+        nonlocal swapped
+        if relative == Path("synthetic/index.md") and not swapped:
+            swapped = True
+            synthetic.rename(moved)
+            replacement.rename(synthetic)
+            try:
+                return real_read(reader, relative, **kwargs)
+            finally:
+                synthetic.rename(replacement)
+                moved.rename(synthetic)
+        return real_read(reader, relative, **kwargs)
+
+    monkeypatch.setattr(
+        safeio._RootedReader,
+        "read_file",
+        swap_before_bound_index_read,
+    )
+    try:
+        with pytest.raises(WriteFailure) as raised:
+            prepare_write(
+                context,
+                WriteIntent(
+                    birth=DocumentBirth(
+                        path=Path("synthetic/planned.md"),
+                        content=document_bytes(),
+                    ),
+                    log_entry=log_entry(),
+                ),
+            )
+    finally:
+        if synthetic.exists() and moved.exists():
+            synthetic.rename(replacement)
+            moved.rename(synthetic)
+
+    assert swapped
+    assert raised.value.phase == "preflight"
+    assert raised.value.role in {"directory", "index"}
+    assert not (root / "synthetic/planned.md").exists()
+    assert {path: path.read_bytes() for path in root.rglob("*") if path.is_file()} == kb_before
+    assert {
+        path.name: path.read_bytes() for path in replacement.iterdir() if path.is_file()
+    } == replacement_before
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="requires FIFO support")
+def test_prepare_rejects_non_regular_non_markdown_listing_child(
+    tmp_path,
+) -> None:
+    root = initialized(tmp_path)
+    context = load_write_context(root)
+    fifo = root / "synthetic/pipe"
+    os.mkfifo(fifo)
+
+    with pytest.raises(WriteFailure) as raised:
+        prepare_write(
+            context,
+            WriteIntent(
+                birth=DocumentBirth(
+                    path=Path("synthetic/planned.md"),
+                    content=document_bytes(),
+                ),
+                log_entry=log_entry(),
+            ),
+        )
+
+    assert raised.value.phase == "preflight"
+    assert raised.value.role == "index"
+    assert not (root / "synthetic/planned.md").exists()
+
+
+def test_prepare_index_rendering_performs_no_path_based_listing_reads(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    root = initialized(tmp_path)
+    (root / "synthetic/existing.md").write_bytes(
+        document_bytes("KB-000009", "Existing", "Existing metadata.")
+    )
+    context = load_write_context(root)
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("pipeline index rendering used a path-based read")
+
+    monkeypatch.setattr(Path, "iterdir", forbidden)
+    monkeypatch.setattr(Path, "glob", forbidden)
+    monkeypatch.setattr(Path, "read_text", forbidden)
+
+    prepared = prepare_write(
+        context,
+        WriteIntent(
+            birth=DocumentBirth(
+                path=Path("synthetic/planned.md"),
+                content=document_bytes(),
+            ),
+            log_entry=log_entry(),
+        ),
+    )
+
+    assert prepared.sources == {}

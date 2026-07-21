@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import errno
 import json
 import os
 import re
@@ -1489,6 +1490,86 @@ def test_symlinked_supersession_target_outside_is_invalid_without_writes(
     assert target.is_symlink() and os.readlink(target) == link_target
 
 
+def test_regular_supersession_with_unrelated_markdown_symlink_maps_to_create_io(
+    tmp_path, initialized_kb, invoke_create
+) -> None:
+    add_chat(initialized_kb)
+    add_synthetic(initialized_kb)
+    outside = tmp_path / "outside-unrelated"
+    external = add_synthetic(
+        outside,
+        relative="external.md",
+        doc_id="KB-900001",
+    )
+    unrelated = initialized_kb / "synthetic/unrelated.md"
+    try:
+        unrelated.symlink_to(external)
+    except (NotImplementedError, OSError) as error:
+        pytest.skip(f"symlinks unsupported: {error}")
+    kb_before = snapshot(initialized_kb)
+    outside_before = snapshot(outside)
+
+    result = supersede(invoke_create, initialized_kb)
+
+    assert result.exit_code == 2
+    assert "E_CREATE_IO" in result.stderr
+    assert "E_CREATE_SUPERSEDES_INVALID" not in result.stderr
+    assert snapshot(initialized_kb) == kb_before
+    assert snapshot(outside) == outside_before
+
+
+def test_final_config_access_failure_remains_config_invalid_for_create(
+    initialized_kb,
+    invoke_create,
+    monkeypatch,
+) -> None:
+    import kb.core.safeio as safeio
+
+    add_chat(initialized_kb)
+    before = snapshot(initialized_kb)
+    real_read = safeio._RootedReader.read_file
+
+    def fail_config_read(reader, relative, **kwargs):
+        if relative == Path("kb-config.json"):
+            raise PermissionError(errno.EACCES, "config unreadable")
+        return real_read(reader, relative, **kwargs)
+
+    monkeypatch.setattr(safeio._RootedReader, "read_file", fail_config_read)
+
+    result = invoke_valid(invoke_create, initialized_kb)
+
+    assert result.exit_code == 2
+    assert "E_CONFIG_INVALID" in result.stderr
+    assert "E_CREATE_IO" not in result.stderr
+    assert snapshot(initialized_kb) == before
+
+
+def test_index_losing_closing_delimiter_during_create_preflight_maps_to_io(
+    initialized_kb,
+    invoke_create,
+    monkeypatch,
+) -> None:
+    import kb.core.create as create_core
+
+    add_chat(initialized_kb)
+    index = initialized_kb / "synthetic/index.md"
+    real_prepare = create_core.prepare_write
+    injected: dict[str, dict[str, bytes]] = {}
+
+    def corrupt_index_then_prepare(context, intent):
+        index.write_bytes(b"---\ntype: index\n")
+        injected["snapshot"] = snapshot(initialized_kb)
+        return real_prepare(context, intent)
+
+    monkeypatch.setattr(create_core, "prepare_write", corrupt_index_then_prepare)
+
+    result = invoke_valid(invoke_create, initialized_kb)
+
+    assert result.exit_code == 2
+    assert "E_CREATE_IO" in result.stderr
+    assert snapshot(initialized_kb) == injected["snapshot"]
+
+
 def test_symlinked_existing_index_outside_fails_before_any_writes(
     tmp_path, initialized_kb, invoke_create
 ) -> None:
@@ -1549,3 +1630,34 @@ def test_symlinked_existing_log_outside_fails_before_any_writes(
     assert snapshot(initialized_kb) == kb_before
     assert snapshot(outside) == outside_before
     assert log.is_symlink() and os.readlink(log) == link_target
+
+
+def test_replaced_root_before_preparation_maps_to_create_io_without_writes(
+    tmp_path,
+    initialized_kb,
+    invoke_create,
+    monkeypatch,
+) -> None:
+    import kb.core.create as create_core
+    from kb.core.housekeeping import init_kb
+
+    add_chat(initialized_kb)
+    original = tmp_path / "original-kb"
+    replacement_holder: dict[str, Path] = {}
+    real_prepare = create_core.prepare_write
+
+    def replace_root(context, intent):
+        initialized_kb.rename(original)
+        assert init_kb(initialized_kb).root == initialized_kb.resolve()
+        replacement_holder["root"] = initialized_kb
+        return real_prepare(context, intent)
+
+    monkeypatch.setattr(create_core, "prepare_write", replace_root)
+
+    result = invoke_valid(invoke_create, initialized_kb)
+
+    replacement = replacement_holder["root"]
+    assert result.exit_code == 2
+    assert "E_CREATE_IO" in result.stderr
+    assert not (original / "synthetic/webhook-retry-policy.md").exists()
+    assert not (replacement / "synthetic/webhook-retry-policy.md").exists()

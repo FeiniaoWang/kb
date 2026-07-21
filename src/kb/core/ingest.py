@@ -311,6 +311,8 @@ def ingest(request: IngestRequest) -> IngestResult:
         raise IngestFailure(error.code, error.message, 2) from error
     except ConfigLoadError as error:
         raise _failure_from_config(error) from error
+    except WriteFailure as error:
+        raise IngestFailure("E_INGEST_IO", str(error.cause), 2) from error
     except AllocationBlocked as error:
         paths = ", ".join(path.as_posix() for path in error.paths)
         raise IngestFailure(

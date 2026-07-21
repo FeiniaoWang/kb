@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import errno
 from collections.abc import Mapping
+from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Literal
 
@@ -9,24 +11,30 @@ from pydantic import BaseModel, Field, PrivateAttr
 
 from kb.core.housekeeping import LogEntry, empty_log_content, format_log_entry
 from kb.core.indexing import (
+    DirectoryListingMetadata,
     file_listing_line,
-    regenerate_directory_index,
+    file_listing_metadata,
     render_index,
+    render_projected_directory_index,
+    subdirectory_listing_metadata,
     subdirectory_listing_line,
 )
-from kb.core.model import Config, load_config
+from kb.core.model import Config, ConfigLoadError, parse_config_bytes
 from kb.core.safeio import (
     FileIdentity,
+    _RootedReader,
+    RootedContainmentError,
     append_rooted_bytes,
     create_rooted_directory,
     create_rooted_file_bytes,
-    inspect_root,
     inspect_rooted_directory,
     inspect_rooted_file,
     overwrite_rooted_bytes,
     read_rooted_bytes,
+    rooted_reader,
+    verify_root,
 )
-from kb.core.scan import KB, discover_root, scan
+from kb.core.scan import KB, discover_root, scan_snapshot
 
 WritePhase = Literal["preflight", "write"]
 WriteOperation = Literal[
@@ -52,6 +60,7 @@ class WriteContext(BaseModel):
     root: Path
     config: Config
     kb: KB
+    _root_identity: FileIdentity = PrivateAttr()
 
 
 class CompanionBirth(BaseModel):
@@ -106,6 +115,13 @@ class WriteReceipt(BaseModel):
     updated: list[str] = Field(default_factory=list)
 
 
+@dataclass(frozen=True)
+class _RootedIndexSnapshot:
+    identity: FileIdentity
+    content: bytes
+    listing: DirectoryListingMetadata
+
+
 class AllocationBlocked(Exception):
     def __init__(self, paths: tuple[Path, ...]) -> None:
         super().__init__("malformed documents block id allocation")
@@ -122,6 +138,7 @@ class WriteFailure(Exception):
         cause: OSError,
         *,
         key: str | None = None,
+        snapshot_kb: KB | None = None,
     ) -> None:
         super().__init__(str(cause))
         self.phase = phase
@@ -130,16 +147,106 @@ class WriteFailure(Exception):
         self.path = path
         self.cause = cause
         self.key = key
+        self.snapshot_kb = snapshot_kb
+
+
+class _MarkdownSnapshotError(OSError):
+    def __init__(
+        self,
+        error_number: int,
+        message: str,
+        path: Path,
+        files: Mapping[Path, bytes],
+    ) -> None:
+        super().__init__(error_number, message, path)
+        self.files = dict(files)
 
 
 def load_write_context(kb_root: Path | None) -> WriteContext:
     root = discover_root(kb_root)
-    config = load_config(root)
-    kb = scan(root)
+    try:
+        with rooted_reader(root) as reader:
+            root_identity = reader.identity
+            try:
+                config_content = reader.read_file(Path("kb-config.json"))
+            except RootedContainmentError:
+                raise
+            except OSError as error:
+                raise ConfigLoadError(
+                    "E_CONFIG_INVALID",
+                    f"invalid kb-config.json: {error}",
+                ) from error
+            config = parse_config_bytes(config_content)
+            kb = scan_snapshot(root, _snapshot_markdown(reader))
+    except _MarkdownSnapshotError as error:
+        raise WriteFailure(
+            "preflight",
+            "inspect",
+            "directory",
+            Path(error.filename),
+            error,
+            snapshot_kb=scan_snapshot(root, error.files),
+        ) from error
+    except OSError as error:
+        raise WriteFailure(
+            "preflight",
+            "inspect",
+            "directory",
+            Path("."),
+            error,
+        ) from error
     if kb.malformed:
         paths = tuple(sorted(path for path, _ in kb.malformed))
         raise AllocationBlocked(paths)
-    return WriteContext(root=root, config=config, kb=kb)
+    context = WriteContext(root=root, config=config, kb=kb)
+    context._root_identity = root_identity
+    return context
+
+
+def _snapshot_markdown(reader: _RootedReader) -> dict[Path, bytes]:
+    files: dict[Path, bytes] = {}
+    unsafe: list[tuple[int, str, Path]] = []
+
+    def visit(directory: Path, expected: FileIdentity) -> None:
+        listing = reader.list_directory(directory, expected)
+        for entry in listing.entries:
+            relative = directory / entry.name
+            if entry.kind == "directory":
+                visit(relative, entry.identity)
+            elif entry.kind == "file" and relative.suffix == ".md":
+                files[relative] = reader.read_file(
+                    relative,
+                    expected=entry.identity,
+                    parent_expected=listing.identity,
+                )
+            elif entry.kind == "symlink" and relative.suffix == ".md":
+                unsafe.append(
+                    (
+                        getattr(errno, "ELOOP", errno.EINVAL),
+                        "Markdown scan path must not be a symlink or junction",
+                        relative,
+                    )
+                )
+            elif entry.kind == "other" and relative.suffix == ".md":
+                unsafe.append(
+                    (
+                        errno.EINVAL,
+                        "Markdown scan path is not a regular file",
+                        relative,
+                    )
+                )
+        reader.list_directory(directory, listing.identity)
+
+    visit(Path(), reader.identity)
+    if unsafe:
+        error_number, message, path = unsafe[0]
+        raise _MarkdownSnapshotError(
+            error_number,
+            message,
+            path,
+            files,
+        )
+    return files
 
 
 def _relative_path(value: Path) -> Path:
@@ -243,10 +350,110 @@ def _render_born_indexes(
     }
 
 
+def _rooted_index_snapshot(
+    root: Path,
+    directory: Path,
+    root_identity: FileIdentity,
+    directory_identity: FileIdentity,
+) -> _RootedIndexSnapshot:
+    files = []
+    subdirectories = []
+    with rooted_reader(root, root_identity) as reader:
+        listing = reader.list_directory(directory, directory_identity)
+        refresh_index_entry = next(
+            (entry for entry in listing.entries if entry.name == "index.md"),
+            None,
+        )
+        if refresh_index_entry is None:
+            raise FileNotFoundError(
+                errno.ENOENT,
+                "directory index is missing",
+                directory / "index.md",
+            )
+        if refresh_index_entry.kind != "file":
+            error_number = (
+                getattr(errno, "ELOOP", errno.EINVAL)
+                if refresh_index_entry.kind == "symlink"
+                else errno.EINVAL
+            )
+            raise OSError(
+                error_number,
+                "directory index is not a regular file",
+                directory / "index.md",
+            )
+        index_content = reader.read_file(
+            directory / "index.md",
+            expected=refresh_index_entry.identity,
+            parent_expected=listing.identity,
+        )
+        for entry in listing.entries:
+            relative = directory / entry.name
+            if entry.kind == "symlink":
+                raise OSError(
+                    getattr(errno, "ELOOP", errno.EINVAL),
+                    "index listing child must not be a symlink or junction",
+                    relative,
+                )
+            if entry.kind == "directory":
+                child_listing = reader.list_directory(relative, entry.identity)
+                child_index_entry = next(
+                    (
+                        child
+                        for child in child_listing.entries
+                        if child.name == "index.md"
+                    ),
+                    None,
+                )
+                if child_index_entry is None:
+                    continue
+                if child_index_entry.kind != "file":
+                    raise OSError(
+                        errno.EINVAL,
+                        "subdirectory index is not a regular file",
+                        relative / "index.md",
+                    )
+                content = reader.read_file(
+                    relative / "index.md",
+                    expected=child_index_entry.identity,
+                    parent_expected=child_listing.identity,
+                )
+                subdirectories.append(
+                    subdirectory_listing_metadata(entry.name, content)
+                )
+                continue
+            if entry.kind == "other":
+                raise OSError(
+                    errno.EINVAL,
+                    "index listing child is not a regular file or directory",
+                    relative,
+                )
+            if (
+                entry.kind == "file"
+                and relative.suffix == ".md"
+                and entry.name not in {"index.md", "log.md"}
+            ):
+                content = reader.read_file(
+                    relative,
+                    expected=entry.identity,
+                    parent_expected=listing.identity,
+                )
+                files.append(file_listing_metadata(entry.name, content))
+        reader.list_directory(directory, listing.identity)
+    return _RootedIndexSnapshot(
+        identity=refresh_index_entry.identity,
+        content=index_content,
+        listing=DirectoryListingMetadata(
+            files=files,
+            subdirectories=subdirectories,
+        ),
+    )
+
+
 def prepare_write(context: WriteContext, intent: WriteIntent) -> PreparedWrite:
     root = context.root
+    root_identity = context._root_identity
     try:
-        root_identity = inspect_root(root)
+        verify_root(root, root_identity)
     except OSError as error:
         raise WriteFailure(
             "preflight",
@@ -346,32 +553,24 @@ def prepare_write(context: WriteContext, intent: WriteIntent) -> PreparedWrite:
             content=content,
         )
 
-    try:
-        refresh_identity = inspect_rooted_file(root, refresh_index, root_identity)
-    except OSError as error:
-        raise WriteFailure(
-            "preflight",
-            "inspect",
-            "index",
-            refresh_index,
-            error,
-        ) from error
-    assert refresh_identity is not None
-    try:
-        refresh_source = read_rooted_bytes(
-            root,
-            refresh_index,
-            root_identity,
-            refresh_identity,
-        )
-    except OSError as error:
-        raise WriteFailure(
-            "preflight",
-            "read",
-            "index",
-            refresh_index,
-            error,
-        ) from error
+    if not refresh_directory.parts:
+        refresh_directory_identity = root_identity
+    else:
+        try:
+            refresh_directory_identity = inspect_rooted_directory(
+                root,
+                refresh_directory,
+                root_identity,
+            )
+        except OSError as error:
+            raise WriteFailure(
+                "preflight",
+                "inspect",
+                "index",
+                refresh_index,
+                error,
+            ) from error
+        assert refresh_directory_identity is not None
     try:
         log_identity = inspect_rooted_file(
             root,
@@ -403,10 +602,16 @@ def prepare_write(context: WriteContext, intent: WriteIntent) -> PreparedWrite:
         }
     )
     try:
-        refresh_content = regenerate_directory_index(
+        index_snapshot = _rooted_index_snapshot(
             root,
-            root / refresh_directory,
-            source=refresh_source,
+            refresh_directory,
+            root_identity,
+            refresh_directory_identity,
+        )
+        refresh_content = render_projected_directory_index(
+            index_snapshot.content,
+            refresh_directory.name or root.name,
+            index_snapshot.listing,
             planned_files=planned_files,
             planned_subdirectories=planned_subdirectories,
         ).encode("utf-8")
@@ -430,7 +635,7 @@ def prepare_write(context: WriteContext, intent: WriteIntent) -> PreparedWrite:
     prepared._new_directories = new_directories
     prepared._new_indexes = new_indexes
     prepared._refresh_index = refresh_index
-    prepared._refresh_identity = refresh_identity
+    prepared._refresh_identity = index_snapshot.identity
     prepared._refresh_content = refresh_content
     prepared._log_identity = log_identity
     prepared._created = sorted(

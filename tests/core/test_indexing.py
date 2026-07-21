@@ -1,8 +1,12 @@
+import pytest
+
 from kb.core.housekeeping import init_kb
 from kb.core.indexing import (
+    DirectoryListingMetadata,
     file_listing_line,
     regenerate_directory_index,
     render_index,
+    render_projected_directory_index,
     subdirectory_listing_line,
 )
 
@@ -108,3 +112,22 @@ def test_projected_entries_merge_by_path_key_not_rendered_label(tmp_path) -> Non
     )
 
     assert rendered.index("(alpha.md)") < rendered.index("(zulu.md)")
+
+
+def test_projected_index_missing_closing_delimiter_raises_value_error() -> None:
+    with pytest.raises(ValueError, match="closing frontmatter delimiter"):
+        render_projected_directory_index(
+            b"---\ntype: index\n",
+            "synthetic",
+            DirectoryListingMetadata(),
+        )
+
+
+def test_path_regeneration_normalizes_crlf_like_previous_text_reader(tmp_path) -> None:
+    init_kb(tmp_path)
+    index = tmp_path / "synthetic/index.md"
+    index.write_bytes(index.read_bytes().replace(b"\n", b"\r\n"))
+
+    regenerated = regenerate_directory_index(tmp_path, index.parent)
+
+    assert "\r" not in regenerated

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import errno
 import json
 import os
 import re
@@ -832,6 +833,62 @@ def test_ac42_newer_schema_is_environment_error(initialized_kb, invoke_ingest) -
     assert snapshot(initialized_kb) == before
 
 
+def test_final_config_access_failure_remains_config_invalid_for_ingest(
+    tmp_path,
+    initialized_kb,
+    invoke_ingest,
+    monkeypatch,
+) -> None:
+    import kb.core.safeio as safeio
+
+    source = tmp_path / "evidence.md"
+    source.write_text("evidence\n", encoding="utf-8")
+    before = snapshot(initialized_kb)
+    real_read = safeio._RootedReader.read_file
+
+    def fail_config_read(reader, relative, **kwargs):
+        if relative == Path("kb-config.json"):
+            raise PermissionError(errno.EACCES, "config unreadable")
+        return real_read(reader, relative, **kwargs)
+
+    monkeypatch.setattr(safeio._RootedReader, "read_file", fail_config_read)
+
+    result = ingest_file(invoke_ingest, initialized_kb, source)
+
+    assert result.exit_code == 2
+    assert "E_CONFIG_INVALID" in result.stderr
+    assert "E_INGEST_IO" not in result.stderr
+    assert snapshot(initialized_kb) == before
+
+
+def test_index_losing_closing_delimiter_during_ingest_preflight_maps_to_io(
+    tmp_path,
+    initialized_kb,
+    invoke_ingest,
+    monkeypatch,
+) -> None:
+    import kb.core.ingest as ingest_core
+
+    source = tmp_path / "evidence.md"
+    source.write_text("evidence\n", encoding="utf-8")
+    index = initialized_kb / "raw/sources/index.md"
+    real_prepare = ingest_core.prepare_write
+    injected: dict[str, dict[str, bytes]] = {}
+
+    def corrupt_index_then_prepare(context, intent):
+        index.write_bytes(b"---\ntype: index\n")
+        injected["snapshot"] = snapshot(initialized_kb)
+        return real_prepare(context, intent)
+
+    monkeypatch.setattr(ingest_core, "prepare_write", corrupt_index_then_prepare)
+
+    result = ingest_file(invoke_ingest, initialized_kb, source)
+
+    assert result.exit_code == 2
+    assert "E_INGEST_IO" in result.stderr
+    assert snapshot(initialized_kb) == injected["snapshot"]
+
+
 def test_ac43_failed_preflight_is_byte_atomic(initialized_kb, invoke_ingest) -> None:
     before = snapshot(initialized_kb)
     result = invoke_ingest(
@@ -1085,3 +1142,35 @@ def test_ac50_file_ingest_never_invokes_git_or_creates_git_directory(
     result = ingest_file(invoke_ingest, initialized_kb, source)
     assert result.exit_code == 0
     assert not (initialized_kb / ".git").exists()
+
+
+def test_replaced_root_before_preparation_maps_to_ingest_io_without_writes(
+    tmp_path,
+    initialized_kb,
+    invoke_ingest,
+    monkeypatch,
+) -> None:
+    import kb.core.ingest as ingest_core
+    from kb.core.housekeeping import init_kb
+
+    source = tmp_path / "evidence.md"
+    source.write_text("evidence\n", encoding="utf-8")
+    original = tmp_path / "original-kb"
+    replacement_holder: dict[str, Path] = {}
+    real_prepare = ingest_core.prepare_write
+
+    def replace_root(context, intent):
+        initialized_kb.rename(original)
+        assert init_kb(initialized_kb).root == initialized_kb.resolve()
+        replacement_holder["root"] = initialized_kb
+        return real_prepare(context, intent)
+
+    monkeypatch.setattr(ingest_core, "prepare_write", replace_root)
+
+    result = ingest_file(invoke_ingest, initialized_kb, source)
+
+    replacement = replacement_holder["root"]
+    assert result.exit_code == 2
+    assert "E_INGEST_IO" in result.stderr
+    assert not (original / "raw/sources/evidence.md").exists()
+    assert not (replacement / "raw/sources/evidence.md").exists()
