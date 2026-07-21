@@ -51,7 +51,21 @@ adapter. It returns owned bytes and root-relative metadata, then closes every
 descriptor on success and failure. Existing config and frontmatter parsers are
 refactored to accept those bytes, and the ordinary path-based loaders delegate
 to the same parsers; the pipeline does not create a second schema or parser.
-The scan is still rebuilt once per invocation and is not persisted or cached.
+For Markdown, the owned bytes are only the incrementally acquired frontmatter
+prefix: acquisition reads through the closing `---` delimiter and stops. A
+valid document body is neither read nor retained by the scan or by
+`WriteContext`; `Document.body` remains a lazy path read under the normative
+`00-shared.md` contract. A malformed document may be read to EOF when that is
+necessary to prove that no closing delimiter exists. Both the ordinary
+path-based scan and the rooted scan use the same frontmatter-prefix reader and
+the same byte parser, so ordering, YAML behavior, and malformed diagnostics do
+not diverge. The scan is still rebuilt once per invocation and is not
+persisted or cached.
+
+Full identity-checked bytes are acquired only later, during `prepare_write()`,
+for a mutation source that actually needs a lossless transformation (currently
+the supersession target). Those bytes live in `PreparedWrite.sources`; the
+allocation snapshot never retains them.
 
 `WriteContext` remains a Pydantic model and privately stores the captured root
 identity. It stores no descriptor. `prepare_write()` reopens the root before
@@ -88,6 +102,23 @@ No live descriptor crosses `load_write_context()`, `prepare_write()`, or
 the descriptors it needs while carrying only immutable identities, bytes, and
 typed metadata between stages.
 
+### Born-directory identity binding
+
+`create_rooted_directory()` returns the identity of the directory it created
+while its verified immediate-parent descriptor is still held. During
+`apply_write()`, every born directory identity is retained as immutable local
+state and is required as the expected immediate-parent identity for its own
+`index.md`, the next child directory, and every companion or citable document
+born beneath it. A replacement installed at the pathname after `mkdir` is
+therefore never eligible to receive a later pipeline write. Every born
+directory is identity-verified again before success is returned.
+
+Only identities cross individual rooted operations. Parent and child
+descriptors remain operation-local and are closed before the next pipeline
+effect, including on failure. A born-directory identity mismatch is a typed
+write-phase `WriteFailure`; prior effects remain as documented because the
+pipeline does not roll back.
+
 ## Goal
 
 Extract the duplicated create/ingest filesystem commit orchestration into one deep core module while preserving every observable `kb create` and `kb ingest` contract. The extraction also strengthens ingest's mutable index and log handling to match create's identity-checked safety without adding rollback or changing documented partial-write semantics.
@@ -109,7 +140,12 @@ The design covers:
 - deterministic `created` and `updated` path accounting; and
 - moving the shared pure `slug()` helper out of `ingest.py`.
 
-The design does not move file, stdin, clipboard, or create-body acquisition. That work remains in the separately approved CLI/core input-seam plan. It does not define `kb revise`, introduce rollback, add a transaction abstraction, or change any PRD or command behavior.
+The design changes KB context acquisition only as described above: root-bound
+config acquisition plus lazy Markdown frontmatter-prefix scans. It does not
+move external file, stdin, clipboard, or create-body acquisition; that work
+remains in the separately approved CLI/core input-seam plan. It does not
+define `kb revise`, introduce rollback, add a transaction abstraction, or
+change any PRD or command behavior.
 
 ## Design Vocabulary and Dependency Classification
 
@@ -281,8 +317,10 @@ The current scope always has one citable document birth. Mutation-only revision 
 `load_write_context()`:
 
 - discovers the root;
-- loads config;
-- scans exactly once;
+- captures the root identity and loads config descriptor-relatively;
+- scans exactly once, descriptor-relatively, reading only each Markdown
+  frontmatter prefix through its closing delimiter;
+- retains no document body or complete Markdown source bytes;
 - blocks id allocation when `kb.malformed` is non-empty;
 - performs no writes; and
 - preserves the underlying shared root/config failures for callers to translate.
@@ -329,7 +367,8 @@ After preparation, create reads `prepared.sources["superseded"].content` and per
 
 `apply_write()` owns this fixed order:
 
-1. create missing directories root-to-leaf and exclusively create each born-current `index.md`;
+1. create missing directories root-to-leaf, capture each born identity, and
+   exclusively create each born-current `index.md` against its captured parent;
 2. exclusively create companions in declared order;
 3. exclusively create the citable Markdown document;
 4. identity-check and overwrite mutations in declared order;
@@ -338,7 +377,13 @@ After preparation, create reads `prepared.sources["superseded"].content` and per
 
 Create supplies no companions. Binary ingest supplies its byte-identical original as the first companion, making original-before-stub structural. Text ingest supplies no companions.
 
-The pipeline does not roll back. A write-phase OS failure may leave effects from completed earlier steps. This preserves `kb create` AC46 and `kb ingest` AC44. Late occupants are never truncated, and changed mutable identities, symlinks, or junctions are never followed.
+The pipeline does not roll back. A write-phase OS failure may leave effects
+from completed earlier steps. This preserves `kb create` AC46 and `kb ingest`
+AC44. Late occupants are never truncated, and changed mutable identities,
+symlinks, or junctions are never followed. Every child directory, born index,
+companion, and document under a born directory requires that directory's
+captured identity, and all born directory identities are verified once more
+before the receipt is returned.
 
 ### Effects
 
@@ -502,10 +547,15 @@ Tests use real temporary directories through the module interface. No public fil
 Direct pipeline coverage includes:
 
 - root/config propagation and one scan;
+- incremental frontmatter-prefix acquisition for ordinary and rooted scans,
+  with lazy bodies and no retained complete Markdown bytes;
+- later full rooted acquisition of lossless mutation-source bytes;
 - deterministic malformed allocation blocking;
 - root-relative path and containment validation;
 - overlapping path rejection;
 - nested directory and born-current index creation;
+- replacement of a just-born directory before its index/child/document birth,
+  including nested chains and final born-identity verification;
 - only the nearest pre-existing index refresh;
 - exclusion of binary companions from Markdown indexes;
 - companion-before-document ordering;
@@ -544,7 +594,9 @@ Architecture tests assert that `create.py` and `ingest.py` consume `write_pipeli
 - no `kb revise` interface before its normative spec;
 - no PRD or command-spec changes;
 - no dependency additions; and
-- no CLI/core acquisition changes in this prerequisite.
+- no external file/stdin/clipboard/create-body acquisition changes in this
+  prerequisite; the root-bound lazy allocation snapshot is part of this
+  design.
 
 ## Success Criteria
 

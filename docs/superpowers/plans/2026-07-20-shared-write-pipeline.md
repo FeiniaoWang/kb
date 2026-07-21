@@ -37,6 +37,23 @@ and log failures remain attributed to `mkdir`, `create`, `overwrite`, and
 `append` respectively. The application order and partial-write/no-rollback
 contract are unchanged.
 
+Context acquisition is also root-bound. Configuration and the recursive
+Markdown scan are descriptor-relative to one captured root identity. Each
+valid Markdown scan reads incrementally only through the closing frontmatter
+delimiter; it does not read or retain the body. Ordinary `scan()` and the
+rooted allocating scan share one prefix reader and one frontmatter byte parser.
+Malformed input may be read to EOF to establish a missing delimiter. Full
+identity-checked bytes are acquired later only for mutation sources that need
+lossless transformation. `Document.body` remains lazy, and no live descriptor
+crosses `load_write_context()`, `prepare_write()`, or `apply_write()`.
+
+Every created directory returns a captured `FileIdentity`. `apply_write()`
+keeps those identities, not descriptors, as local state and requires the
+expected immediate-parent identity for every subsequent child-directory,
+born-index, companion, and document birth. It verifies every born directory
+identity again before success. A replacement directory receives no pipeline
+bytes; failure is typed and prior completed effects remain without rollback.
+
 ## Global Constraints
 
 - The root source of truth is `docs/prd.md`; command behavior remains governed by `docs/specs/commands/00-shared.md`, `docs/specs/commands/kb-create.md`, and `docs/specs/commands/kb-ingest.md` in that precedence order.
@@ -45,6 +62,13 @@ contract are unchanged.
 - Strengthen ingest index/log handling to the same pre-inspected, identity-checked mutable-write behavior already used by create.
 - A preparation failure performs no writes. A write-phase `OSError` may leave effects completed earlier in the fixed sequence; no rollback is added.
 - Every new document, binary companion, and born `index.md` uses exclusive creation and never follows its final path when it is a symlink or junction.
+- Normal and rooted scans incrementally acquire only each Markdown
+  frontmatter prefix; allocation contexts retain no document body or complete
+  Markdown source bytes, while full rooted mutation-source acquisition remains
+  deferred to preparation.
+- Every born directory identity is captured at `mkdir`, required for all later
+  child/index/companion/document births below it, and verified before success;
+  no descriptor survives an individual rooted operation.
 - Every existing mutation target, existing affected index, and existing `log.md` is inspected before the write boundary and updated using the captured `FileIdentity`.
 - The fixed application order is: missing directories and born indexes root-to-leaf; companions in declared order; citable document; mutations in declared order; nearest pre-existing affected index; log last.
 - Binary ingest represents the byte-identical original as a companion, so the original is created before the Markdown stub.
@@ -53,7 +77,9 @@ contract are unchanged.
 - `src/kb/core/create.py` and `src/kb/core/ingest.py` retain their existing failure classes and map neutral pipeline failures to their stable command contracts.
 - Keep destination grammar, reference resolution, id allocation, collision policy, frontmatter rendering, and result models outside the write pipeline.
 - When create or ingest will create the target directory, command collision policy treats its implicit born `index.md` as occupied before choosing the document filename; a direct pipeline intent that still collides with that implicit path remains programmer misuse rejected by `prepare_write()`.
-- Keep external file/stdin/clipboard/create-body acquisition unchanged; the later `2026-07-20-cli-core-input-seam.md` plan owns that work.
+- Keep external file/stdin/clipboard/create-body acquisition unchanged; the
+  root-bound lazy allocation snapshot is in this plan, while the later
+  `2026-07-20-cli-core-input-seam.md` plan owns external command input.
 - Move `slug()` unchanged to `src/kb/core/naming.py`; do not combine this with broader naming changes.
 - No Typer, printing, `sys.exit`, network, Git operations, persistent cache/index, or new dependency enters `src/kb/core/`.
 - Use `uv run pytest`; CLI tests continue to invoke Typer through `CliRunner`, not subprocesses.
@@ -185,7 +211,11 @@ def apply_write(
 ) -> WriteReceipt
 ```
 
-`PreparedWrite` uses private attributes for the resolved root, original intent, mutation identities, affected-index path/identity/bytes, log identity, born-index plan, receipt paths, and consumed flag. `sources` is the only public preparation detail.
+`PreparedWrite` uses private attributes for the resolved root, original intent,
+mutation identities, affected-index path/identity/bytes, log identity,
+born-index plan, receipt paths, and consumed flag. `sources` is the only public
+preparation detail. Born-directory identities do not enter the public model;
+`apply_write()` captures and retains them locally as directories are created.
 
 ---
 
@@ -501,7 +531,10 @@ git commit -m "refactor(index): support projected write listings"
 - Create: `tests/core/test_write_pipeline.py`
 
 **Interfaces:**
-- Consumes: `safeio` exclusive/identity-checked primitives, `LogEntry`/`append_log`, Task 2 projected index rendering, root discovery, config loading, and scan.
+- Consumes: `safeio` rooted exclusive/identity-checked primitives,
+  `LogEntry` formatting, Task 2 projected index rendering, root discovery,
+  descriptor-relative config acquisition, and the shared incremental
+  frontmatter-prefix scan parser.
 - Produces: the exact `WriteContext`, `DocumentBirth`, `CompanionBirth`, `MutationTarget`, `WriteIntent`, `PreparedWrite`, `WriteReceipt`, `AllocationBlocked`, `WriteFailure`, `load_write_context()`, `prepare_write()`, and `apply_write()` interface under Stable Interfaces.
 
 - [ ] **Step 1: Write failing context and intent tests**
@@ -713,18 +746,31 @@ class PreparedWrite(BaseModel):
     _consumed: bool = PrivateAttr(default=False)
 ```
 
-Implement context loading exactly once:
+Implement context loading exactly once through a short-lived rooted reader.
+Configuration is acquired in full, while `_snapshot_markdown_prefixes()`
+incrementally reads only through each Markdown file's closing frontmatter
+delimiter. `scan_snapshot()` receives those prefixes and does not attach them
+to `Document` objects:
 
 ```python
 def load_write_context(kb_root: Path | None) -> WriteContext:
     root = discover_root(kb_root)
-    config = load_config(root)
-    kb = scan(root)
+    with rooted_reader(root) as reader:
+        root_identity = reader.identity
+        config = parse_config_bytes(reader.read_file(Path("kb-config.json")))
+        kb = scan_snapshot(root, _snapshot_markdown_prefixes(reader))
     if kb.malformed:
         paths = tuple(sorted(path for path, _ in kb.malformed))
         raise AllocationBlocked(paths)
-    return WriteContext(root=root, config=config, kb=kb)
+    context = WriteContext(root=root, config=config, kb=kb)
+    context._root_identity = root_identity
+    return context
 ```
+
+The ordinary path-based `scan()` calls the same incremental prefix-reader and
+frontmatter byte parser. A no-closing-delimiter file may run to EOF; a valid
+file's body must never be read or retained. Supersession continues to use the
+separate full rooted `read_rooted_bytes()` acquisition during preparation.
 
 - [ ] **Step 4: Implement private path and document-metadata validation**
 
