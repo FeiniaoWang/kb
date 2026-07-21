@@ -1228,7 +1228,12 @@ def test_directory_replacement_before_identity_binding_is_typed_and_untouched(
     status = born.stat()
     assert (status.st_dev, status.st_ino) == late_identity
     assert list(born.iterdir()) == []
-    assert not any(path.name.startswith(".kb-born-") for path in parent.iterdir())
+    private_entries = [
+        path for path in parent.iterdir() if path.name.startswith(".kb-born-")
+    ]
+    assert len(private_entries) == 1
+    assert private_entries[0].is_dir()
+    assert list(private_entries[0].iterdir()) == []
 
 
 def test_nested_child_birth_requires_captured_born_parent_identity(

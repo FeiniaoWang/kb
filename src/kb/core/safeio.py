@@ -16,7 +16,6 @@ _ROOTED_SUPPORTED = (
     and hasattr(os, "O_NOFOLLOW")
     and os.open in os.supports_dir_fd
     and os.mkdir in os.supports_dir_fd
-    and os.rmdir in os.supports_dir_fd
     and os.stat in os.supports_dir_fd
     and os.stat in os.supports_follow_symlinks
     and os.listdir in os.supports_fd
@@ -132,24 +131,6 @@ def _publish_directory_exclusive(
             os.strerror(error_number),
             final_name,
         )
-
-
-def _remove_staging_directory_if_owned(
-    parent_descriptor: int,
-    staging_name: str,
-    expected: FileIdentity,
-) -> None:
-    try:
-        status = os.stat(
-            staging_name,
-            dir_fd=parent_descriptor,
-            follow_symlinks=False,
-        )
-    except FileNotFoundError:
-        return
-    if not stat.S_ISDIR(status.st_mode) or _identity(status) != expected:
-        return
-    os.rmdir(staging_name, dir_fd=parent_descriptor)
 
 
 def _relative_parts(relative: Path) -> tuple[str, ...]:
@@ -435,6 +416,9 @@ def create_rooted_directory(
         )
         created_identity = _identity(created_status)
         descriptor: int | None = None
+        # A failure after staging creation intentionally leaves the randomized
+        # path in place. No generic path-based deletion can remain bound to
+        # this identity if another process replaces the directory.
         try:
             if not stat.S_ISDIR(created_status.st_mode):
                 raise OSError(
@@ -469,18 +453,6 @@ def create_rooted_directory(
             ):
                 raise _stale_error(relative)
             return created_identity
-        except BaseException:
-            try:
-                _remove_staging_directory_if_owned(
-                    parent_descriptor,
-                    staging_name,
-                    created_identity,
-                )
-            except OSError:
-                # Preserve the primary containment failure. Never delete a
-                # staging pathname whose identity cannot still be proven.
-                pass
-            raise
         finally:
             if descriptor is not None:
                 os.close(descriptor)

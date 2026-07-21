@@ -298,7 +298,12 @@ def test_rooted_directory_birth_binds_created_identity_before_publication(
     status = (root / "born").stat()
     assert (status.st_dev, status.st_ino) == late_identity
     assert list((root / "born").iterdir()) == []
-    assert not any(path.name.startswith(".kb-born-") for path in root.iterdir())
+    private_entries = [
+        path for path in root.iterdir() if path.name.startswith(".kb-born-")
+    ]
+    assert len(private_entries) == 1
+    assert private_entries[0].is_dir()
+    assert list(private_entries[0].iterdir()) == []
     assert staging_descriptor is not None
     with pytest.raises(OSError):
         os.fstat(staging_descriptor)
@@ -322,7 +327,67 @@ def test_rooted_directory_birth_never_overwrites_late_occupant(tmp_path) -> None
     after = occupant.stat()
     assert (after.st_dev, after.st_ino) == (before.st_dev, before.st_ino)
     assert list(occupant.iterdir()) == []
-    assert not any(path.name.startswith(".kb-born-") for path in root.iterdir())
+    private_entries = [
+        path for path in root.iterdir() if path.name.startswith(".kb-born-")
+    ]
+    assert len(private_entries) == 1
+    assert private_entries[0].is_dir()
+    assert list(private_entries[0].iterdir()) == []
+
+
+def test_failed_directory_publication_never_path_deletes_staging_replacement(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    root = tmp_path / "kb"
+    occupant = root / "born"
+    occupant.mkdir(parents=True)
+    root_identity = inspect_root(root)
+    occupant_before = occupant.stat()
+    real_rmdir = safeio.os.rmdir
+    cleanup_rmdir_called = False
+    replacement_was_deleted = False
+
+    def replace_staging_at_former_cleanup_seam(path, *, dir_fd=None):
+        nonlocal cleanup_rmdir_called, replacement_was_deleted
+        if isinstance(path, str) and path.startswith(".kb-born-"):
+            cleanup_rmdir_called = True
+            owned_name = f"{path}-owned"
+            os.rename(
+                path,
+                owned_name,
+                src_dir_fd=dir_fd,
+                dst_dir_fd=dir_fd,
+            )
+            os.mkdir(path, dir_fd=dir_fd)
+            real_rmdir(path, dir_fd=dir_fd)
+            replacement_was_deleted = True
+            return None
+        return real_rmdir(path, dir_fd=dir_fd)
+
+    monkeypatch.setattr(safeio.os, "rmdir", replace_staging_at_former_cleanup_seam)
+
+    with pytest.raises(FileExistsError):
+        create_rooted_directory(
+            root,
+            Path("born"),
+            root_identity,
+            parent_expected=root_identity,
+        )
+
+    occupant_after = occupant.stat()
+    assert (occupant_after.st_dev, occupant_after.st_ino) == (
+        occupant_before.st_dev,
+        occupant_before.st_ino,
+    )
+    assert not cleanup_rmdir_called
+    assert not replacement_was_deleted
+    private_entries = [
+        path for path in root.iterdir() if path.name.startswith(".kb-born-")
+    ]
+    assert len(private_entries) == 1
+    assert private_entries[0].is_dir()
+    assert list(private_entries[0].iterdir()) == []
 
 
 def test_rooted_directory_birth_fails_before_staging_without_exclusive_publish(
