@@ -160,6 +160,16 @@ This user-facing check runs before external acquisition and maps exactly to
 `E_INGEST_DEST_INVALID`; the shared pipeline's later no-follow validation
 remains defense in depth.
 
+The rooted context scan remains earlier than surface and destination
+validation. When that existing scan fails at an unsafe path, ingest may map it
+to `E_INGEST_DEST_INVALID` only when the path exactly equals a member of the
+lexical root-relative component chain from the selected raw-class directory
+through the requested destination. Destination parsing on this exception path
+is comparison-only and non-raising; invalid syntax proves no match. No adapter
+or independent earlier filesystem traversal is added. Context failures not
+proven to come from that chain remain generic/config/malformed according to
+the existing validation order.
+
 Context-acquisition failures receive supersession-specific classification
 only with exact target provenance. A path reference may be compared with the
 unsafe root-relative path; an id reference requires a safely parsed document
@@ -366,6 +376,11 @@ def apply_write(
 
 `PreparedWrite` exposes only identity-checked mutation source bytes. Filesystem identities, index bytes, log identity, normalized paths, missing-directory plans, the original intent, and the one-shot state are private implementation data. `apply_write()` uses `None` rather than a mutable mapping default.
 
+The exact complete log row, including its trailing LF, is also private
+prepared state. `prepare_write()` formats the `LogEntry` and strict UTF-8
+encodes it once. `apply_write()` can only consume those prepared bytes; the
+public model and function interfaces do not grow.
+
 The current scope always has one citable document birth. Mutation-only revision writes are not added until the `kb revise` specification requires them.
 
 ## Interface Invariants
@@ -411,7 +426,15 @@ Existing command destination validation remains the user-facing source of destin
 5. read every mutation source through its captured identity;
 6. derive the new document's index listing from its rendered Markdown bytes;
 7. pre-render every born-current index and the affected existing index against the projected post-write tree; and
-8. prepare exact sorted effect paths.
+8. format and strict UTF-8 encode the complete log row; and
+9. prepare exact sorted effect paths.
+
+Log formatting or encoding failure is wrapped as `WriteFailure` with
+`phase="preflight"`, `operation="render"`, `role="log"`, `path=Path("log.md")`,
+and a stable `OSError` cause (`EINVAL` for a formatting failure and `EILSEQ`
+for an encoding failure). No expected formatter `TypeError`/`ValueError` or
+raw `UnicodeEncodeError` crosses the pipeline interface, and the KB remains
+byte-identical.
 
 It performs no writes. Any preparation failure leaves the KB byte-identical.
 
@@ -431,7 +454,10 @@ After preparation, create reads `prepared.sources["superseded"].content` and per
 3. exclusively create the citable Markdown document;
 4. identity-check and overwrite mutations in declared order;
 5. identity-check and overwrite only the nearest pre-existing affected index; and
-6. identity-check and append to `log.md`, or exclusively create its scaffold plus the new row, last.
+6. identity-check and append the privately prepared bytes to `log.md`, or
+   exclusively create its scaffold plus those bytes, last.
+
+Application does not call the log formatter and performs no text encoding.
 
 Create supplies no companions. Binary ingest supplies its byte-identical original as the first companion, making original-before-stub structural. Text ingest supplies no companions.
 
@@ -496,7 +522,13 @@ Command modules retain all stable codes, messages, and exit codes:
 - `AllocationBlocked` maps to the command's malformed-allocation error;
 - create preflight `operation="inspect"` failure for mutation key `superseded` maps to the existing `E_CREATE_SUPERSEDES_INVALID`, exit `1` message;
 - a context-acquisition scan failure maps to that supersession-specific error only when the unsafe path is proven to be the requested target (path equality for a path reference, or a safely parsed id-to-path match); without that proof it remains `E_CREATE_IO`, exit `2`;
+- an ingest context-acquisition scan failure maps to
+  `E_INGEST_DEST_INVALID`, exit `2`, only when the unsafe path exactly matches
+  a lexical requested class/destination component; without that proof it
+  remains `E_INGEST_IO`, exit `2`;
 - create preflight `operation="read"` failure for that mutation remains `E_CREATE_IO`, exit `2`;
+- preflight `operation="render"`, `role="log"` failure maps to the caller's
+  stable generic I/O envelope (`E_CREATE_IO` or `E_INGEST_IO`), exit `2`;
 - other create pipeline failures map to `E_CREATE_IO`, exit `2`;
 - ingest pipeline failures map to `E_INGEST_IO`, exit `2`; and
 - semantic lossless-transformation errors remain command-owned and pre-write.
@@ -622,6 +654,8 @@ Direct pipeline coverage includes:
 - stale mutation, index, and log identity rejection;
 - symlink/junction refusal;
 - missing-log exclusive recreation with exact scaffold and one row;
+- exact successful prepared log bytes and log-last ordering, plus typed
+  preflight failure for an unencodable log row;
 - pre-write supersession transformation failure;
 - exact replacement-key validation;
 - one-shot preparation consumption;

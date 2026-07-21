@@ -99,6 +99,14 @@ body/source input directly with provably read-only file operations and the
 documented clipboard subprocess; that temporary acquisition allowance does
 not permit writes to either the KB or the external input.
 
+The shared pipeline's preparation stage formats and strict UTF-8 encodes the
+complete `log.md` row exactly once, before any KB mutation. A formatting or
+encoding failure is a typed neutral pre-flight log failure with an `OSError`
+cause (`EINVAL` for formatting and `EILSEQ` for encoding); create and ingest
+map it to their stable I/O envelopes. The prepared
+bytes are private pipeline state. The application stage consumes only those
+bytes and never formats or encodes a log row after mutation has begun.
+
 ## 6. Id grammar and allocation
 
 - Id pattern: `<PREFIX>-<NNNNNN>` — an uppercase prefix, a hyphen, a zero-padded integer of at least 6 digits (`KB-000042`, `RAW-000113`; numbers above 999999 keep growing — `KB-1000001` is legal).

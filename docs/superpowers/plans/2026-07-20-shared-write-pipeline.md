@@ -102,6 +102,25 @@ open modes, and file-object writes. Provably read-only external acquisition in
 the current command modules remains allowed until the separate input-seam
 plan.
 
+## Final-Review Destination and Log-Rendering Amendment
+
+This amendment addresses the remaining destination-provenance and log
+atomicity findings without changing traversal or validation order. On ingest's
+existing context-loading exception path, parse `--dest` only for a non-raising
+lexical comparison. Build the root-relative prefix chain from the selected raw
+class directory through the requested destination. An exact unsafe-path match
+maps to the established `E_INGEST_DEST_INVALID`; no match maps to the existing
+generic/config/malformed result. Do not call the adapter, inspect a path, or
+move destination validation ahead of context acquisition for this mapping.
+
+`prepare_write()` formats and strict UTF-8 encodes the complete log row before
+any mutation. Encoding failure is `WriteFailure("preflight", "render", "log",
+Path("log.md"), OSError(EILSEQ, ...))`; a raw `UnicodeEncodeError` never escapes.
+Store the resulting row bytes in private `PreparedWrite` state. `apply_write()`
+uses those bytes only and does not format or encode log text. Successful row
+bytes, existing/missing-log behavior, log-last ordering, and receipts remain
+unchanged.
+
 ## Global Constraints
 
 - The root source of truth is `docs/prd.md`; command behavior remains governed by `docs/specs/commands/00-shared.md`, `docs/specs/commands/kb-create.md`, and `docs/specs/commands/kb-ingest.md` in that precedence order.
@@ -127,12 +146,18 @@ plan.
 - All public core data models introduced here are Pydantic 2.x `BaseModel`s. Private implementation state may use `PrivateAttr` and ordinary private helper types.
 - `src/kb/core/create.py` and `src/kb/core/ingest.py` retain their existing failure classes and map neutral pipeline failures to their stable command contracts.
 - Keep destination grammar, reference resolution, id allocation, collision policy, frontmatter rendering, and result models outside the write pipeline.
+- Preserve context/malformed/surface/destination/adapter ordering. Ingest may
+  classify a rooted context failure as destination-invalid only by exact
+  equality with the lexical requested class/destination component chain; no
+  additional traversal or adapter call is permitted.
 - Create and ingest command collision policy always treats the target directory's CLI-maintained `index.md` as occupied before choosing the document filename, whether it exists, would be born, or is missing from a damaged existing directory; a direct pipeline intent that still collides with an implicit path remains programmer misuse rejected by `prepare_write()`.
 - Keep external file/stdin/clipboard/create-body acquisition unchanged; the
   root-bound lazy allocation snapshot is in this plan, while the later
   `2026-07-20-cli-core-input-seam.md` plan owns external command input.
 - Move `slug()` unchanged to `src/kb/core/naming.py`; do not combine this with broader naming changes.
 - No Typer, printing, `sys.exit`, network, Git operations, persistent cache/index, or new dependency enters `src/kb/core/`.
+- Prepare and strict UTF-8 encode the full log row before mutation, keep the
+  bytes private, and make application consume those bytes without rendering.
 - Use `uv run pytest`; CLI tests continue to invoke Typer through `CliRunner`, not subprocesses.
 - Preserve unrelated user changes. At plan-writing time `.gitignore` is modified and `docs/superpowers/plans/2026-07-20-cli-core-input-seam.md` is untracked; do not stage, edit, or remove either file while executing this plan.
 
@@ -267,6 +292,8 @@ mutation identities, affected-index path/identity/bytes, log identity,
 born-index plan, receipt paths, and consumed flag. `sources` is the only public
 preparation detail. Born-directory identities do not enter the public model;
 `apply_write()` captures and retains them locally as directories are created.
+The complete rendered log row is stored as a private `bytes` attribute and
+never exposed through the public Pydantic fields.
 
 ---
 
@@ -2108,6 +2135,64 @@ Expected: tracked status is clean; unrelated user files remain untouched; the br
 
 ---
 
+### Task 10: Classify Destination Context Failures and Pre-render Logs
+
+**Files:**
+- Modify: `docs/specs/commands/00-shared.md`
+- Modify: `docs/specs/commands/kb-create.md`
+- Modify: `docs/specs/commands/kb-ingest.md`
+- Modify: `docs/superpowers/specs/2026-07-20-shared-write-pipeline-design.md`
+- Modify: `docs/superpowers/plans/2026-07-20-shared-write-pipeline.md`
+- Modify: `src/kb/core/ingest.py`
+- Modify: `src/kb/core/write_pipeline.py`
+- Modify focused pipeline/create/ingest tests.
+
+**Interfaces:**
+- Consumes: the completed rooted allocating snapshot, exact unsafe-path
+  provenance on `WriteFailure`, the stable ingest/create envelopes, and the
+  public staged write-pipeline interface.
+- Produces: exact destination-component context classification and a privately
+  prepared log row with no public interface change.
+
+- [ ] **Step 1: Commit normative documentation before code**
+
+Pin exact destination provenance, unchanged validation/acquisition order,
+pre-mutation log formatting/encoding, typed preflight log failure, and
+bytes-only application in the shared and command specs plus design/plan.
+
+- [ ] **Step 2: Establish destination-provenance RED**
+
+Add final and intermediate `.md`-named directory link/junction regressions in
+plain and JSON forms as appropriate. Assert exact `E_INGEST_DEST_INVALID`, exit
+2, no adapter call, and byte-stable KB/external input. Add an unrelated unsafe
+Markdown context failure proving generic `E_INGEST_IO` and established
+precedence.
+
+- [ ] **Step 3: Implement comparison-only provenance mapping**
+
+On the existing context exception path, safely parse destination parts without
+raising. Compare the typed unsafe path with every lexical prefix from the raw
+class directory through the destination. Reuse the exact destination failure
+mapping. Add no filesystem access before normal destination validation.
+
+- [ ] **Step 4: Establish and fix log-render RED**
+
+Add direct pipeline coverage for private prepared bytes and a typed
+preflight/render/log encoding failure, plus create surrogate-actor and ingest
+surrogate-source/default-origin stable-envelope/no-mutation coverage. Format
+and encode once during preparation, wrap expected formatter `TypeError` or
+`ValueError` as an `EINVAL` `OSError` and encoding as an `EILSEQ` `OSError`,
+store bytes privately, and make application use them exclusively. Preserve
+successful bytes, existing/missing-log behavior, log-last order, and receipts.
+
+- [ ] **Step 5: Verify and commit code/tests separately**
+
+Run focused pipeline/create/ingest/architecture suites, explicit AC
+collection, the full suite, and `git diff --check`. Do not modify Task 9A/9B or
+the separate CLI/core input-seam plan, and do not dispatch a reviewer.
+
+---
+
 ## Implementation Completion Checklist
 
 - [ ] `slug()` is defined only in `src/kb/core/naming.py` and both commands import it.
@@ -2117,6 +2202,11 @@ Expected: tracked status is clean; unrelated user files remain untouched; the br
 - [ ] Ingest binary originals are typed companions created before stubs.
 - [ ] Born indexes are exclusive and current; only the nearest pre-existing index is identity-overwritten.
 - [ ] Existing/missing log behavior and exact rows remain unchanged, with log last.
+- [ ] The log row is privately rendered and UTF-8 encoded during preparation;
+      application consumes only prepared bytes and encoding failure is typed
+      before mutation.
+- [ ] Ingest context failures map to destination-invalid only for an exact
+      requested class/destination component, with no extra traversal.
 - [ ] Late occupants and changed identities are never overwritten or followed.
 - [ ] No rollback was added; documented partial-write behavior remains.
 - [ ] Receipts exactly preserve command `created`/`updated` output fields.
