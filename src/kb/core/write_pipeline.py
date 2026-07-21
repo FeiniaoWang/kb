@@ -150,7 +150,12 @@ def _is_link_or_junction(path: Path) -> bool:
     return bool(is_junction is not None and is_junction())
 
 
-def _relative_path(root: Path, value: Path) -> Path:
+def _relative_path(
+    root: Path,
+    value: Path,
+    *,
+    final_link_is_inspectable: bool = False,
+) -> Path:
     shown = value.as_posix()
     candidate = PurePosixPath(shown)
     if (
@@ -162,11 +167,15 @@ def _relative_path(root: Path, value: Path) -> Path:
         raise ValueError(f"write path must be KB-root-relative POSIX: {shown}")
     relative = Path(*candidate.parts)
     current = root
-    for part in relative.parts:
+    checked_parts = (
+        relative.parts[:-1] if final_link_is_inspectable else relative.parts
+    )
+    for part in checked_parts:
         current /= part
         if _is_link_or_junction(current):
             raise ValueError(f"write path contains a symlink or junction: {shown}")
-    resolved = (root / relative).resolve(strict=False)
+    containment_path = relative.parent if final_link_is_inspectable else relative
+    resolved = (root / containment_path).resolve(strict=False)
     if resolved != root and not resolved.is_relative_to(root):
         raise ValueError(f"write path escapes KB root: {shown}")
     return relative
@@ -285,7 +294,12 @@ def prepare_write(context: WriteContext, intent: WriteIntent) -> PreparedWrite:
         for companion in intent.birth.companions_before
     ]
     mutation_relatives = [
-        _relative_path(root, mutation.path) for mutation in intent.mutations
+        _relative_path(
+            root,
+            mutation.path,
+            final_link_is_inspectable=True,
+        )
+        for mutation in intent.mutations
     ]
     if any(path.parent != birth_relative.parent for path in companion_relatives):
         raise ValueError("companion births must be siblings of the citable document")

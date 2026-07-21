@@ -1061,20 +1061,20 @@ def test_destination_with_yaml_sensitive_text_writes_parseable_indexes(
 def test_supersedes_preparation_oserror_is_structured_without_writes(
     monkeypatch, initialized_kb, invoke_create
 ) -> None:
+    import kb.core.write_pipeline as pipeline
+
     add_chat(initialized_kb)
     target = add_synthetic(initialized_kb)
     before = snapshot(initialized_kb)
-    original_open = os.open
+    real_read = pipeline.read_rooted_bytes
 
-    def fail_target(path, flags, mode=0o777, *, dir_fd=None):
-        if Path(path) == target and flags & os.O_ACCMODE == os.O_RDONLY:
+    def fail_target(root, relative, root_identity, expected):
+        if root / relative == target:
             raise OSError("target became unreadable")
-        if dir_fd is None:
-            return original_open(path, flags, mode)
-        return original_open(path, flags, mode, dir_fd=dir_fd)
+        return real_read(root, relative, root_identity, expected)
 
     with monkeypatch.context() as context:
-        context.setattr(os, "open", fail_target)
+        context.setattr(pipeline, "read_rooted_bytes", fail_target)
         result = supersede(invoke_create, initialized_kb)
 
     assert result.exit_code == 2
@@ -1298,23 +1298,23 @@ def test_symlink_destination_outside_is_rejected_without_writes(
 def test_document_race_uses_exclusive_create_and_preserves_raced_bytes(
     monkeypatch, initialized_kb, invoke_create
 ) -> None:
+    import kb.core.write_pipeline as pipeline
+
     add_chat(initialized_kb)
     before = snapshot(initialized_kb)
     target = initialized_kb / "synthetic/webhook-retry-policy.md"
     raced_bytes = b"raced-in bytes\n"
-    original_open = os.open
+    real_create = pipeline.create_rooted_file_bytes
     raced = False
 
-    def racing_open(path, flags, mode=0o777, *, dir_fd=None):
+    def racing_create(root, relative, content, root_identity):
         nonlocal raced
-        if Path(path) == target and flags & os.O_CREAT and not raced:
+        if root / relative == target and not raced:
             raced = True
             target.write_bytes(raced_bytes)
-        if dir_fd is None:
-            return original_open(path, flags, mode)
-        return original_open(path, flags, mode, dir_fd=dir_fd)
+        real_create(root, relative, content, root_identity)
 
-    monkeypatch.setattr(os, "open", racing_open)
+    monkeypatch.setattr(pipeline, "create_rooted_file_bytes", racing_create)
     result = invoke_valid(invoke_create, initialized_kb)
 
     assert raced

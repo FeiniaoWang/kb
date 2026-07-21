@@ -137,6 +137,44 @@ def test_prepare_exposes_identity_checked_mutation_source_without_writes(
     assert not (root / "synthetic/planned.md").exists()
 
 
+def test_prepare_classifies_final_mutation_symlink_as_inspect_failure(tmp_path) -> None:
+    root = initialized(tmp_path)
+    context = load_write_context(root)
+    outside = tmp_path / "outside.md"
+    outside.write_bytes(document_bytes("KB-000002", "Old", "Old."))
+    target = root / "synthetic/old.md"
+    try:
+        target.symlink_to(outside)
+    except (NotImplementedError, OSError) as error:
+        pytest.skip(f"symlinks unsupported: {error}")
+
+    with pytest.raises(WriteFailure) as raised:
+        prepare_write(
+            context,
+            WriteIntent(
+                birth=DocumentBirth(
+                    path=Path("synthetic/planned.md"),
+                    content=document_bytes(),
+                ),
+                mutations=[
+                    MutationTarget(
+                        key="superseded",
+                        path=Path("synthetic/old.md"),
+                    )
+                ],
+                log_entry=log_entry(),
+            ),
+        )
+
+    assert raised.value.phase == "preflight"
+    assert raised.value.operation == "inspect"
+    assert raised.value.role == "mutation"
+    assert raised.value.path == Path("synthetic/old.md")
+    assert raised.value.key == "superseded"
+    assert outside.read_bytes() == document_bytes("KB-000002", "Old", "Old.")
+    assert not (root / "synthetic/planned.md").exists()
+
+
 def test_prepare_rejects_markdown_companion_before_writes(tmp_path) -> None:
     root = initialized(tmp_path)
     context = load_write_context(root)
