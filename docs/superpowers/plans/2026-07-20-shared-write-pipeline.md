@@ -24,7 +24,10 @@ abandoned preparation cannot leak handles.
 Before returning from preparation, reject any explicit birth, companion, or
 mutation path that collides with an implicit born index, the affected existing
 index, or root `log.md`. A document born as a would-be `index.md` is one such
-prewrite `ValueError`.
+prewrite `ValueError` when passed directly to the pipeline: it is programmer
+misuse. Create and ingest command policy must prevent that invalid intent by
+reserving each implicit born `index.md` path while applying the existing
+deterministic collision-suffix naming algorithm.
 
 After consumption, late path/link/environment failures are `WriteFailure`s
 with the fixed operation and role for the attempted effect. In particular,
@@ -49,6 +52,7 @@ contract are unchanged.
 - All public core data models introduced here are Pydantic 2.x `BaseModel`s. Private implementation state may use `PrivateAttr` and ordinary private helper types.
 - `src/kb/core/create.py` and `src/kb/core/ingest.py` retain their existing failure classes and map neutral pipeline failures to their stable command contracts.
 - Keep destination grammar, reference resolution, id allocation, collision policy, frontmatter rendering, and result models outside the write pipeline.
+- When create or ingest will create the target directory, command collision policy treats its implicit born `index.md` as occupied before choosing the document filename; a direct pipeline intent that still collides with that implicit path remains programmer misuse rejected by `prepare_write()`.
 - Keep external file/stdin/clipboard/create-body acquisition unchanged; the later `2026-07-20-cli-core-input-seam.md` plan owns that work.
 - Move `slug()` unchanged to `src/kb/core/naming.py`; do not combine this with broader naming changes.
 - No Typer, printing, `sys.exit`, network, Git operations, persistent cache/index, or new dependency enters `src/kb/core/`.
@@ -1664,7 +1668,7 @@ Expected: the repository suite passes; create has no direct persistence orchestr
 
 ```bash
 git add src/kb/core/create.py tests/test_write_pipeline_architecture.py
-git commit -m "refactor(create): use shared write pipeline (CLI-7)"
+git commit -m "refactor(create): use shared write pipeline (CLI-13)"
 ```
 
 ---
