@@ -185,6 +185,30 @@ seam lands, current external source/body acquisition remains legal only
 through provably read-only operations; clipboard subprocess acquisition is
 also unchanged.
 
+### Release hardening
+
+Rooted Markdown traversal is iterative and descriptor-relative. It does not
+recurse in Python, retain one descriptor per tree level, or reopen every
+descendant from the root. The rooted reader keeps descriptor use bounded while
+descending and ascending, revalidates directory identities, preserves
+lexicographic traversal order, and retains the existing no-follow and root
+identity guarantees. A valid tree deeper than Python's recursion limit
+therefore completes normally or produces a typed filesystem failure, never a
+raw `RecursionError`.
+
+Projected-index acquisition reads only each existing Markdown child's
+frontmatter prefix through the closing delimiter. This applies to both the
+rooted pipeline path and the ordinary path-acquiring indexing convenience
+entry point. A subdirectory's `index.md` may still be acquired in full because
+its body heading is listing metadata. Rendering remains pure over the acquired
+metadata and produces byte-for-byte compatible successful output.
+
+Final born-directory identity verification occurs after every non-log write
+and immediately before the log create or append. It is the last fallible
+containment check before that final effect. A verification failure therefore
+leaves the log byte-identical; after a successful log write, receipt assembly
+and descriptor cleanup cannot report a new pipeline failure.
+
 ## Goal
 
 Extract the duplicated create/ingest filesystem commit orchestration into one deep core module while preserving every observable `kb create` and `kb ingest` contract. The extraction also strengthens ingest's mutable index and log handling to match create's identity-checked safety without adding rollback or changing documented partial-write semantics.
@@ -453,8 +477,9 @@ After preparation, create reads `prepared.sources["superseded"].content` and per
 2. exclusively create companions in declared order;
 3. exclusively create the citable Markdown document;
 4. identity-check and overwrite mutations in declared order;
-5. identity-check and overwrite only the nearest pre-existing affected index; and
-6. identity-check and append the privately prepared bytes to `log.md`, or
+5. identity-check and overwrite only the nearest pre-existing affected index;
+6. verify every born directory identity one final time; and
+7. identity-check and append the privately prepared bytes to `log.md`, or
    exclusively create its scaffold plus those bytes, last.
 
 Application does not call the log formatter and performs no text encoding.
@@ -467,7 +492,7 @@ AC44. Late occupants are never truncated, and changed mutable identities,
 symlinks, or junctions are never followed. Every child directory, born index,
 companion, and document under a born directory requires that directory's
 captured identity, and all born directory identities are verified once more
-before the receipt is returned.
+immediately before the log effect.
 
 ### Effects
 
@@ -514,7 +539,15 @@ class WriteFailure(Exception):
     path: Path
     cause: OSError
     key: str | None
+    snapshot_kb: KB | None
 ```
+
+`snapshot_kb` is read-only context-failure provenance. It is populated only
+when a rooted Markdown acquisition failure occurs after some safely parsed
+frontmatter prefixes were acquired, allowing a command to prove an exact
+id-to-path or destination-path classification. It is never a mutable or
+persistent KB cache/index, and it is `None` for failures without such a safely
+parsed partial snapshot.
 
 Command modules retain all stable codes, messages, and exit codes:
 

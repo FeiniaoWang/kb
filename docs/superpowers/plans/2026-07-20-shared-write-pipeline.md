@@ -121,6 +121,25 @@ uses those bytes only and does not format or encode log text. Successful row
 bytes, existing/missing-log behavior, log-last ordering, and receipts remain
 unchanged.
 
+## Release-Hardening Amendment
+
+Rooted Markdown snapshot traversal is iterative, descriptor-relative, and
+bounded in live descriptor use. It does not recurse in Python or reopen every
+descendant from the root, while preserving lexicographic traversal,
+no-follow semantics, directory-identity checks on descent/ascent, root
+identity verification, and deterministic typed failures. A valid tree deeper
+than Python's recursion limit must never leak `RecursionError`.
+
+Projected-index acquisition reads only the frontmatter prefix of existing
+Markdown child documents in both the rooted pipeline and ordinary
+path-acquiring convenience path. Full subdirectory `index.md` acquisition
+remains permitted because its body heading is required listing metadata.
+
+Final born-directory verification moves to immediately before the log create
+or append. It is the last fallible containment operation before the final log
+effect, so a verification failure leaves `log.md` byte-identical and no
+fallible pipeline operation follows a successful log write.
+
 ## Global Constraints
 
 - The root source of truth is `docs/prd.md`; command behavior remains governed by `docs/specs/commands/00-shared.md`, `docs/specs/commands/kb-create.md`, and `docs/specs/commands/kb-ingest.md` in that precedence order.
@@ -273,6 +292,7 @@ class WriteFailure(Exception):
     path: Path
     cause: OSError
     key: str | None
+    snapshot_kb: KB | None
 
 
 def load_write_context(kb_root: Path | None) -> WriteContext
@@ -294,6 +314,12 @@ preparation detail. Born-directory identities do not enter the public model;
 `apply_write()` captures and retains them locally as directories are created.
 The complete rendered log row is stored as a private `bytes` attribute and
 never exposed through the public Pydantic fields.
+
+`WriteFailure.snapshot_kb` is read-only context-failure provenance. It is
+populated only with the safely parsed partial snapshot available when rooted
+Markdown acquisition fails, so a command can prove an exact id/path or
+destination-path classification. It is not a mutable or persistent KB
+cache/index and is `None` when no safely parsed partial snapshot is available.
 
 ---
 
@@ -2135,6 +2161,54 @@ Expected: tracked status is clean; unrelated user files remain untouched; the br
 
 ---
 
+### Task 7: Bind Context and Projected Index Reads to the Captured Root
+
+**Executed scope:** Root configuration/scan acquisition and projected-index
+metadata acquisition were moved behind short-lived rooted readers. Contexts
+carry root identity without live descriptors, and every later stage reopens
+and verifies the captured root.
+
+- [x] Acquire configuration and Markdown scan inputs descriptor-relatively.
+- [x] Acquire affected-index source and listing metadata without path fallback.
+- [x] Reject root replacement and unsafe child kinds with typed provenance.
+- [x] Verify focused and complete regressions (`bd4184b`, `b78c1e5`).
+
+### Task 8: Reconcile Command Naming, Destination, and Architecture Contracts
+
+**Executed scope:** Both commands reserve CLI-maintained `index.md`, ingest
+rejects requested destination unsafe components before acquisition, and the
+semantic architecture gate prevents command-owned persistence from returning.
+
+- [x] Pin born-index naming and destination validation in command specs.
+- [x] Preserve create supersession and ingest destination error envelopes.
+- [x] Enforce direct-write and provenance restrictions with AST tests.
+- [x] Verify focused and complete regressions (`5148b4a`..`b66a3be`).
+
+### Task 9A: Make Allocation Lazy and Bind Born Directories by Identity
+
+**Executed scope:** Ordinary and rooted scans share incremental frontmatter
+prefix acquisition; born directories use held staging identity plus atomic
+no-replace publication, and failed staging is retained as documented partial
+state rather than removed through a racy pathname.
+
+- [x] Keep valid Markdown bodies out of allocation snapshots.
+- [x] Publish born directories exclusively and fail safely when unsupported.
+- [x] Propagate each born identity to child/index/document writes and verify it
+      before success.
+- [x] Verify focused and complete regressions (`502b0ab`..`180cff4`).
+
+### Task 9B: Close Command and Direct-Write Contract Gaps
+
+**Executed scope:** Command validation ordering, raw-class destination shape,
+exact supersession provenance, and the semantic direct-write gate were brought
+into agreement with the normative command specs.
+
+- [x] Reconcile create and ingest specifications before code.
+- [x] Preserve exact command results for damaged or unsafe destinations.
+- [x] Reject aliases, dynamic modes, file-object writes, and mutating
+      filesystem calls in command modules.
+- [x] Verify focused and complete regressions (`1f1cae1`..`c1e3028`).
+
 ### Task 10: Classify Destination Context Failures and Pre-render Logs
 
 **Files:**
@@ -2191,26 +2265,72 @@ Run focused pipeline/create/ingest/architecture suites, explicit AC
 collection, the full suite, and `git diff --check`. Do not modify Task 9A/9B or
 the separate CLI/core input-seam plan, and do not dispatch a reviewer.
 
+**Executed:** All five steps are complete in documentation commit `43063f5`
+and implementation commit `62c6068`; 439 repository tests passed and the task
+review was approved.
+
+---
+
+### Task 11: Harden Traversal, Index Metadata, and the Final Log Boundary
+
+**Files:**
+- Modify: `src/kb/core/safeio.py`
+- Modify: `src/kb/core/write_pipeline.py`
+- Modify: `src/kb/core/indexing.py`
+- Modify focused safe-I/O, pipeline, and indexing tests.
+
+- [ ] **Step 1: Replace recursive rooted scan traversal**
+
+Add a descriptor-created tree deeper than Python's recursion limit and prove
+the operation never leaks `RecursionError`. Implement iterative traversal with
+bounded live descriptors, descriptor-relative descent/ascent, identity
+verification, deterministic lexical order, and no root-to-descendant quadratic
+reopening.
+
+- [ ] **Step 2: Acquire projected child metadata by prefix**
+
+Use `read_frontmatter_prefix()` for existing Markdown child metadata in both
+the rooted pipeline and ordinary convenience acquisition paths. Preserve full
+subdirectory `index.md` reads where the body heading is required, and pin the
+behavior with a multi-megabyte-body regression.
+
+- [ ] **Step 3: Verify born directories immediately before logging**
+
+Move final born-directory verification after all other non-log writes and
+immediately before log creation/append. Pin that a verification failure leaves
+log bytes unchanged and that no fallible pipeline operation follows logging.
+
+- [ ] **Step 4: Verify and commit code/tests separately from documentation**
+
+Run focused safe-I/O/index/pipeline tests, create and ingest plus architecture
+tests, explicit AC collection, deep-tree resource regressions, the full suite,
+and `git diff --check`.
+
 ---
 
 ## Implementation Completion Checklist
 
-- [ ] `slug()` is defined only in `src/kb/core/naming.py` and both commands import it.
-- [ ] `src/kb/core/write_pipeline.py` exposes the approved three-function staged interface.
-- [ ] Preparation captures mutable document, affected-index, and log identities before any writes.
-- [ ] Create performs lossless supersession transformation from `PreparedWrite.sources` before `apply_write()`.
-- [ ] Ingest binary originals are typed companions created before stubs.
-- [ ] Born indexes are exclusive and current; only the nearest pre-existing index is identity-overwritten.
-- [ ] Existing/missing log behavior and exact rows remain unchanged, with log last.
-- [ ] The log row is privately rendered and UTF-8 encoded during preparation;
+- [x] `slug()` is defined only in `src/kb/core/naming.py` and both commands import it.
+- [x] `src/kb/core/write_pipeline.py` exposes the approved three-function staged interface.
+- [x] Preparation captures mutable document, affected-index, and log identities before any writes.
+- [x] Create performs lossless supersession transformation from `PreparedWrite.sources` before `apply_write()`.
+- [x] Ingest binary originals are typed companions created before stubs.
+- [x] Born indexes are exclusive and current; only the nearest pre-existing index is identity-overwritten.
+- [x] Existing/missing log behavior and exact rows remain unchanged, with log last.
+- [x] The log row is privately rendered and UTF-8 encoded during preparation;
       application consumes only prepared bytes and encoding failure is typed
       before mutation.
-- [ ] Ingest context failures map to destination-invalid only for an exact
+- [x] Ingest context failures map to destination-invalid only for an exact
       requested class/destination component, with no extra traversal.
-- [ ] Late occupants and changed identities are never overwritten or followed.
-- [ ] No rollback was added; documented partial-write behavior remains.
-- [ ] Receipts exactly preserve command `created`/`updated` output fields.
-- [ ] Create AC01–AC52 and ingest AC01–AC50 pass unchanged.
-- [ ] Architecture tests prevent command-owned persistence from returning.
-- [ ] Full repository tests and `git diff --check` pass.
-- [ ] The downstream CLI/core input-seam plan has no stale source paths and still treats this extraction as a prerequisite.
+- [x] Late occupants and changed identities are never overwritten or followed.
+- [x] No rollback was added; documented partial-write behavior remains.
+- [x] Receipts exactly preserve command `created`/`updated` output fields.
+- [x] Create AC01–AC52 and ingest AC01–AC50 pass unchanged.
+- [x] Architecture tests prevent command-owned persistence from returning.
+- [x] Full repository tests and `git diff --check` pass through Task 10.
+- [ ] Task 11 iterative traversal, prefix-only projected child acquisition,
+      and pre-log final verification are complete.
+- [ ] Revalidate the downstream CLI/core input-seam plan after this branch is
+      integrated. Its source paths exist, but its separate prepared models
+      still contain stale `missing_directories` assumptions and are explicitly
+      outside this extraction.
