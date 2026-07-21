@@ -202,14 +202,16 @@ def test_prepare_rejects_markdown_companion_before_writes(tmp_path) -> None:
         prepare_write(context, intent)
 
 
-def test_prepare_rejects_directory_at_birth_path_before_writes(tmp_path) -> None:
+def test_prepare_classifies_directory_at_birth_path_as_inspect_failure(
+    tmp_path,
+) -> None:
     root = initialized(tmp_path)
     context = load_write_context(root)
     target = root / "synthetic/planned.md"
     target.mkdir()
     before = {path: path.read_bytes() for path in root.rglob("*") if path.is_file()}
 
-    with pytest.raises(ValueError, match="must be a file path"):
+    with pytest.raises(WriteFailure) as raised:
         prepare_write(
             context,
             WriteIntent(
@@ -220,6 +222,10 @@ def test_prepare_rejects_directory_at_birth_path_before_writes(tmp_path) -> None
             ),
         )
 
+    assert raised.value.phase == "preflight"
+    assert raised.value.operation == "inspect"
+    assert raised.value.role == "document"
+    assert raised.value.path == Path("synthetic/planned.md")
     assert {path: path.read_bytes() for path in root.rglob("*") if path.is_file()} == before
 
 
@@ -548,7 +554,7 @@ def test_replacement_keys_are_exact_and_checked_before_consumption(tmp_path) -> 
     assert receipt.updated == ["synthetic/index.md", "synthetic/old.md"]
 
 
-def test_prepare_rejects_symlink_birth_without_touching_target(
+def test_prepare_classifies_symlink_birth_as_inspect_failure_without_touching_target(
     tmp_path,
 ) -> None:
     root = initialized(tmp_path)
@@ -561,7 +567,7 @@ def test_prepare_rejects_symlink_birth_without_touching_target(
     except (NotImplementedError, OSError) as error:
         pytest.skip(f"symlinks unsupported: {error}")
 
-    with pytest.raises(ValueError, match="symlink or junction"):
+    with pytest.raises(WriteFailure) as raised:
         prepare_write(
             context,
             WriteIntent(
@@ -572,7 +578,45 @@ def test_prepare_rejects_symlink_birth_without_touching_target(
             ),
         )
 
+    assert raised.value.phase == "preflight"
+    assert raised.value.operation == "inspect"
+    assert raised.value.role == "document"
+    assert raised.value.path == Path("synthetic/planned.md")
     assert outside.read_bytes() == b"outside"
+
+
+def test_prepare_classifies_symlink_birth_parent_as_directory_inspect_failure(
+    tmp_path,
+) -> None:
+    root = initialized(tmp_path)
+    context = load_write_context(root)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    external = outside / "planned.md"
+    external.write_bytes(b"outside")
+    parent = root / "synthetic/nested"
+    try:
+        parent.symlink_to(outside, target_is_directory=True)
+    except (NotImplementedError, OSError) as error:
+        pytest.skip(f"symlinks unsupported: {error}")
+
+    with pytest.raises(WriteFailure) as raised:
+        prepare_write(
+            context,
+            WriteIntent(
+                birth=DocumentBirth(
+                    path=Path("synthetic/nested/planned.md"),
+                    content=document_bytes(),
+                ),
+                log_entry=log_entry(),
+            ),
+        )
+
+    assert raised.value.phase == "preflight"
+    assert raised.value.operation == "inspect"
+    assert raised.value.role == "directory"
+    assert raised.value.path == Path("synthetic/nested")
+    assert external.read_bytes() == b"outside"
 
 
 @pytest.mark.parametrize(

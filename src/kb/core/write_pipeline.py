@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import errno
 from collections.abc import Mapping
 from pathlib import Path, PurePosixPath
 from typing import Literal
@@ -143,19 +142,7 @@ def load_write_context(kb_root: Path | None) -> WriteContext:
     return WriteContext(root=root, config=config, kb=kb)
 
 
-def _is_link_or_junction(path: Path) -> bool:
-    if path.is_symlink():
-        return True
-    is_junction = getattr(path, "is_junction", None)
-    return bool(is_junction is not None and is_junction())
-
-
-def _relative_path(
-    root: Path,
-    value: Path,
-    *,
-    final_link_is_inspectable: bool = False,
-) -> Path:
+def _relative_path(value: Path) -> Path:
     shown = value.as_posix()
     candidate = PurePosixPath(shown)
     if (
@@ -165,20 +152,7 @@ def _relative_path(
         or any(part in {".", ".."} for part in candidate.parts)
     ):
         raise ValueError(f"write path must be KB-root-relative POSIX: {shown}")
-    relative = Path(*candidate.parts)
-    current = root
-    checked_parts = (
-        relative.parts[:-1] if final_link_is_inspectable else relative.parts
-    )
-    for part in checked_parts:
-        current /= part
-        if _is_link_or_junction(current):
-            raise ValueError(f"write path contains a symlink or junction: {shown}")
-    containment_path = relative.parent if final_link_is_inspectable else relative
-    resolved = (root / containment_path).resolve(strict=False)
-    if resolved != root and not resolved.is_relative_to(root):
-        raise ValueError(f"write path escapes KB root: {shown}")
-    return relative
+    return Path(*candidate.parts)
 
 
 def _document_listing(content: bytes, filename: str) -> str:
@@ -226,11 +200,6 @@ def _missing_directories(
                 allow_missing=True,
             )
         except OSError as error:
-            if error.errno in {errno.ELOOP, errno.ENOTDIR}:
-                raise ValueError(
-                    f"write destination component is not a directory: "
-                    f"{current.as_posix()}"
-                ) from error
             raise WriteFailure(
                 "preflight",
                 "inspect",
@@ -286,19 +255,15 @@ def prepare_write(context: WriteContext, intent: WriteIntent) -> PreparedWrite:
             Path("."),
             error,
         ) from error
-    birth_relative = _relative_path(root, intent.birth.path)
+    birth_relative = _relative_path(intent.birth.path)
     if birth_relative.suffix != ".md":
         raise ValueError("citable document birth must end in .md")
     companion_relatives = [
-        _relative_path(root, companion.path)
+        _relative_path(companion.path)
         for companion in intent.birth.companions_before
     ]
     mutation_relatives = [
-        _relative_path(
-            root,
-            mutation.path,
-            final_link_is_inspectable=True,
-        )
+        _relative_path(mutation.path)
         for mutation in intent.mutations
     ]
     if any(path.parent != birth_relative.parent for path in companion_relatives):
@@ -340,10 +305,6 @@ def prepare_write(context: WriteContext, intent: WriteIntent) -> PreparedWrite:
                     allow_missing=True,
                 )
             except OSError as error:
-                if error.errno in {errno.EINVAL, errno.ELOOP, errno.ENOTDIR}:
-                    raise ValueError(
-                        f"write birth must be a file path: {relative.as_posix()}"
-                    ) from error
                 raise WriteFailure(
                     "preflight",
                     "inspect",

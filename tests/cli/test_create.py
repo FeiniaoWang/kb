@@ -1326,6 +1326,51 @@ def test_document_race_uses_exclusive_create_and_preserves_raced_bytes(
     }
 
 
+def test_birth_link_race_after_filename_selection_is_typed_io_without_writes(
+    monkeypatch, tmp_path, initialized_kb, invoke_create
+) -> None:
+    import kb.core.create as create_core
+
+    add_chat(initialized_kb)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    external = outside / "external.md"
+    external.write_bytes(b"external bytes\n")
+    probe = tmp_path / "symlink-probe"
+    try:
+        probe.symlink_to(external)
+        probe.unlink()
+    except (NotImplementedError, OSError) as error:
+        pytest.skip(f"symlinks unsupported: {error}")
+
+    target = initialized_kb / "synthetic/webhook-retry-policy.md"
+    real_prepare = create_core.prepare_write
+    at_preflight: dict[str, dict[str, bytes] | str] = {}
+
+    def insert_link_after_filename_selection(context, intent):
+        assert intent.birth.path == Path("synthetic/webhook-retry-policy.md")
+        target.symlink_to(external)
+        at_preflight["kb"] = snapshot(initialized_kb)
+        at_preflight["outside"] = snapshot(outside)
+        at_preflight["link"] = os.readlink(target)
+        return real_prepare(context, intent)
+
+    monkeypatch.setattr(
+        create_core,
+        "prepare_write",
+        insert_link_after_filename_selection,
+    )
+
+    result = invoke_valid(invoke_create, initialized_kb)
+
+    assert result.exit_code == 2
+    assert "E_CREATE_IO" in result.stderr
+    assert snapshot(initialized_kb) == at_preflight["kb"]
+    assert snapshot(outside) == at_preflight["outside"]
+    assert target.is_symlink() and os.readlink(target) == at_preflight["link"]
+    assert external.read_bytes() == b"external bytes\n"
+
+
 @pytest.mark.parametrize(
     ("dest", "expected_created", "expected_index_fragment"),
     [
