@@ -60,6 +60,20 @@ even if a non-cooperating actor moved that object outside the lexical root. No
 exclusive-writer or snapshot-isolation guarantee is claimed. Cooperating normal
 CLI execution and normal successful bytes remain unchanged.
 
+Preparation privately retains the identity of the nearest existing affected
+directory—the directory whose index is projected and refreshed. Application
+uses that prepared identity as the required immediate-parent identity for the
+first birth directly below it. When the destination already exists, this is
+the first companion or citable document birth. When destination directories
+are missing, this is publication of the first missing directory; later
+directory, index, companion, and document births use the identities of parents
+created by the same application. Replacing the nearest existing directory
+between preparation and application therefore fails before the first pipeline
+effect and the replacement receives no bytes. This pre-open identity check is
+distinct from the accepted limitation for moving an object after its
+descriptor has been opened. The retained identity is private prepared state;
+the public staged interface and models do not change.
+
 ### Root-bound context acquisition
 
 The same containment guarantee applies before preparation. A short-lived,

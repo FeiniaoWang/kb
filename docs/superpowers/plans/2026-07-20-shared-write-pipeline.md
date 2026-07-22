@@ -39,6 +39,18 @@ high-entropy born staging path is the explicit exception: before its first open
 it has no expected identity and may bind a substituted real directory only when
 that directory is observed empty.
 
+`prepare_write()` privately retains the identity of the nearest existing
+affected/refresh directory. `apply_write()` requires that prepared identity as
+the expected immediate-parent identity for the first birth directly below it:
+the first missing directory when the destination is new, or the first
+companion/document when the destination already exists. Each later birth below
+a directory created by this application uses that born directory's identity.
+Thus a real-directory replacement installed between preparation and
+application fails before the first effect and receives no pipeline bytes. This
+closes a pre-open replacement interval and does not broaden the accepted
+post-open descriptor/object movement guarantee. The identity remains private
+`PreparedWrite` state; the public staged interface is unchanged.
+
 Before returning from preparation, reject any explicit birth, companion, or
 mutation path that collides with an implicit born index, the affected existing
 index, or root `log.md`. A document born as a would-be `index.md` is one such
@@ -2450,6 +2462,23 @@ the public staged interface, validation/acquisition order, or successful bytes.
 
 ---
 
+### Task 15: Retain Existing Destination-Parent Identity
+
+**Scope:** Close the nearest-existing-directory replacement interval without
+changing the public staged interface, successful bytes, or accepted post-open
+threat model.
+
+- [x] Pin the prepared nearest-existing-directory identity and its apply-time
+      immediate-parent authority in the design and plan.
+- [ ] Retain that identity privately and require it for the first birth below
+      the nearest existing directory.
+- [ ] Pin existing-target and first-missing-child replacement regressions with
+      no replacement bytes or earlier pipeline effects.
+- [ ] Verify focused, command, architecture, exact AC, full-suite, diff, and
+      status gates.
+
+---
+
 ## Implementation Completion Checklist
 
 - [x] `slug()` is defined only in `src/kb/core/naming.py` and both commands import it.
@@ -2479,6 +2508,8 @@ the public staged interface, validation/acquisition order, or successful bytes.
       namespace-movement limitation are documented and regression-tested.
 - [x] Task 14 partial acquisition provenance and born-index typed preflight
       envelopes are implemented and verified.
+- [ ] Task 15 prepared nearest-existing-directory identity prevents a
+      replacement from receiving the first apply-time birth.
 - [ ] Revalidate the downstream CLI/core input-seam plan after this branch is
       integrated. Its source paths exist, but its separate prepared models
       still contain stale `missing_directories` assumptions and are explicitly
