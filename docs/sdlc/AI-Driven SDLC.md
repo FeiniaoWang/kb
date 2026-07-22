@@ -16,26 +16,33 @@ Requirements → Design → Implementation → Testing → Deploy → Maintenanc
 
 ### Goal
 
-Discover, analyze, and define what to build, for whom, and why.
+Discover, analyze, and define what to build, for whom, and how to measure.
 
 ### Output
 
-`PRD + C4 Context Diagram`: together they form the high-level specification of the system to be built, with precise acceptance criteria.
+`PRD` + `C4 Context Diagram`: together they form the high-level specification of the system to be built, with precise acceptance criteria.
 
 #### PRD
 
-A Product Requirements Document (PRD) is the team's single source of truth: what to build, why it matters, and how success will be measured.
-"Single source of truth" doesn't mean static — the PRD evolves as the team learns more about the problem space, user needs, and technical constraints.
+A Product Requirements Document (PRD) aligns everyone on what's being built, for whom, why it matters, and how success will be measured.
+
+* Please use the `prd` skill to co-author PRDs with AI agents. The skill will ensure the important sections this SDLC requires are included.
+* A PRD is not static — PRD evolves as the team learns more about the problem space, user needs, and technical constraints.
+* For a complex system that evolves multiple teams, the PRD is often broken into a master PRD and multiple sub-PRDs, each focusing on a specific feature set or subsystem.
 
 ##### Key Sections
 
-* **Objective & Background**: The core problem being solved and the business goals the product aims to achieve.
-* **Features & Requirements**: Functional behaviors and non-functional requirements (e.g., performance, security).
-* **User Stories**: Usually the largest section of the PRD (or a separate document). A comprehensive set of user stories describing the expected behavior of the system from the user's perspective, each with precise acceptance criteria — together they are the specification of functional behavior.
+These key sections are important for driving the later stages of the SDLC:
+
+* **Target Personas**: List who the product is for and what they need to accomplish.
+* **User Stories**: Usually the largest section of the PRD (or a separate document). For each persona, a comprehensive set of user stories describing the expected behavior of the system from the user's perspective, each with precise acceptance criteria — together they are the specification of functional behavior.
 
 #### C4 Context Diagram
 
 A C4 Context Diagram provides a high-level, 10,000-foot view of how a software system fits into its surrounding environment. Like a satellite map, it shows exactly who uses the software (actors) and which external systems or third-party services it depends on, while omitting all low-level technical detail.
+
+* Please use the `c4-modeling` skill to co-author C4 diagrams with AI agents.
+* A C4 Context Diagram is always paired with a PRD. There can be a context diagram for the master PRD, and multiple context diagrams for sub-PRDs that zoom in on specific subsystems or feature sets.
 
 ##### Key Purposes
 
@@ -48,10 +55,9 @@ A C4 Context Diagram provides a high-level, 10,000-foot view of how a software s
 
 #### Product Manager / Business Analyst
 
-* Leads the drafting of the PRD.
-* Creates the C4 Context Diagram with the `C4 Modeling` skill.
-* Uses the `Grill Me` skill to rigorously stress-test the problem statement and ensure the team is solving the right problem.
-* Uses the `Storyteller` skill to brainstorm and generate comprehensive user stories and edge cases.
+* Leads the drafting of the PRD with the `prd` skill.
+* Creates the C4 Context Diagram with the `c4-modeling` skill.
+* Uses the `storyteller` skill to brainstorm and generate comprehensive user stories and edge cases.
 
 #### Software Engineer
 
@@ -62,6 +68,7 @@ A C4 Context Diagram provides a high-level, 10,000-foot view of how a software s
 #### UX Designer
 
 * Uses AI tools to prototype key user flows.
+* No visual design is required at this stage, the goal is to test out key screens and flows.
 
 #### QA Engineer
 
@@ -69,13 +76,37 @@ A C4 Context Diagram provides a high-level, 10,000-foot view of how a software s
 
 ## Design
 
-### UX design and prototyping
+### Goal
 
-### Architecture design
+Define the software solution to be built, including software architecture, UX design, and test strategy.
 
-### User Acceptance Tests design
+### Output
 
-Architecture generation tools transform business needs into database schema proposals, UI wireframes, and sequence diagrams, expediting the structural blueprint.
+`Architecture Design` + `UX Design` + `Test Strategy & Plan`: together they form a comprehensive blueprint of the system to be built.
+
+#### Architecture design
+
+* An architecture design document
+* A C4 Container Diagram
+
+#### UX design
+
+* A complete UI/UX design document
+* A more complete prototype that covers all key user flows and optionally includes visual design.
+
+#### Test Strategy & Plan
+
+* A test strategy document: defines how to setup AI agents for test automation based on the systems and infrastructure.
+* A test plan document: for each persona, how to run a testing agent that go through the user stories and where to save the AI generated feedbacks.
+
+### Roles & Responsibilities
+
+#### Software Engineer
+
+* Use the `kb-author` skill to create architecture design and save it into the Knowledge Base.
+* Use the `c4-modeling` skill to create the C4 Container Diagram.
+* Validates and confirms inter-systems integration interfaces.
+* Builds POCs to prove technical feasibility.
 
 ## Implementation
 
