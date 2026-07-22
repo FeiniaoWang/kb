@@ -8,31 +8,27 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 from kb.core.frontmatter import render_synthetic_document, replace_frontmatter_scalars
-from kb.core.housekeeping import LogEntry, append_log, utc_now
+from kb.core.housekeeping import LogEntry, utc_now
 from kb.core.ids import next_id
-from kb.core.indexing import (
-    file_listing_line,
-    regenerate_directory_index,
-    render_index,
-    subdirectory_listing_line,
-)
-from kb.core.ingest import slug
+from kb.core.naming import slug
 from kb.core.model import (
     Config,
     ConfigLoadError,
     DocClass,
     Document,
     SyntheticFrontmatter,
-    load_config,
 )
-from kb.core.safeio import (
-    FileIdentity,
-    create_file_bytes,
-    inspect_mutable_file,
-    overwrite_mutable_bytes,
-    read_mutable_bytes,
+from kb.core.scan import ID_REF_PATTERN, KB, RootDiscoveryError, resolve_ref
+from kb.core.write_pipeline import (
+    AllocationBlocked,
+    DocumentBirth,
+    MutationTarget,
+    WriteFailure,
+    WriteIntent,
+    apply_write,
+    load_write_context,
+    prepare_write,
 )
-from kb.core.scan import KB, RootDiscoveryError, discover_root, resolve_ref, scan
 
 CreateStatus = Literal["draft", "current"]
 
@@ -150,35 +146,6 @@ def _warnings(config: Config, request: CreateRequest, tags: list[str]) -> list[s
     return warnings
 
 
-def _new_index_contents(
-    root: Path,
-    missing: list[Path],
-    *,
-    filename: str,
-    doc_id: str,
-    title: str,
-    description: str,
-) -> dict[Path, str]:
-    contents: dict[Path, str] = {}
-    for offset, directory in enumerate(reversed(missing)):
-        relative = directory.relative_to(root).as_posix()
-        index_description = f"Documents under {relative}/."
-        if offset == 0:
-            listing = "## Files\n" + file_listing_line(
-                filename, doc_id, title, description
-            )
-        else:
-            child = missing[len(missing) - offset]
-            child_relative = child.relative_to(root).as_posix()
-            listing = "## Subdirectories\n" + subdirectory_listing_line(
-                child.name, f"Documents under {child_relative}/."
-            )
-        contents[directory / "index.md"] = render_index(
-            directory.name, index_description, listing
-        )
-    return contents
-
-
 def _body(request: CreateRequest) -> str:
     if request.body_file is None:
         return ""
@@ -258,41 +225,56 @@ def _resolve_supersedes(kb: KB, ref: str | None) -> Document | None:
     return document
 
 
-def _superseded_bytes(
-    root: Path,
-    document: Document,
-    timestamp: str,
-    identity: FileIdentity,
-) -> bytes:
-    return replace_frontmatter_scalars(
-        read_mutable_bytes(root / document.path, identity),
-        {
-            "status": "superseded",
-            "timestamp": timestamp,
-            "last_human_touch": timestamp,
-        },
-        append_missing=("timestamp", "last_human_touch"),
-    )
+def _unsafe_path_is_supersedes_target(
+    error: WriteFailure,
+    ref: str | None,
+) -> bool:
+    if ref is None:
+        return False
+    if ID_REF_PATTERN.fullmatch(ref):
+        if error.snapshot_kb is None:
+            return False
+        document = resolve_ref(error.snapshot_kb, ref)
+        return document is not None and document.path == error.path
+    candidate = PurePosixPath(ref)
+    if (
+        candidate.is_absolute()
+        or "\\" in ref
+        or any(part in {".", ".."} for part in candidate.parts)
+    ):
+        return False
+    if candidate.suffix != ".md":
+        candidate = PurePosixPath(f"{candidate}.md")
+    return Path(*candidate.parts) == error.path
 
 
 def create(request: CreateRequest) -> CreateResult:
     try:
-        root = discover_root(request.kb_root)
+        context = load_write_context(request.kb_root)
     except RootDiscoveryError as error:
         raise CreateFailure(error.code, error.message, 2) from error
-    try:
-        config = load_config(root)
     except ConfigLoadError as error:
         raise CreateFailure(error.code, error.message, 2) from error
-    kb = scan(root)
-    if kb.malformed:
-        paths = ", ".join(path.as_posix() for path, _ in kb.malformed)
+    except WriteFailure as error:
+        if _unsafe_path_is_supersedes_target(error, request.supersedes):
+            raise CreateFailure(
+                "E_CREATE_SUPERSEDES_INVALID",
+                f"supersedes target cannot be updated safely: "
+                f"{request.supersedes}: {error.cause}",
+                1,
+            ) from error
+        raise CreateFailure("E_CREATE_IO", str(error.cause), 2) from error
+    except AllocationBlocked as error:
+        paths = ", ".join(path.as_posix() for path in error.paths)
         raise CreateFailure(
             "E_CREATE_MALFORMED",
             f"malformed documents block id allocation: {paths}; run kb validate",
             2,
-        )
-    target_dir, missing_directories = _target_directory(root, request.dest)
+        ) from error
+    root = context.root
+    config = context.config
+    kb = context.kb
+    target_dir, _ = _target_directory(root, request.dest)
     tags = _stable_unique(request.tags)
     warnings = _warnings(config, request, tags)
     body = _body(request)
@@ -304,11 +286,16 @@ def create(request: CreateRequest) -> CreateResult:
     doc_id = next_id(kb, config.id_prefixes["synthetic"]).format()
     stem = slug(request.title, doc_id)
     path = target_dir / f"{stem}.md"
+    implicit_index_path = target_dir / "index.md"
     superseded_path = (
         root / superseded_document.path if superseded_document is not None else None
     )
     suffix = f"-{doc_id.lower()}"
-    while path.exists() or path == superseded_path:
+    while (
+        path.exists()
+        or path == superseded_path
+        or path == implicit_index_path
+    ):
         stem += suffix
         path = target_dir / f"{stem}.md"
     timestamp = utc_now()
@@ -327,105 +314,73 @@ def create(request: CreateRequest) -> CreateResult:
     )
     document_content = render_synthetic_document(frontmatter, body)
     relative = path.relative_to(root).as_posix()
-    new_indexes = _new_index_contents(
-        root,
-        missing_directories,
-        filename=path.name,
-        doc_id=doc_id,
-        title=request.title,
-        description=request.description,
+    intent = WriteIntent(
+        birth=DocumentBirth(
+            path=Path(relative),
+            content=document_content.encode("utf-8"),
+        ),
+        mutations=(
+            [MutationTarget(key="superseded", path=superseded_document.path)]
+            if superseded_document is not None
+            else []
+        ),
+        log_entry=LogEntry(
+            at=timestamp,
+            action="created",
+            actor=request.actor,
+            doc_ids=[doc_id]
+            + ([superseded_document.id] if superseded_document is not None else []),
+            note=relative
+            + (
+                f" supersedes {superseded_document.id}"
+                if superseded_document is not None
+                else ""
+            ),
+        ),
     )
-    existing_index_dir = (
-        missing_directories[0].parent if missing_directories else target_dir
-    )
-    existing_index = existing_index_dir / "index.md"
-    superseded_identity: FileIdentity | None = None
-    if superseded_document is not None:
-        try:
-            inspected = inspect_mutable_file(root / superseded_document.path)
-            if inspected is None:
-                raise OSError("supersedes target disappeared")
-            superseded_identity = inspected
-        except OSError as error:
+    try:
+        prepared_write = prepare_write(context, intent)
+    except WriteFailure as error:
+        if (
+            error.operation == "inspect"
+            and error.role == "mutation"
+            and error.key == "superseded"
+        ):
             raise CreateFailure(
                 "E_CREATE_SUPERSEDES_INVALID",
-                f"supersedes target cannot be updated safely: {request.supersedes}: "
-                f"{error}",
+                f"supersedes target cannot be updated safely: "
+                f"{request.supersedes}: {error.cause}",
+                1,
+            ) from error
+        raise CreateFailure("E_CREATE_IO", str(error.cause), 2) from error
+    replacements: dict[str, bytes] = {}
+    if superseded_document is not None:
+        try:
+            replacements["superseded"] = replace_frontmatter_scalars(
+                prepared_write.sources["superseded"].content,
+                {
+                    "status": "superseded",
+                    "timestamp": timestamp,
+                    "last_human_touch": timestamp,
+                },
+                append_missing=("timestamp", "last_human_touch"),
+            )
+        except (UnicodeError, ValueError) as error:
+            raise CreateFailure(
+                "E_CREATE_SUPERSEDES_INVALID",
+                f"supersedes target cannot be updated safely: "
+                f"{request.supersedes}: {error}",
                 1,
             ) from error
     try:
-        inspected_index = inspect_mutable_file(existing_index)
-        if inspected_index is None:
-            raise OSError("index disappeared")
-        existing_index_identity = inspected_index
-        log_identity = inspect_mutable_file(root / "log.md", allow_missing=True)
-    except OSError as error:
-        raise CreateFailure("E_CREATE_IO", str(error), 2) from error
-    try:
-        superseded_content = (
-            _superseded_bytes(
-                root, superseded_document, timestamp, superseded_identity
-            )
-            if superseded_document is not None and superseded_identity is not None
-            else None
-        )
-    except OSError as error:
-        raise CreateFailure("E_CREATE_IO", str(error), 2) from error
-    except ValueError as error:
-        raise CreateFailure(
-            "E_CREATE_SUPERSEDES_INVALID",
-            f"supersedes target cannot be updated safely: {request.supersedes}: "
-            f"{error}",
-            1,
-        ) from error
-    try:
-        for directory in missing_directories:
-            directory.mkdir()
-            index_path = directory / "index.md"
-            index_path.write_text(
-                new_indexes[index_path], encoding="utf-8", newline="\n"
-            )
-        create_file_bytes(path, document_content.encode("utf-8"))
-        if (
-            superseded_document is not None
-            and superseded_content is not None
-            and superseded_identity is not None
-        ):
-            overwrite_mutable_bytes(
-                root / superseded_document.path,
-                superseded_content,
-                superseded_identity,
-            )
-        overwrite_mutable_bytes(
-            existing_index,
-            regenerate_directory_index(root, existing_index_dir).encode("utf-8"),
-            existing_index_identity,
-        )
-        old_id = superseded_document.id if superseded_document else None
-        append_log(
-            root,
-            LogEntry(
-                at=timestamp,
-                action="created",
-                actor=request.actor,
-                doc_ids=[doc_id] + ([old_id] if old_id else []),
-                note=relative + (f" supersedes {old_id}" if old_id else ""),
-            ),
-            expected_identity=log_identity,
-        )
-    except OSError as error:
-        raise CreateFailure("E_CREATE_IO", str(error), 2) from error
-    created = [relative] + [
-        path.relative_to(root).as_posix() for path in new_indexes
-    ]
-    updated = [existing_index.relative_to(root).as_posix()]
-    if superseded_document is not None:
-        updated.append(superseded_document.path.as_posix())
+        receipt = apply_write(prepared_write, replacements)
+    except WriteFailure as error:
+        raise CreateFailure("E_CREATE_IO", str(error.cause), 2) from error
     return CreateResult(
         id=doc_id,
         path=relative,
         superseded=superseded_document.id if superseded_document else None,
-        created=sorted(created),
-        updated=sorted(updated),
+        created=receipt.created,
+        updated=receipt.updated,
         warnings=warnings,
     )

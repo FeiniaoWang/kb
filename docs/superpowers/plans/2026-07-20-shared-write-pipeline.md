@@ -8,6 +8,207 @@
 
 **Tech Stack:** Python >=3.14, Pydantic 2.x, PyYAML, pytest, `uv`; no new runtime or development dependencies.
 
+## Human-Approved Containment Amendment
+
+This amendment supersedes the path-based safe-I/O code snippets in this plan.
+All namespace resolution begins at the KB selected during preparation. Capture
+the root directory identity without keeping descriptors in `PreparedWrite`;
+for every operation, reopen and verify that root, traverse relative directory
+components using descriptor-relative no-follow opens, and keep the verified
+parent descriptor open through the final `mkdir`, exclusive create, inspect,
+read, identity-checked overwrite, or append. Refuse the operation with
+`OSError` before mutation on platforms lacking the necessary stdlib
+`dir_fd`/no-follow support. Close every descriptor on every path so an
+abandoned preparation cannot leak handles.
+
+The containment guarantee is descriptor/object containment. Every descriptor
+is resolved from the captured root under no-follow rules, but once open it
+binds the filesystem object rather than its lexical pathname. Portable
+Darwin/Linux interfaces cannot stop a non-cooperating namespace writer from
+renaming that bound inode outside the lexical KB root between open and
+mutation. That post-open movement is outside the threat model; no exclusive-
+writer or snapshot-isolation guarantee is claimed. If a later pathname-identity
+check observes the movement or a replacement at an expected pathname, it
+returns the established typed failure; not every post-open movement is
+necessarily observed, including movement during the final log effect after the
+last available born-directory check. Bytes already written through the bound
+descriptor remain documented no-rollback partial state on the moved object.
+Ordinary symlink/path traversal and pre-open replacement of paths with an
+established expected identity retain their documented protections. The
+high-entropy born staging path is the explicit exception: before its first open
+it has no expected identity and may bind a substituted real directory only when
+that directory is observed empty.
+
+`prepare_write()` privately retains the identity of the nearest existing
+affected/refresh directory. `apply_write()` requires that prepared identity as
+the expected immediate-parent identity for the first birth directly below it:
+the first missing directory when the destination is new, or the first
+companion/document when the destination already exists. Each later birth below
+a directory created by this application uses that born directory's identity.
+Thus a real-directory replacement installed between preparation and
+application fails before the first effect and receives no pipeline bytes. This
+closes a pre-open replacement interval and does not broaden the accepted
+post-open descriptor/object movement guarantee. The identity remains private
+`PreparedWrite` state; the public staged interface is unchanged.
+
+Before returning from preparation, reject any explicit birth, companion, or
+mutation path that collides with an implicit born index, the affected existing
+index, or root `log.md`. A document born as a would-be `index.md` is one such
+prewrite `ValueError` when passed directly to the pipeline: it is programmer
+misuse. Create and ingest command policy must prevent that invalid intent by
+reserving each implicit born `index.md` path while applying the existing
+deterministic collision-suffix naming algorithm.
+
+After consumption, late path/link/environment failures are `WriteFailure`s
+with the fixed operation and role for the attempted effect. In particular,
+companion and document failures are `phase="write"`, `operation="create"`, with
+their exact role and normalized root-relative path; directory, index, mutation,
+and log failures remain attributed to `mkdir`, `create`, `overwrite`, and
+`append` respectively. The application order and partial-write/no-rollback
+contract are unchanged.
+
+Context acquisition is also root-bound. Configuration and the recursive
+Markdown scan are descriptor-relative to one captured root identity. Each
+valid Markdown scan reads incrementally only through the closing frontmatter
+delimiter; it does not read or retain the body. Ordinary `scan()` and the
+rooted allocating scan share one prefix reader and one frontmatter byte parser.
+Malformed input may be read to EOF to establish a missing delimiter. Full
+identity-checked bytes are acquired later only for mutation sources that need
+lossless transformation. `Document.body` remains lazy, and no live descriptor
+crosses `load_write_context()`, `prepare_write()`, or `apply_write()`.
+
+Every created directory is first made under a high-entropy private staging
+name beneath the verified parent. Because portable Darwin/Linux `mkdirat` does
+not atomically return a descriptor, that pathname has no trusted creator
+identity. The first descriptor-relative no-follow directory open and its
+`fstat` bind the authoritative `FileIdentity`; a real-directory substitution
+before that first open may be bound and published only if descriptor-relative
+enumeration shows it is empty. A symlink, non-directory, or non-empty directory
+at binding fails before publication. Emptiness is checked through the held
+descriptor immediately after binding and again before publication; this
+narrows the concurrent-change window without promising snapshot isolation.
+A replacement inode present at an expected pathname when an available identity
+check runs is detected before or after publication, during child writes, or
+before the log effect. Operations already bound to an object follow that object
+under the threat-model scope above. Creator-provenance authentication before
+first open is not promised.
+
+The implementation atomically publishes the bound directory to the final name
+with a kernel no-replace primitive and verifies that the published entry
+matches the bound identity before returning it. Darwin uses
+`renameatx_np(..., RENAME_EXCL)` and Linux uses
+`renameat2(..., RENAME_NOREPLACE)`; ordinary rename is never an acceptable
+fallback because it may overwrite an empty late occupant. Unsupported
+platforms fail safely. Failed publication preserves the final occupant and
+performs no path-based staging deletion: a separate `stat`/`rmdir` pair cannot
+bind deletion to the held descriptor and could delete a replacement.
+
+Failure after staging creation may therefore leave a randomized
+`.kb-born-<high-entropy>` directory as permitted no-rollback partial state.
+The prefix identifies the orphan for operational inspection; it is not hidden
+from normal scan/index semantics. `kb index --check` can surface its missing
+`index.md`, and a steward removes or repairs it only after confirming no live
+write owns it and inspecting its contents. Successful exclusive publication
+renames the staging entry away, leaving no staging pathname.
+
+`apply_write()` keeps returned identities, not descriptors, as local state and
+requires the expected immediate-parent identity for every subsequent
+child-directory, born-index, companion, and document birth. It verifies every
+born directory identity again before success. A replacement directory
+installed at the old pathname after the first no-follow binding receives no
+pipeline bytes. A moved already-bound directory may receive partial bytes
+as no-rollback partial state. If a subsequent pathname-identity check observes
+the movement, it returns a typed failure; no such later observation is promised
+for movement during the final log effect. Parent and staging descriptors close
+within the one rooted directory-birth operation on every path.
+
+## Command-Contract Reconciliation Amendment
+
+This amendment supersedes the narrower born-directory collision and
+architecture-gate wording below. Create and ingest collision
+naming always reserve `<target>/index.md`, whether present, implicit for a new
+directory, or missing from a damaged existing directory. A damaged directory
+therefore reaches typed pipeline preparation with the deterministic suffixed
+document path and never leaks the pipeline's programmer-misuse `ValueError`.
+
+Ingest destination preflight rejects every existing symlink or junction
+component from the raw-class directory through the target before external
+acquisition, including in-class links. The exact command result is
+`E_INGEST_DEST_INVALID`, exit 2, with no KB or target mutation.
+
+Supersession-specific classification requires exact unsafe-target provenance:
+path references may match the unsafe root-relative path, while id references
+need a safely parsed matching document/path. An unresolved id plus unrelated
+unsafe Markdown path remains generic `E_CREATE_IO`; an `ELOOP` plus failed
+resolution is not proof.
+
+The architecture gate is semantic over direct filesystem writes as well as
+the existing helper/import graph. It rejects mutating `Path`, built-in file,
+`os`, and `shutil` calls, aliases/module qualification, dynamic or write-capable
+open modes, and file-object writes. Provably read-only external acquisition in
+the current command modules remains allowed until the separate input-seam
+plan.
+
+## Final-Review Destination and Log-Rendering Amendment
+
+This amendment addresses the remaining destination-provenance and log
+atomicity findings without changing traversal or validation order. On ingest's
+existing context-loading exception path, parse `--dest` only for a non-raising
+lexical comparison. Build the root-relative prefix chain from the selected raw
+class directory through the requested destination. An exact unsafe-path match
+maps to the established `E_INGEST_DEST_INVALID`; no match maps to the existing
+generic/config/malformed result. Do not call the adapter, inspect a path, or
+move destination validation ahead of context acquisition for this mapping.
+
+`prepare_write()` formats and strict UTF-8 encodes the complete log row before
+any mutation. Encoding failure is `WriteFailure("preflight", "render", "log",
+Path("log.md"), OSError(EILSEQ, ...))`; a raw `UnicodeEncodeError` never escapes.
+Store the resulting row bytes in private `PreparedWrite` state. `apply_write()`
+uses those bytes only and does not format or encode log text. Successful row
+bytes, existing/missing-log behavior, log-last ordering, and receipts remain
+unchanged.
+
+## Release-Hardening Amendment
+
+Rooted Markdown snapshot traversal is iterative, descriptor-relative, and
+bounded in live descriptor use. It does not recurse in Python or reopen every
+descendant from the root, while preserving lexicographic traversal,
+no-follow semantics, directory-identity checks on descent/ascent, root
+identity verification, and deterministic typed failures. A valid tree deeper
+than Python's recursion limit must never leak `RecursionError`.
+
+Projected-index acquisition reads only the frontmatter prefix of existing
+Markdown child documents in both the rooted pipeline and ordinary
+path-acquiring convenience path. Full subdirectory `index.md` acquisition
+remains permitted because its body heading is required listing metadata.
+
+Final born-directory verification moves to immediately before the log create
+or append. It is the last fallible pathname-identity operation before the final
+log effect, so a verification failure leaves `log.md` byte-identical and no
+fallible pipeline operation follows a successful log write.
+
+## Final Typed-Preflight and Acquisition-Provenance Amendment
+
+If rooted Markdown tree acquisition fails after listing—during a no-follow
+directory/file open, identity inspection, or frontmatter-prefix read—a private
+safe-I/O carrier preserves the exact root-relative failing path, the original
+`OSError`, and all prefixes safely acquired before failure. The pipeline builds
+the read-only partial `snapshot_kb` from only those prefixes and keeps the
+public staged interface unchanged.
+
+Create path-reference supersession classification and ingest requested
+destination/component classification compare the exact failing path directly.
+Create id references may use the partial snapshot to prove id-to-path
+provenance. Context/surface/destination/adapter order is unchanged, adapters
+are not invoked after a context failure, and the KB remains byte-identical.
+
+Born-current index formatting and strict UTF-8 encoding are preflight render
+work. Wrap expected `TypeError`/`ValueError` as `WriteFailure("preflight",
+"render", "index", exact_born_index_path, OSError(EINVAL, ...))` and
+`UnicodeEncodeError` with `EILSEQ`. Raw formatting/Unicode exceptions never
+cross the pipeline seam; create and ingest retain their stable generic I/O
+envelopes and no mutation occurs.
+
 ## Global Constraints
 
 - The root source of truth is `docs/prd.md`; command behavior remains governed by `docs/specs/commands/00-shared.md`, `docs/specs/commands/kb-create.md`, and `docs/specs/commands/kb-ingest.md` in that precedence order.
@@ -16,6 +217,22 @@
 - Strengthen ingest index/log handling to the same pre-inspected, identity-checked mutable-write behavior already used by create.
 - A preparation failure performs no writes. A write-phase `OSError` may leave effects completed earlier in the fixed sequence; no rollback is added.
 - Every new document, binary companion, and born `index.md` uses exclusive creation and never follows its final path when it is a symlink or junction.
+- Normal and rooted scans incrementally acquire only each Markdown
+  frontmatter prefix; allocation contexts retain no document body or complete
+  Markdown source bytes, while full rooted mutation-source acquisition remains
+  deferred to preparation.
+- Every born directory identity is bound by the first no-follow directory open
+  and `fstat` after staging-path creation, before atomic exclusive publication,
+  required for all later
+  child/index/companion/document births below it, and verified before success;
+  no descriptor survives an individual rooted operation and no ordinary rename
+  fallback may overwrite a late occupant. A real-directory substitution before
+  that first open may become the bound identity only when descriptor-relative
+  enumeration observes it empty at binding. Every descriptor is resolved from
+  the captured root; a non-cooperating post-open rename of its bound object is
+  outside the containment threat model and may carry documented partial bytes
+  outside the lexical root. Failed staging is never path-deleted after a
+  separate check and remains identifiable partial state when present.
 - Every existing mutation target, existing affected index, and existing `log.md` is inspected before the write boundary and updated using the captured `FileIdentity`.
 - The fixed application order is: missing directories and born indexes root-to-leaf; companions in declared order; citable document; mutations in declared order; nearest pre-existing affected index; log last.
 - Binary ingest represents the byte-identical original as a companion, so the original is created before the Markdown stub.
@@ -23,9 +240,18 @@
 - All public core data models introduced here are Pydantic 2.x `BaseModel`s. Private implementation state may use `PrivateAttr` and ordinary private helper types.
 - `src/kb/core/create.py` and `src/kb/core/ingest.py` retain their existing failure classes and map neutral pipeline failures to their stable command contracts.
 - Keep destination grammar, reference resolution, id allocation, collision policy, frontmatter rendering, and result models outside the write pipeline.
-- Keep external file/stdin/clipboard/create-body acquisition unchanged; the later `2026-07-20-cli-core-input-seam.md` plan owns that work.
+- Preserve context/malformed/surface/destination/adapter ordering. Ingest may
+  classify a rooted context failure as destination-invalid only by exact
+  equality with the lexical requested class/destination component chain; no
+  additional traversal or adapter call is permitted.
+- Create and ingest command collision policy always treats the target directory's CLI-maintained `index.md` as occupied before choosing the document filename, whether it exists, would be born, or is missing from a damaged existing directory; a direct pipeline intent that still collides with an implicit path remains programmer misuse rejected by `prepare_write()`.
+- Keep external file/stdin/clipboard/create-body acquisition unchanged; the
+  root-bound lazy allocation snapshot is in this plan, while the later
+  `2026-07-20-cli-core-input-seam.md` plan owns external command input.
 - Move `slug()` unchanged to `src/kb/core/naming.py`; do not combine this with broader naming changes.
 - No Typer, printing, `sys.exit`, network, Git operations, persistent cache/index, or new dependency enters `src/kb/core/`.
+- Prepare and strict UTF-8 encode the full log row before mutation, keep the
+  bytes private, and make application consume those bytes without rendering.
 - Use `uv run pytest`; CLI tests continue to invoke Typer through `CliRunner`, not subprocesses.
 - Preserve unrelated user changes. At plan-writing time `.gitignore` is modified and `docs/superpowers/plans/2026-07-20-cli-core-input-seam.md` is untracked; do not stage, edit, or remove either file while executing this plan.
 
@@ -141,6 +367,7 @@ class WriteFailure(Exception):
     path: Path
     cause: OSError
     key: str | None
+    snapshot_kb: KB | None
 
 
 def load_write_context(kb_root: Path | None) -> WriteContext
@@ -155,11 +382,26 @@ def apply_write(
 ) -> WriteReceipt
 ```
 
-`PreparedWrite` uses private attributes for the resolved root, original intent, mutation identities, affected-index path/identity/bytes, log identity, born-index plan, receipt paths, and consumed flag. `sources` is the only public preparation detail.
+`PreparedWrite` uses private attributes for the resolved root, original intent,
+mutation identities, affected-index path/identity/bytes, log identity,
+born-index plan, receipt paths, and consumed flag. `sources` is the only public
+preparation detail. Born-directory identities do not enter the public model;
+`apply_write()` captures and retains them locally as directories are created.
+The complete rendered log row is stored as a private `bytes` attribute and
+never exposed through the public Pydantic fields.
+
+`WriteFailure.snapshot_kb` is read-only context-failure provenance. It is
+populated only with the safely parsed partial snapshot available when rooted
+Markdown acquisition fails, so a command can prove an exact id/path or
+destination-path classification. It is not a mutable or persistent KB
+cache/index and is `None` when no safely parsed partial snapshot is available.
 
 ---
 
 ### Task 1: Extract Deterministic Naming
+
+**Historical execution record:** Complete in `7d72ce0`. The unchecked steps
+below preserve the original TDD instructions; they are not pending work.
 
 **Files:**
 - Create: `src/kb/core/naming.py`
@@ -267,6 +509,9 @@ Expected: the commit contains only the naming move and its direct test.
 ---
 
 ### Task 2: Add Projected Index Rendering
+
+**Historical execution record:** Complete in `85e4b26`. The unchecked steps
+below preserve the original TDD instructions; they are not pending work.
 
 **Files:**
 - Modify: `src/kb/core/indexing.py`
@@ -466,12 +711,19 @@ git commit -m "refactor(index): support projected write listings"
 
 ### Task 3: Implement the Shared Write Pipeline
 
+**Historical execution record:** Complete in `174101a` through `0c6c036`. The
+unchecked steps below preserve the original TDD instructions; they are not
+pending work.
+
 **Files:**
 - Create: `src/kb/core/write_pipeline.py`
 - Create: `tests/core/test_write_pipeline.py`
 
 **Interfaces:**
-- Consumes: `safeio` exclusive/identity-checked primitives, `LogEntry`/`append_log`, Task 2 projected index rendering, root discovery, config loading, and scan.
+- Consumes: `safeio` rooted exclusive/identity-checked primitives,
+  `LogEntry` formatting, Task 2 projected index rendering, root discovery,
+  descriptor-relative config acquisition, and the shared incremental
+  frontmatter-prefix scan parser.
 - Produces: the exact `WriteContext`, `DocumentBirth`, `CompanionBirth`, `MutationTarget`, `WriteIntent`, `PreparedWrite`, `WriteReceipt`, `AllocationBlocked`, `WriteFailure`, `load_write_context()`, `prepare_write()`, and `apply_write()` interface under Stable Interfaces.
 
 - [ ] **Step 1: Write failing context and intent tests**
@@ -683,18 +935,31 @@ class PreparedWrite(BaseModel):
     _consumed: bool = PrivateAttr(default=False)
 ```
 
-Implement context loading exactly once:
+Implement context loading exactly once through a short-lived rooted reader.
+Configuration is acquired in full, while `_snapshot_markdown_prefixes()`
+incrementally reads only through each Markdown file's closing frontmatter
+delimiter. `scan_snapshot()` receives those prefixes and does not attach them
+to `Document` objects:
 
 ```python
 def load_write_context(kb_root: Path | None) -> WriteContext:
     root = discover_root(kb_root)
-    config = load_config(root)
-    kb = scan(root)
+    with rooted_reader(root) as reader:
+        root_identity = reader.identity
+        config = parse_config_bytes(reader.read_file(Path("kb-config.json")))
+        kb = scan_snapshot(root, _snapshot_markdown_prefixes(reader))
     if kb.malformed:
         paths = tuple(sorted(path for path, _ in kb.malformed))
         raise AllocationBlocked(paths)
-    return WriteContext(root=root, config=config, kb=kb)
+    context = WriteContext(root=root, config=config, kb=kb)
+    context._root_identity = root_identity
+    return context
 ```
+
+The ordinary path-based `scan()` calls the same incremental prefix-reader and
+frontmatter byte parser. A no-closing-delimiter file may run to EOF; a valid
+file's body must never be read or retained. Supersession continues to use the
+separate full rooted `read_rooted_bytes()` acquisition during preparation.
 
 - [ ] **Step 4: Implement private path and document-metadata validation**
 
@@ -1455,6 +1720,11 @@ git commit -m "feat(core): add identity-checked write pipeline"
 
 ### Task 4: Migrate `kb create` to the Pipeline
 
+**Historical execution record:** Complete in `81bc4e5` and `236ea2c`. Commit
+`81bc4e5` used `CLI-7` in its immutable historical subject by mistake; the
+normative create requirement and this plan's traceability are `CLI-13`. The
+unchecked steps below are not pending work.
+
 **Files:**
 - Modify: `src/kb/core/create.py`
 - Create: `tests/test_write_pipeline_architecture.py`
@@ -1638,12 +1908,15 @@ Expected: the repository suite passes; create has no direct persistence orchestr
 
 ```bash
 git add src/kb/core/create.py tests/test_write_pipeline_architecture.py
-git commit -m "refactor(create): use shared write pipeline (CLI-7)"
+git commit -m "refactor(create): use shared write pipeline (CLI-13)"
 ```
 
 ---
 
 ### Task 5: Migrate and Strengthen `kb ingest`
+
+**Historical execution record:** Complete in `42f8bfd`. The unchecked steps
+below preserve the original TDD instructions; they are not pending work.
 
 **Files:**
 - Modify: `src/kb/core/ingest.py`
@@ -1842,6 +2115,11 @@ git commit -m "refactor(ingest): use safe shared write pipeline (CLI-8)"
 
 ### Task 6: Enforce the Architecture and Complete Regression
 
+**Historical execution record:** Complete in `944ce87`, `715b6d9`, and
+`8df47e4`. The unchecked steps below preserve the original TDD instructions;
+they are not pending work. The downstream input-seam inspection found a deeper
+interface assumption, so its revalidation remains explicitly deferred.
+
 **Files:**
 - Modify: `tests/test_write_pipeline_architecture.py`
 - Modify: `docs/superpowers/plans/2026-07-20-cli-core-input-seam.md` only if an exact file-path reference became stale; do not change its stable interfaces in this task.
@@ -1981,19 +2259,258 @@ Expected: tracked status is clean; unrelated user files remain untouched; the br
 
 ---
 
+### Task 7: Bind Context and Projected Index Reads to the Captured Root
+
+**Executed scope:** Root configuration/scan acquisition and projected-index
+metadata acquisition were moved behind short-lived rooted readers. Contexts
+carry root identity without live descriptors, and every later stage reopens
+and verifies the captured root.
+
+- [x] Acquire configuration and Markdown scan inputs descriptor-relatively.
+- [x] Acquire affected-index source and listing metadata without path fallback.
+- [x] Reject root replacement and unsafe child kinds with typed provenance.
+- [x] Verify focused and complete regressions (`bd4184b`, `b78c1e5`).
+
+### Task 8: Reconcile Command Naming, Destination, and Architecture Contracts
+
+**Executed scope:** Both commands reserve CLI-maintained `index.md`, ingest
+rejects requested destination unsafe components before acquisition, and the
+semantic architecture gate prevents command-owned persistence from returning.
+
+- [x] Pin born-index naming and destination validation in command specs.
+- [x] Preserve create supersession and ingest destination error envelopes.
+- [x] Enforce direct-write and provenance restrictions with AST tests.
+- [x] Verify focused and complete regressions (`5148b4a`..`b66a3be`).
+
+### Task 9A: Make Allocation Lazy and Bind Born Directories by Identity
+
+**Executed scope:** Ordinary and rooted scans share incremental frontmatter
+prefix acquisition; born directories use held staging identity plus atomic
+no-replace publication, and failed staging is retained as documented partial
+state rather than removed through a racy pathname.
+
+- [x] Keep valid Markdown bodies out of allocation snapshots.
+- [x] Publish born directories exclusively and fail safely when unsupported.
+- [x] Propagate each born identity to child/index/document writes and verify it
+      before success.
+- [x] Verify focused and complete regressions (`502b0ab`..`180cff4`).
+
+### Task 9B: Close Command and Direct-Write Contract Gaps
+
+**Executed scope:** Command validation ordering, raw-class destination shape,
+exact supersession provenance, and the semantic direct-write gate were brought
+into agreement with the normative command specs.
+
+- [x] Reconcile create and ingest specifications before code.
+- [x] Preserve exact command results for damaged or unsafe destinations.
+- [x] Reject aliases, dynamic modes, file-object writes, and mutating
+      filesystem calls in command modules.
+- [x] Verify focused and complete regressions (`1f1cae1`..`c1e3028`).
+
+### Task 10: Classify Destination Context Failures and Pre-render Logs
+
+**Historical execution record:** Complete in `43063f5` and `62c6068`. The
+unchecked steps below preserve the original TDD instructions; they are not
+pending work.
+
+**Files:**
+- Modify: `docs/specs/commands/00-shared.md`
+- Modify: `docs/specs/commands/kb-create.md`
+- Modify: `docs/specs/commands/kb-ingest.md`
+- Modify: `docs/superpowers/specs/2026-07-20-shared-write-pipeline-design.md`
+- Modify: `docs/superpowers/plans/2026-07-20-shared-write-pipeline.md`
+- Modify: `src/kb/core/ingest.py`
+- Modify: `src/kb/core/write_pipeline.py`
+- Modify focused pipeline/create/ingest tests.
+
+**Interfaces:**
+- Consumes: the completed rooted allocating snapshot, exact unsafe-path
+  provenance on `WriteFailure`, the stable ingest/create envelopes, and the
+  public staged write-pipeline interface.
+- Produces: exact destination-component context classification and a privately
+  prepared log row with no public interface change.
+
+- [ ] **Step 1: Commit normative documentation before code**
+
+Pin exact destination provenance, unchanged validation/acquisition order,
+pre-mutation log formatting/encoding, typed preflight log failure, and
+bytes-only application in the shared and command specs plus design/plan.
+
+- [ ] **Step 2: Establish destination-provenance RED**
+
+Add final and intermediate `.md`-named directory link/junction regressions in
+plain and JSON forms as appropriate. Assert exact `E_INGEST_DEST_INVALID`, exit
+2, no adapter call, and byte-stable KB/external input. Add an unrelated unsafe
+Markdown context failure proving generic `E_INGEST_IO` and established
+precedence.
+
+- [ ] **Step 3: Implement comparison-only provenance mapping**
+
+On the existing context exception path, safely parse destination parts without
+raising. Compare the typed unsafe path with every lexical prefix from the raw
+class directory through the destination. Reuse the exact destination failure
+mapping. Add no filesystem access before normal destination validation.
+
+- [ ] **Step 4: Establish and fix log-render RED**
+
+Add direct pipeline coverage for private prepared bytes and a typed
+preflight/render/log encoding failure, plus create surrogate-actor and ingest
+surrogate-source/default-origin stable-envelope/no-mutation coverage. Format
+and encode once during preparation, wrap expected formatter `TypeError` or
+`ValueError` as an `EINVAL` `OSError` and encoding as an `EILSEQ` `OSError`,
+store bytes privately, and make application use them exclusively. Preserve
+successful bytes, existing/missing-log behavior, log-last order, and receipts.
+
+- [ ] **Step 5: Verify and commit code/tests separately**
+
+Run focused pipeline/create/ingest/architecture suites, explicit AC
+collection, the full suite, and `git diff --check`. Do not modify Task 9A/9B or
+the separate CLI/core input-seam plan, and do not dispatch a reviewer.
+
+**Executed:** All five steps are complete in documentation commit `43063f5`
+and implementation commit `62c6068`; 439 repository tests passed and the task
+review was approved.
+
+---
+
+### Task 11: Harden Traversal, Index Metadata, and the Final Log Boundary
+
+**Files:**
+- Modify: `src/kb/core/safeio.py`
+- Modify: `src/kb/core/write_pipeline.py`
+- Modify: `src/kb/core/indexing.py`
+- Modify focused safe-I/O, pipeline, and indexing tests.
+
+- [x] **Step 1: Replace recursive rooted scan traversal**
+
+Add a descriptor-created tree deeper than Python's recursion limit and prove
+the operation never leaks `RecursionError`. Implement iterative traversal with
+bounded live descriptors, descriptor-relative descent/ascent, identity
+verification, deterministic lexical order, and no root-to-descendant quadratic
+reopening.
+
+- [x] **Step 2: Acquire projected child metadata by prefix**
+
+Use `read_frontmatter_prefix()` for existing Markdown child metadata in both
+the rooted pipeline and ordinary convenience acquisition paths. Preserve full
+subdirectory `index.md` reads where the body heading is required, and pin the
+behavior with a multi-megabyte-body regression.
+
+- [x] **Step 3: Verify born directories immediately before logging**
+
+Move final born-directory verification after all other non-log writes and
+immediately before log creation/append. Pin that a verification failure leaves
+log bytes unchanged and that no fallible pipeline operation follows logging.
+
+- [x] **Step 4: Verify and commit code/tests separately from documentation**
+
+Run focused safe-I/O/index/pipeline tests, create and ingest plus architecture
+tests, explicit AC collection, deep-tree resource regressions, the full suite,
+and `git diff --check`.
+
+---
+
+### Task 12: Pin the First-Open Born-Directory Binding Boundary
+
+**Decision:** The user selected first-open binding after the platform review
+established that `mkdirat` cannot atomically return a created-directory
+descriptor on supported Darwin/Linux systems.
+
+- [x] Document that staging-path creation does not authenticate creator
+      provenance and that first no-follow open plus `fstat` binds identity.
+- [x] Pin deterministic pre-binding real-directory and symlink substitutions.
+- [x] Remove authoritative pre-open pathname `stat`; publish and verify only
+      the identity acquired from the opened descriptor.
+- [x] Verify focused, command, architecture, AC, and full regressions.
+- [x] **Final-review correction:** reject any directory observed non-empty
+      through the held descriptor at first-open binding, before final-name
+      publication or pipeline writes; re-run all release gates.
+
+---
+
+### Task 13: Define Descriptor/Object Containment Under Post-Open Rename
+
+**Decision:** The user accepts the portable POSIX limitation: a
+non-cooperating actor that renames an already-open inode outside the lexical KB
+root is outside the containment threat model. No lock, exclusive-writer model,
+or public interface is added.
+
+- [x] Scope the design and plan to descriptor/object containment and document
+      post-open movement as possible no-rollback partial state.
+- [x] Pin the exact post-open parent-rename interval with a typed-failure,
+      replacement-stability, moved-object partial-bytes, and unchanged-log
+      regression.
+- [x] Verify focused, command, architecture, exact AC, full-suite, diff, and
+      status gates.
+
+---
+
+### Task 14: Preserve Acquisition Provenance and Type Born-Index Failures
+
+**Scope:** Close the two final typed-error/provenance findings without changing
+the public staged interface, validation/acquisition order, or successful bytes.
+
+- [x] Pin exact relative-path and safely acquired partial-prefix provenance for
+      rooted tree acquisition failures, plus typed born-index render/encoding
+      failures, in the design and plan.
+- [x] Preserve acquisition provenance through the internal safe-I/O seam and
+      exact create/ingest command classifications.
+- [x] Wrap born-index formatting and UTF-8 encoding as exact typed preflight
+      index failures before mutation.
+- [x] Verify focused, command, architecture, exact AC, full-suite, diff, and
+      status gates.
+
+---
+
+### Task 15: Retain Existing Destination-Parent Identity
+
+**Scope:** Close the nearest-existing-directory replacement interval without
+changing the public staged interface, successful bytes, or accepted post-open
+threat model.
+
+- [x] Pin the prepared nearest-existing-directory identity and its apply-time
+      immediate-parent authority in the design and plan.
+- [x] Retain that identity privately and require it for the first birth below
+      the nearest existing directory.
+- [x] Pin existing-target and first-missing-child replacement regressions with
+      no replacement bytes or earlier pipeline effects.
+- [x] Verify focused, command, architecture, exact AC, full-suite, diff, and
+      status gates.
+
+---
+
 ## Implementation Completion Checklist
 
-- [ ] `slug()` is defined only in `src/kb/core/naming.py` and both commands import it.
-- [ ] `src/kb/core/write_pipeline.py` exposes the approved three-function staged interface.
-- [ ] Preparation captures mutable document, affected-index, and log identities before any writes.
-- [ ] Create performs lossless supersession transformation from `PreparedWrite.sources` before `apply_write()`.
-- [ ] Ingest binary originals are typed companions created before stubs.
-- [ ] Born indexes are exclusive and current; only the nearest pre-existing index is identity-overwritten.
-- [ ] Existing/missing log behavior and exact rows remain unchanged, with log last.
-- [ ] Late occupants and changed identities are never overwritten or followed.
-- [ ] No rollback was added; documented partial-write behavior remains.
-- [ ] Receipts exactly preserve command `created`/`updated` output fields.
-- [ ] Create AC01–AC52 and ingest AC01–AC50 pass unchanged.
-- [ ] Architecture tests prevent command-owned persistence from returning.
-- [ ] Full repository tests and `git diff --check` pass.
-- [ ] The downstream CLI/core input-seam plan has no stale source paths and still treats this extraction as a prerequisite.
+- [x] `slug()` is defined only in `src/kb/core/naming.py` and both commands import it.
+- [x] `src/kb/core/write_pipeline.py` exposes the approved three-function staged interface.
+- [x] Preparation captures mutable document, affected-index, and log identities before any writes.
+- [x] Create performs lossless supersession transformation from `PreparedWrite.sources` before `apply_write()`.
+- [x] Ingest binary originals are typed companions created before stubs.
+- [x] Born indexes are exclusive and current; only the nearest pre-existing index is identity-overwritten.
+- [x] Existing/missing log behavior and exact rows remain unchanged, with log last.
+- [x] The log row is privately rendered and UTF-8 encoded during preparation;
+      application consumes only prepared bytes and encoding failure is typed
+      before mutation.
+- [x] Ingest context failures map to destination-invalid only for an exact
+      requested class/destination component, with no extra traversal.
+- [x] Late occupants and changed identities are never overwritten or followed.
+- [x] No rollback was added; documented partial-write behavior remains.
+- [x] Receipts exactly preserve command `created`/`updated` output fields.
+- [x] Create AC01–AC52 and ingest AC01–AC50 pass unchanged.
+- [x] Architecture tests prevent command-owned persistence from returning.
+- [x] Full repository tests and `git diff --check` pass through Task 10.
+- [x] Task 11 iterative traversal, prefix-only projected child acquisition,
+      and pre-log final verification are complete.
+- [x] Task 12 first-open born-directory binding correction is implemented and
+      verified; only an empty real directory may be accepted at binding and
+      pathname replacements are detected at the available identity checks.
+- [x] Task 13 descriptor/object containment scope and the accepted post-open
+      namespace-movement limitation are documented and regression-tested.
+- [x] Task 14 partial acquisition provenance and born-index typed preflight
+      envelopes are implemented and verified.
+- [x] Task 15 prepared nearest-existing-directory identity prevents a
+      replacement from receiving the first apply-time birth.
+- [ ] Revalidate the downstream CLI/core input-seam plan after this branch is
+      integrated. Its source paths exist, but its separate prepared models
+      still contain stale `missing_directories` assumptions and are explicitly
+      outside this extraction.

@@ -172,14 +172,13 @@ class ConfigLoadError(Exception):
         self.message = message
 
 
-def load_config(root: Path) -> Config:
-    path = root / "kb-config.json"
+def parse_config_bytes(content: bytes) -> Config:
     try:
-        parsed = json.loads(path.read_text(encoding="utf-8"))
+        parsed = json.loads(content.decode("utf-8", errors="strict"))
         if not isinstance(parsed, dict):
             raise TypeError("configuration must be a JSON object")
         config = Config.model_validate(parsed)
-    except (OSError, UnicodeError, json.JSONDecodeError, TypeError, ValidationError) as error:
+    except (UnicodeError, json.JSONDecodeError, TypeError, ValidationError) as error:
         raise ConfigLoadError("E_CONFIG_INVALID", f"invalid kb-config.json: {error}") from error
     if config.schema > CURRENT_SCHEMA:
         raise ConfigLoadError(
@@ -187,3 +186,15 @@ def load_config(root: Path) -> Config:
             f"unsupported KB schema {config.schema}; maximum supported schema is {CURRENT_SCHEMA}",
         )
     return config
+
+
+def load_config(root: Path) -> Config:
+    path = root / "kb-config.json"
+    try:
+        content = path.read_bytes()
+    except OSError as error:
+        raise ConfigLoadError(
+            "E_CONFIG_INVALID",
+            f"invalid kb-config.json: {error}",
+        ) from error
+    return parse_config_bytes(content)

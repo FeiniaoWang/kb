@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import errno
 import json
 import os
 import re
+import shutil
+import stat
 from datetime import datetime
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import yaml
@@ -330,7 +334,7 @@ def test_ac14_file_stem_derives_slug_and_title(
 
 
 def test_ac15_collision_suffixes_without_overwrite(
-    initialized_kb, tmp_path, invoke_ingest
+    initialized_kb, tmp_path, invoke_ingest, monkeypatch
 ) -> None:
     existing = write_existing(
         initialized_kb,
@@ -344,6 +348,99 @@ def test_ac15_collision_suffixes_without_overwrite(
     assert result.exit_code == 0
     assert (initialized_kb / "raw/sources/notes-raw-000002.md").is_file()
     assert existing.read_bytes() == before
+
+    from typer.testing import CliRunner
+    from kb.cli.app import app
+
+    index_source = tmp_path / "index.md"
+    index_source.write_text("new nested evidence", encoding="utf-8")
+    for json_output in (False, True):
+        nested_root = tmp_path / f"nested-text-{'json' if json_output else 'text'}"
+        assert (
+            CliRunner().invoke(app, ["init", "--root", str(nested_root)]).exit_code
+            == 0
+        )
+        arguments = ["--dest", "a/b"]
+        if json_output:
+            arguments.append("--json")
+        nested = ingest_file(
+            invoke_ingest,
+            nested_root,
+            index_source,
+            *arguments,
+        )
+        document_relative = "raw/sources/a/b/index-raw-000001.md"
+        nested_index = nested_root / "raw/sources/a/b/index.md"
+        created = [
+            document_relative,
+            "raw/sources/a/b/index.md",
+            "raw/sources/a/index.md",
+        ]
+        assert nested.exit_code == 0
+        assert (nested_root / document_relative).is_file()
+        assert "[index](index-raw-000001.md)" in nested_index.read_text(
+            encoding="utf-8"
+        )
+        if json_output:
+            assert json.loads(nested.stdout) == {
+                "ok": True,
+                "id": "RAW-000001",
+                "path": document_relative,
+                "original": None,
+                "created": created,
+                "updated": ["raw/sources/index.md"],
+            }
+        else:
+            assert nested.stdout.splitlines() == [
+                *(f"created  {path}" for path in created),
+                "updated  raw/sources/index.md",
+                f"ingested RAW-000001 as {document_relative}",
+            ]
+
+    import kb.core.ingest as ingest_core
+
+    real_prepare = ingest_core.prepare_write
+    prepared_births: list[Path] = []
+
+    def record_birth(context, intent):
+        prepared_births.append(intent.birth.path)
+        return real_prepare(context, intent)
+
+    monkeypatch.setattr(ingest_core, "prepare_write", record_birth)
+    source_before = index_source.read_bytes()
+    for json_output in (False, True):
+        damaged_root = tmp_path / f"damaged-ingest-{'json' if json_output else 'text'}"
+        assert (
+            CliRunner().invoke(app, ["init", "--root", str(damaged_root)]).exit_code
+            == 0
+        )
+        damaged = damaged_root / "raw/sources/damaged"
+        damaged.mkdir()
+        before_damaged = snapshot(damaged_root)
+        arguments = ["--dest", "damaged"]
+        if json_output:
+            arguments.append("--json")
+
+        result = ingest_file(
+            invoke_ingest,
+            damaged_root,
+            index_source,
+            *arguments,
+        )
+
+        assert result.exit_code == 2
+        assert isinstance(result.exception, SystemExit)
+        if json_output:
+            assert json.loads(result.stdout)["error"]["code"] == "E_INGEST_IO"
+            assert result.stderr == ""
+        else:
+            assert "E_INGEST_IO" in result.stderr
+            assert result.stdout == ""
+        assert prepared_births[-1] == Path(
+            "raw/sources/damaged/index-raw-000001.md"
+        )
+        assert snapshot(damaged_root) == before_damaged
+        assert index_source.read_bytes() == source_before
 
 
 def test_ac16_empty_slug_falls_back_to_lowercase_id(
@@ -522,7 +619,9 @@ def test_ac24_binary_file_creates_byte_identical_original_and_exact_stub(
     ]
 
 
-def test_ac25_binary_collision_suffixes_both_files(initialized_kb, tmp_path, invoke_ingest) -> None:
+def test_ac25_binary_collision_suffixes_both_files(
+    initialized_kb, tmp_path, invoke_ingest
+) -> None:
     write_existing(initialized_kb, "raw/sources/q3-report.md", "id: RAW-000001\ntype: raw-source\n")
     source = tmp_path / "Q3 Report.pdf"
     source.write_bytes(b"\xffbinary")
@@ -533,6 +632,68 @@ def test_ac25_binary_collision_suffixes_both_files(initialized_kb, tmp_path, inv
         "Non-text original stored alongside this stub: "
         "[q3-report-raw-000002.pdf](q3-report-raw-000002.pdf)\n"
     )
+
+    from typer.testing import CliRunner
+    from kb.cli.app import app
+
+    index_source = tmp_path / "index.pdf"
+    index_source.write_bytes(b"%PDF-index-\xff\x00")
+    for json_output in (False, True):
+        nested_root = tmp_path / f"nested-binary-{'json' if json_output else 'text'}"
+        assert (
+            CliRunner().invoke(app, ["init", "--root", str(nested_root)]).exit_code
+            == 0
+        )
+        arguments = ["--dest", "a/b"]
+        if json_output:
+            arguments.append("--json")
+        nested = ingest_file(
+            invoke_ingest,
+            nested_root,
+            index_source,
+            *arguments,
+        )
+        stub_relative = "raw/sources/a/b/index-raw-000001.md"
+        original_relative = "raw/sources/a/b/index-raw-000001.pdf"
+        stub = nested_root / stub_relative
+        original = nested_root / original_relative
+        index = nested_root / "raw/sources/a/b/index.md"
+        assert nested.exit_code == 0
+        assert nested.exception is None
+        assert original.read_bytes() == index_source.read_bytes()
+        assert split_document(stub)[1] == (
+            "Non-text original stored alongside this stub: "
+            "[index-raw-000001.pdf](index-raw-000001.pdf)\n"
+        )
+        assert index.read_text(encoding="utf-8") == (
+            "---\ntype: index\n"
+            "description: Documents under raw/sources/a/b/.\n---\n"
+            "# b\n\n"
+            "<!-- Generated by kb — do not edit; run `kb index` to regenerate. -->\n\n"
+            "## Files\n"
+            "* [RAW-000001][index](index-raw-000001.md)\n"
+        )
+        created = [
+            stub_relative,
+            original_relative,
+            "raw/sources/a/b/index.md",
+            "raw/sources/a/index.md",
+        ]
+        if json_output:
+            assert json.loads(nested.stdout) == {
+                "ok": True,
+                "id": "RAW-000001",
+                "path": stub_relative,
+                "original": original_relative,
+                "created": created,
+                "updated": ["raw/sources/index.md"],
+            }
+        else:
+            assert nested.stdout.splitlines() == [
+                *(f"created  {path}" for path in created),
+                "updated  raw/sources/index.md",
+                f"ingested RAW-000001 as {stub_relative}",
+            ]
 
 
 def test_ac26_index_lists_stub_but_not_binary(initialized_kb, tmp_path, invoke_ingest) -> None:
@@ -652,6 +813,59 @@ def test_ac29_nested_new_dest_indexes_are_born_current_bottom_up(
     ]
 
 
+@pytest.mark.parametrize("json_output", [False, True])
+def test_new_nested_dest_reserves_born_index_filename_during_ingest_collision_naming(
+    json_output, initialized_kb, tmp_path, invoke_ingest
+) -> None:
+    source = tmp_path / "index.md"
+    source.write_text("evidence", encoding="utf-8")
+    arguments = ["--dest", "a/b"]
+    if json_output:
+        arguments.append("--json")
+
+    result = ingest_file(
+        invoke_ingest,
+        initialized_kb,
+        source,
+        *arguments,
+    )
+
+    document = initialized_kb / "raw/sources/a/b/index-raw-000001.md"
+    index = initialized_kb / "raw/sources/a/b/index.md"
+    assert result.exit_code == 0
+    assert result.exception is None
+    assert document.is_file()
+    assert index.read_text(encoding="utf-8") == (
+        "---\ntype: index\n"
+        "description: Documents under raw/sources/a/b/.\n---\n"
+        "# b\n\n"
+        "<!-- Generated by kb — do not edit; run `kb index` to regenerate. -->\n\n"
+        "## Files\n"
+        "* [RAW-000001][index](index-raw-000001.md)\n"
+    )
+    if json_output:
+        assert json.loads(result.stdout) == {
+            "ok": True,
+            "id": "RAW-000001",
+            "path": "raw/sources/a/b/index-raw-000001.md",
+            "original": None,
+            "created": [
+                "raw/sources/a/b/index-raw-000001.md",
+                "raw/sources/a/b/index.md",
+                "raw/sources/a/index.md",
+            ],
+            "updated": ["raw/sources/index.md"],
+        }
+    else:
+        assert result.stdout.splitlines() == [
+            "created  raw/sources/a/b/index-raw-000001.md",
+            "created  raw/sources/a/b/index.md",
+            "created  raw/sources/a/index.md",
+            "updated  raw/sources/index.md",
+            "ingested RAW-000001 as raw/sources/a/b/index-raw-000001.md",
+        ]
+
+
 def test_ac30_existing_dest_updates_only_its_index(initialized_kb, tmp_path, invoke_ingest) -> None:
     api = initialized_kb / "raw/sources/api"
     api.mkdir()
@@ -682,7 +896,17 @@ def test_ac32_unsafe_or_escaping_dest_is_rejected_without_writes(
 ) -> None:
     source = tmp_path / "doc.md"
     source.write_text("doc", encoding="utf-8")
+    source_before = source.read_bytes()
     before = snapshot(initialized_kb)
+    import kb.core.ingest as ingest_core
+
+    acquired: list[str | None] = []
+
+    def forbidden_adapter(value: str | None):
+        acquired.append(value)
+        raise AssertionError("destination validation must precede acquisition")
+
+    monkeypatch.setitem(ingest_core.ADAPTERS, "file", forbidden_adapter)
     invalid_values = [
         "/abs",
         "../escape",
@@ -700,24 +924,457 @@ def test_ac32_unsafe_or_escaping_dest_is_rejected_without_writes(
         assert value in result.stderr
         assert snapshot(initialized_kb) == before
 
-    class_dir = initialized_kb / "raw/sources"
-    target_dir = class_dir / "linked"
-    outside = tmp_path / "outside"
-    real_resolve = Path.resolve
+    in_class_target = initialized_kb / "raw/sources/in-class-target"
+    in_class_target.mkdir()
+    (in_class_target / "index.md").write_text(
+        "---\ntype: index\ndescription: In-class target.\n---\n# target\n",
+        encoding="utf-8",
+    )
+    sentinel = in_class_target / "sentinel.bin"
+    sentinel.write_bytes(b"target bytes")
+    linked = initialized_kb / "raw/sources/linked"
+    try:
+        linked.symlink_to(in_class_target, target_is_directory=True)
+    except (NotImplementedError, OSError) as error:
+        pytest.skip(f"symlinks unsupported: {error}")
+    link_text = os.readlink(linked)
+    before_links = snapshot(initialized_kb)
+    for value in ("linked", "linked/child"):
+        for json_output in (False, True):
+            arguments = ["--dest", value]
+            if json_output:
+                arguments.append("--json")
+            result = ingest_file(
+                invoke_ingest,
+                initialized_kb,
+                source,
+                *arguments,
+            )
+            assert result.exit_code == 2
+            assert isinstance(result.exception, SystemExit)
+            if json_output:
+                error = json.loads(result.stdout)["error"]
+                assert error["code"] == "E_INGEST_DEST_INVALID"
+                assert value in error["message"]
+                assert result.stderr == ""
+            else:
+                assert "E_INGEST_DEST_INVALID" in result.stderr
+                assert value in result.stderr
+                assert result.stdout == ""
+            assert snapshot(initialized_kb) == before_links
+            assert linked.is_symlink() and os.readlink(linked) == link_text
+            assert sentinel.read_bytes() == b"target bytes"
+            assert source.read_bytes() == source_before
 
-    def escaping_resolve(path: Path, *args, **kwargs) -> Path:
-        if path == class_dir:
-            return class_dir
-        if path == target_dir:
-            return outside
-        return real_resolve(path, *args, **kwargs)
+    junction = initialized_kb / "raw/sources/junction"
+    junction.mkdir()
+    (junction / "index.md").write_text(
+        "---\ntype: index\ndescription: Junction target.\n---\n# junction\n",
+        encoding="utf-8",
+    )
+    before_junction = snapshot(initialized_kb)
+    real_lstat = Path.lstat
 
-    monkeypatch.setattr(Path, "resolve", escaping_resolve)
-    result = ingest_file(invoke_ingest, initialized_kb, source, "--dest", "linked")
-    assert result.exit_code == 2
-    assert "E_INGEST_DEST_INVALID" in result.stderr
-    assert "linked" in result.stderr
+    def simulated_junction_lstat(path: Path):
+        metadata = real_lstat(path)
+        if path == junction:
+            return SimpleNamespace(
+                st_mode=metadata.st_mode,
+                st_file_attributes=stat.FILE_ATTRIBUTE_REPARSE_POINT,
+            )
+        return metadata
+
+    monkeypatch.setattr(Path, "lstat", simulated_junction_lstat)
+    for value in ("junction", "junction/child"):
+        result = ingest_file(
+            invoke_ingest,
+            initialized_kb,
+            source,
+            "--dest",
+            value,
+        )
+        assert result.exit_code == 2
+        assert isinstance(result.exception, SystemExit)
+        assert "E_INGEST_DEST_INVALID" in result.stderr
+        assert value in result.stderr
+        assert snapshot(initialized_kb) == before_junction
+        assert source.read_bytes() == source_before
+
+    assert acquired == []
+
+
+def test_destination_preflight_preserves_context_and_surface_validation_order(
+    initialized_kb, tmp_path, invoke_ingest
+) -> None:
+    from kb.cli.app import app
+    from typer.testing import CliRunner
+
+    source = tmp_path / "ordering-source.md"
+    source.write_text("source", encoding="utf-8")
+    malformed_root = tmp_path / "malformed-ordering-kb"
+    assert (
+        CliRunner().invoke(app, ["init", "--root", str(malformed_root)]).exit_code
+        == 0
+    )
+    write_existing(malformed_root, "synthetic/broken.md", "id: [\ntype: spec\n")
+    malformed_before = snapshot(malformed_root)
+
+    malformed = ingest_file(
+        invoke_ingest,
+        malformed_root,
+        source,
+        "--dest",
+        "../escape",
+    )
+
+    assert malformed.exit_code == 2
+    assert "E_INGEST_MALFORMED" in malformed.stderr
+    assert "E_INGEST_DEST_INVALID" not in malformed.stderr
+    assert snapshot(malformed_root) == malformed_before
+
+    target = initialized_kb / "raw/feedback/in-class-target"
+    target.mkdir()
+    linked = initialized_kb / "raw/feedback/linked"
+    try:
+        linked.symlink_to(target, target_is_directory=True)
+    except (NotImplementedError, OSError) as error:
+        pytest.skip(f"symlinks unsupported: {error}")
+    before = snapshot(initialized_kb)
+
+    usage = invoke_ingest(
+        initialized_kb,
+        "--class",
+        "feedback",
+        "--from",
+        "file",
+        str(source),
+        "--dest",
+        "linked",
+    )
+
+    assert usage.exit_code == 2
+    assert "E_INGEST_USAGE" in usage.stderr
+    assert "--about is required" in usage.stderr
+    assert "E_INGEST_DEST_INVALID" not in usage.stderr
     assert snapshot(initialized_kb) == before
+
+
+@pytest.mark.parametrize(
+    "destination",
+    ["linked.md", "linked.md/child"],
+    ids=["final-component", "intermediate-component"],
+)
+@pytest.mark.parametrize("json_output", [False, True], ids=["text", "json"])
+def test_md_named_destination_link_found_by_context_is_exact_destination_error(
+    destination,
+    json_output,
+    initialized_kb,
+    tmp_path,
+    invoke_ingest,
+    monkeypatch,
+) -> None:
+    import kb.core.ingest as ingest_core
+
+    source = tmp_path / "context-destination-source.md"
+    source.write_text("source\n", encoding="utf-8")
+    external = tmp_path / "destination-target"
+    external.mkdir()
+    sentinel = external / "sentinel.bin"
+    sentinel.write_bytes(b"target bytes")
+    linked = initialized_kb / "raw/sources/linked.md"
+    try:
+        linked.symlink_to(external, target_is_directory=True)
+    except (NotImplementedError, OSError) as error:
+        pytest.skip(f"symlinks unsupported: {error}")
+    link_text = os.readlink(linked)
+    before = snapshot(initialized_kb)
+    source_before = source.read_bytes()
+    acquired: list[str | None] = []
+
+    def forbidden_adapter(value: str | None):
+        acquired.append(value)
+        raise AssertionError("context destination failure must precede acquisition")
+
+    monkeypatch.setitem(ingest_core.ADAPTERS, "file", forbidden_adapter)
+    arguments = ["--dest", destination]
+    if json_output:
+        arguments.append("--json")
+
+    result = ingest_file(
+        invoke_ingest,
+        initialized_kb,
+        source,
+        *arguments,
+    )
+
+    assert result.exit_code == 2
+    assert isinstance(result.exception, SystemExit)
+    if json_output:
+        error = json.loads(result.stdout)["error"]
+        assert error["code"] == "E_INGEST_DEST_INVALID"
+        assert destination in error["message"]
+        assert result.stderr == ""
+    else:
+        assert "E_INGEST_DEST_INVALID" in result.stderr
+        assert destination in result.stderr
+        assert result.stdout == ""
+    assert acquired == []
+    assert snapshot(initialized_kb) == before
+    assert linked.is_symlink() and os.readlink(linked) == link_text
+    assert sentinel.read_bytes() == b"target bytes"
+    assert source.read_bytes() == source_before
+
+
+@pytest.mark.parametrize("json_output", [False, True], ids=["text", "json"])
+def test_requested_destination_directory_race_keeps_exact_invalid_envelope(
+    json_output,
+    initialized_kb,
+    tmp_path,
+    invoke_ingest,
+    monkeypatch,
+) -> None:
+    import kb.core.ingest as ingest_core
+    import kb.core.safeio as safeio
+
+    source = tmp_path / "race-source.md"
+    source.write_bytes(b"source\n")
+    raced = initialized_kb / "raw/sources/raced.md"
+    raced.mkdir()
+    raced.joinpath("index.md").write_text(
+        "---\ntype: index\ndescription: Raced.\n---\n# Raced\n",
+        encoding="utf-8",
+    )
+    sources_status = (initialized_kb / "raw/sources").stat()
+    outside = tmp_path / "outside-destination"
+    outside.mkdir()
+    sentinel = outside / "sentinel.bin"
+    sentinel.write_bytes(b"outside")
+    log_before = (initialized_kb / "log.md").read_bytes()
+    class_index_before = (initialized_kb / "raw/sources/index.md").read_bytes()
+    source_before = source.read_bytes()
+    real_open = safeio.os.open
+    injected = False
+    acquired: list[str | None] = []
+
+    def replace_listed_destination(path, flags, mode=0o777, *, dir_fd=None):
+        nonlocal injected
+        if path == "raced.md" and dir_fd is not None and not injected:
+            parent_status = os.fstat(dir_fd)
+            if (
+                parent_status.st_dev == sources_status.st_dev
+                and parent_status.st_ino == sources_status.st_ino
+            ):
+                injected = True
+                os.rename(
+                    "raced.md",
+                    "raced-original",
+                    src_dir_fd=dir_fd,
+                    dst_dir_fd=dir_fd,
+                )
+                os.symlink(outside, "raced.md", dir_fd=dir_fd)
+        return real_open(path, flags, mode, dir_fd=dir_fd)
+
+    def forbidden_adapter(value: str | None):
+        acquired.append(value)
+        raise AssertionError("context failure must precede adapter acquisition")
+
+    monkeypatch.setattr(safeio.os, "open", replace_listed_destination)
+    monkeypatch.setitem(ingest_core.ADAPTERS, "file", forbidden_adapter)
+    arguments = ["--dest", "raced.md/child"]
+    if json_output:
+        arguments.append("--json")
+
+    result = ingest_file(
+        invoke_ingest,
+        initialized_kb,
+        source,
+        *arguments,
+    )
+
+    assert injected
+    assert result.exit_code == 2
+    assert isinstance(result.exception, SystemExit)
+    if json_output:
+        error = json.loads(result.stdout)["error"]
+        assert error["code"] == "E_INGEST_DEST_INVALID"
+        assert result.stderr == ""
+    else:
+        assert "E_INGEST_DEST_INVALID" in result.stderr
+        assert result.stdout == ""
+    assert acquired == []
+    assert source.read_bytes() == source_before
+    assert raced.is_symlink() and os.readlink(raced) == str(outside)
+    assert (initialized_kb / "raw/sources/raced-original/index.md").is_file()
+    assert sentinel.read_bytes() == b"outside"
+    assert (initialized_kb / "raw/sources/index.md").read_bytes() == class_index_before
+    assert (initialized_kb / "log.md").read_bytes() == log_before
+
+
+@pytest.mark.parametrize(
+    ("arguments", "absent_code"),
+    [
+        (["--dest", "../escape"], "E_INGEST_DEST_INVALID"),
+        (
+            ["--class", "feedback", "--from", "file"],
+            "E_INGEST_USAGE",
+        ),
+    ],
+    ids=["invalid-destination-syntax", "surface-error"],
+)
+def test_unrelated_md_link_context_failure_stays_generic_and_keeps_precedence(
+    arguments,
+    absent_code,
+    initialized_kb,
+    tmp_path,
+    invoke_ingest,
+    monkeypatch,
+) -> None:
+    import kb.core.ingest as ingest_core
+
+    source = tmp_path / "unrelated-context-source.md"
+    source.write_text("source\n", encoding="utf-8")
+    external = tmp_path / "unrelated-target"
+    external.mkdir()
+    linked = initialized_kb / "synthetic/unrelated.md"
+    try:
+        linked.symlink_to(external, target_is_directory=True)
+    except (NotImplementedError, OSError) as error:
+        pytest.skip(f"symlinks unsupported: {error}")
+    before = snapshot(initialized_kb)
+    acquired: list[str | None] = []
+
+    def forbidden_adapter(value: str | None):
+        acquired.append(value)
+        raise AssertionError("context failure must precede acquisition")
+
+    monkeypatch.setitem(ingest_core.ADAPTERS, "file", forbidden_adapter)
+    command = [*arguments]
+    if "--class" not in command:
+        command = ["--class", "source", "--from", "file", *command]
+    command.insert(command.index("--from") + 2, str(source))
+
+    result = invoke_ingest(initialized_kb, *command)
+
+    assert result.exit_code == 2
+    assert "E_INGEST_IO" in result.stderr
+    assert absent_code not in result.stderr
+    assert acquired == []
+    assert snapshot(initialized_kb) == before
+
+
+@pytest.mark.parametrize("json_output", [False, True], ids=["text", "json"])
+def test_destination_metadata_error_is_exact_before_adapter(
+    json_output, initialized_kb, tmp_path, invoke_ingest, monkeypatch
+) -> None:
+    source = tmp_path / "metadata-source.md"
+    source.write_text("source", encoding="utf-8")
+    source_before = source.read_bytes()
+    inaccessible = initialized_kb / "raw/sources/inaccessible"
+    inaccessible.mkdir()
+    (inaccessible / "index.md").write_text(
+        "---\ntype: index\ndescription: Inaccessible target.\n---\n# inaccessible\n",
+        encoding="utf-8",
+    )
+    sentinel = inaccessible / "sentinel.bin"
+    sentinel.write_bytes(b"target bytes")
+    before = snapshot(initialized_kb)
+    real_lstat = Path.lstat
+
+    def denied_lstat(path: Path):
+        if path == inaccessible:
+            raise PermissionError(errno.EACCES, "component metadata denied", path)
+        return real_lstat(path)
+
+    monkeypatch.setattr(Path, "lstat", denied_lstat)
+    import kb.core.ingest as ingest_core
+
+    acquired: list[str | None] = []
+
+    def forbidden_adapter(value: str | None):
+        acquired.append(value)
+        raise AssertionError("destination metadata failure must precede acquisition")
+
+    monkeypatch.setitem(ingest_core.ADAPTERS, "file", forbidden_adapter)
+    arguments = ["--dest", "inaccessible/child"]
+    if json_output:
+        arguments.append("--json")
+
+    result = ingest_file(
+        invoke_ingest,
+        initialized_kb,
+        source,
+        *arguments,
+    )
+
+    assert result.exit_code == 2
+    assert isinstance(result.exception, SystemExit)
+    if json_output:
+        error = json.loads(result.stdout)["error"]
+        assert error["code"] == "E_INGEST_DEST_INVALID"
+        assert "component metadata denied" in error["message"]
+        assert result.stderr == ""
+    else:
+        assert "E_INGEST_DEST_INVALID" in result.stderr
+        assert "component metadata denied" in result.stderr
+        assert result.stdout == ""
+    assert acquired == []
+    assert snapshot(initialized_kb) == before
+    assert sentinel.read_bytes() == b"target bytes"
+    assert source.read_bytes() == source_before
+
+
+@pytest.mark.parametrize(
+    ("raw_class", "class_relative"),
+    [
+        ("source", "raw/sources"),
+        ("chat", "raw/chats"),
+        ("feedback", "raw/feedback"),
+    ],
+)
+def test_missing_required_class_root_is_invalid_before_adapter(
+    raw_class,
+    class_relative,
+    initialized_kb,
+    tmp_path,
+    invoke_ingest,
+    monkeypatch,
+) -> None:
+    source = tmp_path / f"missing-{raw_class}-root.md"
+    source.write_text("source", encoding="utf-8")
+    write_existing(
+        initialized_kb,
+        "synthetic/about.md",
+        "id: KB-000001\ntype: spec\n",
+    )
+    shutil.rmtree(initialized_kb / class_relative)
+    before = snapshot(initialized_kb)
+    import kb.core.ingest as ingest_core
+
+    acquired: list[str | None] = []
+
+    def forbidden_adapter(value: str | None):
+        acquired.append(value)
+        raise AssertionError("missing class root must precede acquisition")
+
+    monkeypatch.setitem(ingest_core.ADAPTERS, "file", forbidden_adapter)
+    arguments = [
+        "--class",
+        raw_class,
+        "--from",
+        "file",
+        str(source),
+    ]
+    if raw_class == "feedback":
+        arguments.extend(["--about", "KB-000001"])
+
+    result = invoke_ingest(initialized_kb, *arguments)
+
+    assert result.exit_code == 2
+    assert isinstance(result.exception, SystemExit)
+    assert "E_INGEST_DEST_INVALID" in result.stderr
+    assert acquired == []
+    assert snapshot(initialized_kb) == before
+    assert not (initialized_kb / class_relative).exists()
 
 
 def test_ac33_feedback_path_ref_stores_canonical_id(initialized_kb, invoke_ingest) -> None:
@@ -832,6 +1489,62 @@ def test_ac42_newer_schema_is_environment_error(initialized_kb, invoke_ingest) -
     assert snapshot(initialized_kb) == before
 
 
+def test_final_config_access_failure_remains_config_invalid_for_ingest(
+    tmp_path,
+    initialized_kb,
+    invoke_ingest,
+    monkeypatch,
+) -> None:
+    import kb.core.safeio as safeio
+
+    source = tmp_path / "evidence.md"
+    source.write_text("evidence\n", encoding="utf-8")
+    before = snapshot(initialized_kb)
+    real_read = safeio._RootedReader.read_file
+
+    def fail_config_read(reader, relative, **kwargs):
+        if relative == Path("kb-config.json"):
+            raise PermissionError(errno.EACCES, "config unreadable")
+        return real_read(reader, relative, **kwargs)
+
+    monkeypatch.setattr(safeio._RootedReader, "read_file", fail_config_read)
+
+    result = ingest_file(invoke_ingest, initialized_kb, source)
+
+    assert result.exit_code == 2
+    assert "E_CONFIG_INVALID" in result.stderr
+    assert "E_INGEST_IO" not in result.stderr
+    assert snapshot(initialized_kb) == before
+
+
+def test_index_losing_closing_delimiter_during_ingest_preflight_maps_to_io(
+    tmp_path,
+    initialized_kb,
+    invoke_ingest,
+    monkeypatch,
+) -> None:
+    import kb.core.ingest as ingest_core
+
+    source = tmp_path / "evidence.md"
+    source.write_text("evidence\n", encoding="utf-8")
+    index = initialized_kb / "raw/sources/index.md"
+    real_prepare = ingest_core.prepare_write
+    injected: dict[str, dict[str, bytes]] = {}
+
+    def corrupt_index_then_prepare(context, intent):
+        index.write_bytes(b"---\ntype: index\n")
+        injected["snapshot"] = snapshot(initialized_kb)
+        return real_prepare(context, intent)
+
+    monkeypatch.setattr(ingest_core, "prepare_write", corrupt_index_then_prepare)
+
+    result = ingest_file(invoke_ingest, initialized_kb, source)
+
+    assert result.exit_code == 2
+    assert "E_INGEST_IO" in result.stderr
+    assert snapshot(initialized_kb) == injected["snapshot"]
+
+
 def test_ac43_failed_preflight_is_byte_atomic(initialized_kb, invoke_ingest) -> None:
     before = snapshot(initialized_kb)
     result = invoke_ingest(
@@ -875,23 +1588,42 @@ def test_append_only_file_creation_refuses_late_stub_and_original_occupants(
     source_bytes,
     occupied_name,
 ) -> None:
-    from kb.core import ingest as ingest_core
-    from kb.core.safeio import create_file_bytes as exclusive_create
+    from kb.core import write_pipeline
 
     source = tmp_path / source_name
     source.write_bytes(source_bytes)
     occupied_path = initialized_kb / "raw/sources" / occupied_name
 
-    def create_with_late_occupant(path: Path, content: bytes) -> None:
-        if path == occupied_path:
-            exclusive_create(path, b"late occupant")
-        exclusive_create(path, content)
+    real_create = write_pipeline.create_rooted_file_bytes
+
+    def create_with_late_occupant(
+        root: Path,
+        relative: Path,
+        content: bytes,
+        root_identity,
+        *,
+        parent_expected=None,
+    ) -> None:
+        if root / relative == occupied_path:
+            real_create(
+                root,
+                relative,
+                b"late occupant",
+                root_identity,
+                parent_expected=parent_expected,
+            )
+        real_create(
+            root,
+            relative,
+            content,
+            root_identity,
+            parent_expected=parent_expected,
+        )
 
     monkeypatch.setattr(
-        ingest_core,
-        "create_file_bytes",
+        write_pipeline,
+        "create_rooted_file_bytes",
         create_with_late_occupant,
-        raising=False,
     )
 
     result = ingest_file(invoke_ingest, initialized_kb, source)
@@ -907,6 +1639,49 @@ def test_append_only_file_creation_refuses_late_stub_and_original_occupants(
     ).read_text(encoding="utf-8")
 
 
+def test_ingest_stale_index_identity_is_typed_and_preserves_late_occupant(
+    initialized_kb,
+    tmp_path,
+    invoke_ingest,
+    monkeypatch,
+) -> None:
+    from kb.core import write_pipeline
+
+    source = tmp_path / "doc.md"
+    source.write_text("doc", encoding="utf-8")
+    index = initialized_kb / "raw/sources/index.md"
+    late = b"late replacement index\n"
+    real_overwrite = write_pipeline.overwrite_rooted_bytes
+
+    def replace_before_overwrite(
+        root: Path,
+        relative: Path,
+        content: bytes,
+        root_identity,
+        expected,
+    ) -> None:
+        if relative == Path("raw/sources/index.md"):
+            index.rename(index.with_name("old-index.md"))
+            index.write_bytes(late)
+        real_overwrite(root, relative, content, root_identity, expected)
+
+    monkeypatch.setattr(
+        write_pipeline,
+        "overwrite_rooted_bytes",
+        replace_before_overwrite,
+    )
+
+    result = ingest_file(invoke_ingest, initialized_kb, source)
+
+    assert result.exit_code == 2
+    assert "E_INGEST_IO" in result.stderr
+    assert index.read_bytes() == late
+    assert (initialized_kb / "raw/sources/doc.md").is_file()
+    assert " | ingested | " not in (
+        initialized_kb / "log.md"
+    ).read_text(encoding="utf-8")
+
+
 def test_ac45_actor_is_written_to_log(initialized_kb, tmp_path, invoke_ingest) -> None:
     source = tmp_path / "doc.md"
     source.write_text("doc", encoding="utf-8")
@@ -914,6 +1689,95 @@ def test_ac45_actor_is_written_to_log(initialized_kb, tmp_path, invoke_ingest) -
     assert " | ingested | pm-skill | RAW-000001 | " in (
         initialized_kb / "log.md"
     ).read_text(encoding="utf-8").splitlines()[-1]
+
+
+@pytest.mark.parametrize("json_output", [False, True], ids=["text", "json"])
+def test_surrogate_escaped_source_origin_is_stable_ingest_io_without_mutation(
+    json_output,
+    initialized_kb,
+    tmp_path,
+    invoke_ingest,
+    monkeypatch,
+) -> None:
+    import kb.core.ingest as ingest_core
+
+    source = tmp_path / "adapter-source.md"
+    source.write_bytes(b"evidence\n")
+    source_before = source.read_bytes()
+    before = snapshot(initialized_kb)
+    escaped_name = "evidence-\udcff.md"
+    escaped_origin = f"/external/{escaped_name}"
+
+    def surrogate_payload(_value: str | None) -> ingest_core.AdapterPayload:
+        return ingest_core.AdapterPayload(
+            data=source_before,
+            default_origin=escaped_origin,
+            source_filename=escaped_name,
+        )
+
+    monkeypatch.setitem(ingest_core.ADAPTERS, "file", surrogate_payload)
+    arguments = ["--title", "Evidence"]
+    if json_output:
+        arguments.append("--json")
+
+    result = ingest_file(
+        invoke_ingest,
+        initialized_kb,
+        source,
+        *arguments,
+    )
+
+    assert result.exit_code == 2
+    assert isinstance(result.exception, SystemExit)
+    if json_output:
+        error = json.loads(result.stdout)["error"]
+        assert error["code"] == "E_INGEST_IO"
+        assert "UTF-8" in error["message"]
+        assert result.stderr == ""
+    else:
+        assert "E_INGEST_IO" in result.stderr
+        assert "UTF-8" in result.stderr
+        assert result.stdout == ""
+    assert snapshot(initialized_kb) == before
+    assert source.read_bytes() == source_before
+
+
+@pytest.mark.parametrize("json_output", [False, True], ids=["text", "json"])
+def test_unencodable_born_destination_is_stable_ingest_io_without_mutation(
+    json_output,
+    initialized_kb,
+    tmp_path,
+    invoke_ingest,
+) -> None:
+    source = tmp_path / "adapter-source.md"
+    source.write_bytes(b"evidence\n")
+    source_before = source.read_bytes()
+    before = snapshot(initialized_kb)
+    destination = os.fsdecode(b"bad-\xff")
+    arguments = ["--dest", destination]
+    if json_output:
+        arguments.append("--json")
+
+    result = ingest_file(
+        invoke_ingest,
+        initialized_kb,
+        source,
+        *arguments,
+    )
+
+    assert result.exit_code == 2
+    assert isinstance(result.exception, SystemExit)
+    if json_output:
+        error = json.loads(result.stdout)["error"]
+        assert error["code"] == "E_INGEST_IO"
+        assert "UTF-8" in error["message"]
+        assert result.stderr == ""
+    else:
+        assert "E_INGEST_IO" in result.stderr
+        assert "UTF-8" in result.stderr
+        assert result.stdout == ""
+    assert snapshot(initialized_kb) == before
+    assert source.read_bytes() == source_before
 
 
 def test_ac46_missing_log_is_recreated_without_initialized_entry(
@@ -1037,3 +1901,35 @@ def test_ac50_file_ingest_never_invokes_git_or_creates_git_directory(
     result = ingest_file(invoke_ingest, initialized_kb, source)
     assert result.exit_code == 0
     assert not (initialized_kb / ".git").exists()
+
+
+def test_replaced_root_before_preparation_maps_to_ingest_io_without_writes(
+    tmp_path,
+    initialized_kb,
+    invoke_ingest,
+    monkeypatch,
+) -> None:
+    import kb.core.ingest as ingest_core
+    from kb.core.housekeeping import init_kb
+
+    source = tmp_path / "evidence.md"
+    source.write_text("evidence\n", encoding="utf-8")
+    original = tmp_path / "original-kb"
+    replacement_holder: dict[str, Path] = {}
+    real_prepare = ingest_core.prepare_write
+
+    def replace_root(context, intent):
+        initialized_kb.rename(original)
+        assert init_kb(initialized_kb).root == initialized_kb.resolve()
+        replacement_holder["root"] = initialized_kb
+        return real_prepare(context, intent)
+
+    monkeypatch.setattr(ingest_core, "prepare_write", replace_root)
+
+    result = ingest_file(invoke_ingest, initialized_kb, source)
+
+    replacement = replacement_holder["root"]
+    assert result.exit_code == 2
+    assert "E_INGEST_IO" in result.stderr
+    assert not (original / "raw/sources/evidence.md").exists()
+    assert not (replacement / "raw/sources/evidence.md").exists()

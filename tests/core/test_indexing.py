@@ -1,8 +1,12 @@
+import pytest
+
 from kb.core.housekeeping import init_kb
 from kb.core.indexing import (
+    DirectoryListingMetadata,
     file_listing_line,
     regenerate_directory_index,
     render_index,
+    render_projected_directory_index,
     subdirectory_listing_line,
 )
 
@@ -65,3 +69,82 @@ def test_regeneration_keeps_subdirectory_heading_and_directory_link_distinct(
     regenerated = regenerate_directory_index(tmp_path, tmp_path)
 
     assert "* [Governance](governance/index.md)" in regenerated
+
+
+def test_regeneration_uses_identity_checked_source_and_merges_planned_file(
+    tmp_path,
+) -> None:
+    init_kb(tmp_path)
+    directory = tmp_path / "synthetic"
+    index = directory / "index.md"
+    source = index.read_bytes()
+    index.write_text("not the prepared source\n", encoding="utf-8")
+
+    rendered = regenerate_directory_index(
+        tmp_path,
+        directory,
+        source=source,
+        planned_files={
+            "planned.md": "* [KB-000001][Planned](planned.md) - Planned."
+        },
+    )
+
+    assert rendered.startswith("---\ntype: index\n")
+    assert "not the prepared source" not in rendered
+    assert "* [KB-000001][Planned](planned.md) - Planned." in rendered
+
+
+def test_projected_entries_merge_by_path_key_not_rendered_label(tmp_path) -> None:
+    init_kb(tmp_path)
+    directory = tmp_path / "synthetic"
+    (directory / "zulu.md").write_text(
+        "---\nid: KB-000009\ntype: spec\ntitle: A First Label\n"
+        "description: Existing.\n---\n",
+        encoding="utf-8",
+    )
+
+    rendered = regenerate_directory_index(
+        tmp_path,
+        directory,
+        planned_files={
+            "alpha.md": "* [KB-000010][Z Last Label](alpha.md) - Planned."
+        },
+    )
+
+    assert rendered.index("(alpha.md)") < rendered.index("(zulu.md)")
+
+
+def test_path_projection_decodes_only_large_child_frontmatter_prefix(tmp_path) -> None:
+    init_kb(tmp_path)
+    directory = tmp_path / "synthetic"
+    prefix = (
+        b"---\nid: KB-000009\ntype: spec\ntitle: Prefix Only\n"
+        b"description: Metadata stays small.\n---\n"
+    )
+    (directory / "large.md").write_bytes(prefix + b"\xff" * (4 * 1024 * 1024))
+
+    rendered = regenerate_directory_index(tmp_path, directory)
+
+    assert (
+        "* [KB-000009][Prefix Only](large.md) - Metadata stays small."
+        in rendered
+    )
+
+
+def test_projected_index_missing_closing_delimiter_raises_value_error() -> None:
+    with pytest.raises(ValueError, match="closing frontmatter delimiter"):
+        render_projected_directory_index(
+            b"---\ntype: index\n",
+            "synthetic",
+            DirectoryListingMetadata(),
+        )
+
+
+def test_path_regeneration_normalizes_crlf_like_previous_text_reader(tmp_path) -> None:
+    init_kb(tmp_path)
+    index = tmp_path / "synthetic/index.md"
+    index.write_bytes(index.read_bytes().replace(b"\n", b"\r\n"))
+
+    regenerated = regenerate_directory_index(tmp_path, index.parent)
+
+    assert "\r" not in regenerated

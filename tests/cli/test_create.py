@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import errno
 import json
 import os
 import re
@@ -682,7 +683,7 @@ def test_ac33_empty_slug_uses_lowercase_id_filename(
 
 
 def test_ac34_collision_suffixes_id_without_overwriting_existing_file(
-    initialized_kb, invoke_create
+    initialized_kb, tmp_path, invoke_create, monkeypatch
 ) -> None:
     add_chat(initialized_kb)
     existing = add_synthetic(initialized_kb, relative="synthetic/notes.md")
@@ -695,6 +696,99 @@ def test_ac34_collision_suffixes_id_without_overwriting_existing_file(
     assert result.exit_code == 0
     assert (initialized_kb / "synthetic/notes-kb-000002.md").is_file()
     assert existing.read_bytes() == before
+
+    from typer.testing import CliRunner
+    from kb.cli.app import app
+
+    for json_output in (False, True):
+        nested_root = tmp_path / f"nested-create-{'json' if json_output else 'text'}"
+        assert (
+            CliRunner().invoke(app, ["init", "--root", str(nested_root)]).exit_code
+            == 0
+        )
+        add_chat(nested_root)
+        arguments = [
+            "--type", "spec",
+            "--title", "Index",
+            "--description", "Reserved filename.",
+            "--derived-from", "CHAT-000001",
+            "--dest", "a/b",
+        ]
+        if json_output:
+            arguments.append("--json")
+        nested = invoke_create(nested_root, *arguments)
+        document_relative = "synthetic/a/b/index-kb-000001.md"
+        nested_index = nested_root / "synthetic/a/b/index.md"
+        created = [
+            document_relative,
+            "synthetic/a/b/index.md",
+            "synthetic/a/index.md",
+        ]
+        assert nested.exit_code == 0
+        assert (nested_root / document_relative).is_file()
+        assert "[Index](index-kb-000001.md)" in nested_index.read_text(
+            encoding="utf-8"
+        )
+        if json_output:
+            assert json.loads(nested.stdout) == {
+                "ok": True,
+                "id": "KB-000001",
+                "path": document_relative,
+                "superseded": None,
+                "created": created,
+                "updated": ["synthetic/index.md"],
+            }
+        else:
+            assert nested.stdout.splitlines() == [
+                *(f"created  {path}" for path in created),
+                "updated  synthetic/index.md",
+                f"created KB-000001 as {document_relative}",
+            ]
+
+    import kb.core.create as create_core
+
+    real_prepare = create_core.prepare_write
+    prepared_births: list[Path] = []
+
+    def record_birth(context, intent):
+        prepared_births.append(intent.birth.path)
+        return real_prepare(context, intent)
+
+    monkeypatch.setattr(create_core, "prepare_write", record_birth)
+    for json_output in (False, True):
+        damaged_root = tmp_path / f"damaged-create-{'json' if json_output else 'text'}"
+        assert (
+            CliRunner().invoke(app, ["init", "--root", str(damaged_root)]).exit_code
+            == 0
+        )
+        add_chat(damaged_root)
+        damaged = damaged_root / "synthetic/damaged"
+        damaged.mkdir()
+        before_damaged = snapshot(damaged_root)
+        arguments = [
+            "--type", "spec",
+            "--title", "Index",
+            "--description", "Reserved filename.",
+            "--derived-from", "CHAT-000001",
+            "--dest", "damaged",
+        ]
+        if json_output:
+            arguments.append("--json")
+
+        result = invoke_create(damaged_root, *arguments)
+
+        assert result.exit_code == 2
+        assert isinstance(result.exception, SystemExit)
+        if json_output:
+            assert json.loads(result.stdout)["error"]["code"] == "E_CREATE_IO"
+            assert result.stderr == ""
+        else:
+            assert "E_CREATE_IO" in result.stderr
+            assert result.stdout == ""
+        assert prepared_births[-1] == Path(
+            "synthetic/damaged/index-kb-000001.md"
+        )
+        assert snapshot(damaged_root) == before_damaged
 
 
 def test_ac35_new_dest_gets_exact_index_and_updates_synthetic_index_only(
@@ -747,6 +841,59 @@ def test_ac36_nested_dest_indexes_are_born_current_bottom_up(
         "updated  synthetic/index.md",
         "created KB-000001 as synthetic/a/b/webhook-retry-policy.md",
     ]
+
+
+@pytest.mark.parametrize("json_output", [False, True])
+def test_new_nested_dest_reserves_born_index_filename_during_create_collision_naming(
+    json_output, initialized_kb, invoke_create
+) -> None:
+    add_chat(initialized_kb)
+    arguments = [
+        "--type", "spec",
+        "--title", "Index",
+        "--description", "Reserved filename.",
+        "--derived-from", "CHAT-000001",
+        "--dest", "a/b",
+    ]
+    if json_output:
+        arguments.append("--json")
+
+    result = invoke_create(initialized_kb, *arguments)
+
+    document = initialized_kb / "synthetic/a/b/index-kb-000001.md"
+    index = initialized_kb / "synthetic/a/b/index.md"
+    assert result.exit_code == 0
+    assert result.exception is None
+    assert document.is_file()
+    assert index.read_text(encoding="utf-8") == (
+        "---\ntype: index\n"
+        "description: Documents under synthetic/a/b/.\n---\n"
+        "# b\n\n"
+        "<!-- Generated by kb — do not edit; run `kb index` to regenerate. -->\n\n"
+        "## Files\n"
+        "* [KB-000001][Index](index-kb-000001.md) - Reserved filename.\n"
+    )
+    if json_output:
+        assert json.loads(result.stdout) == {
+            "ok": True,
+            "id": "KB-000001",
+            "path": "synthetic/a/b/index-kb-000001.md",
+            "superseded": None,
+            "created": [
+                "synthetic/a/b/index-kb-000001.md",
+                "synthetic/a/b/index.md",
+                "synthetic/a/index.md",
+            ],
+            "updated": ["synthetic/index.md"],
+        }
+    else:
+        assert result.stdout.splitlines() == [
+            "created  synthetic/a/b/index-kb-000001.md",
+            "created  synthetic/a/b/index.md",
+            "created  synthetic/a/index.md",
+            "updated  synthetic/index.md",
+            "created KB-000001 as synthetic/a/b/index-kb-000001.md",
+        ]
 
 
 def test_ac37_existing_dest_updates_only_its_own_index(
@@ -925,6 +1072,63 @@ def test_ac47_actor_option_is_recorded_in_log(
     ).read_text(encoding="utf-8").splitlines()[-1]
 
 
+@pytest.mark.parametrize("json_output", [False, True], ids=["text", "json"])
+def test_unencodable_actor_is_stable_create_io_without_any_mutation(
+    json_output,
+    initialized_kb,
+    invoke_create,
+) -> None:
+    add_chat(initialized_kb)
+    before = snapshot(initialized_kb)
+    arguments = ["--actor", "kb-author-\udcff"]
+    if json_output:
+        arguments.append("--json")
+
+    result = invoke_valid(invoke_create, initialized_kb, *arguments)
+
+    assert result.exit_code == 2
+    assert isinstance(result.exception, SystemExit)
+    if json_output:
+        error = json.loads(result.stdout)["error"]
+        assert error["code"] == "E_CREATE_IO"
+        assert "UTF-8" in error["message"]
+        assert result.stderr == ""
+    else:
+        assert "E_CREATE_IO" in result.stderr
+        assert "UTF-8" in result.stderr
+        assert result.stdout == ""
+    assert snapshot(initialized_kb) == before
+
+
+@pytest.mark.parametrize("json_output", [False, True], ids=["text", "json"])
+def test_unencodable_born_destination_is_stable_create_io_without_mutation(
+    json_output,
+    initialized_kb,
+    invoke_create,
+) -> None:
+    add_chat(initialized_kb)
+    before = snapshot(initialized_kb)
+    destination = os.fsdecode(b"bad-\xff")
+    arguments = ["--dest", destination]
+    if json_output:
+        arguments.append("--json")
+
+    result = invoke_valid(invoke_create, initialized_kb, *arguments)
+
+    assert result.exit_code == 2
+    assert isinstance(result.exception, SystemExit)
+    if json_output:
+        error = json.loads(result.stdout)["error"]
+        assert error["code"] == "E_CREATE_IO"
+        assert "UTF-8" in error["message"]
+        assert result.stderr == ""
+    else:
+        assert "E_CREATE_IO" in result.stderr
+        assert "UTF-8" in result.stderr
+        assert result.stdout == ""
+    assert snapshot(initialized_kb) == before
+
+
 def test_ac48_missing_log_is_recreated_without_initialized_entry(
     initialized_kb, invoke_create
 ) -> None:
@@ -1061,20 +1265,20 @@ def test_destination_with_yaml_sensitive_text_writes_parseable_indexes(
 def test_supersedes_preparation_oserror_is_structured_without_writes(
     monkeypatch, initialized_kb, invoke_create
 ) -> None:
+    import kb.core.write_pipeline as pipeline
+
     add_chat(initialized_kb)
     target = add_synthetic(initialized_kb)
     before = snapshot(initialized_kb)
-    original_open = os.open
+    real_read = pipeline.read_rooted_bytes
 
-    def fail_target(path, flags, mode=0o777, *, dir_fd=None):
-        if Path(path) == target and flags & os.O_ACCMODE == os.O_RDONLY:
+    def fail_target(root, relative, root_identity, expected):
+        if root / relative == target:
             raise OSError("target became unreadable")
-        if dir_fd is None:
-            return original_open(path, flags, mode)
-        return original_open(path, flags, mode, dir_fd=dir_fd)
+        return real_read(root, relative, root_identity, expected)
 
     with monkeypatch.context() as context:
-        context.setattr(os, "open", fail_target)
+        context.setattr(pipeline, "read_rooted_bytes", fail_target)
         result = supersede(invoke_create, initialized_kb)
 
     assert result.exit_code == 2
@@ -1298,23 +1502,36 @@ def test_symlink_destination_outside_is_rejected_without_writes(
 def test_document_race_uses_exclusive_create_and_preserves_raced_bytes(
     monkeypatch, initialized_kb, invoke_create
 ) -> None:
+    import kb.core.write_pipeline as pipeline
+
     add_chat(initialized_kb)
     before = snapshot(initialized_kb)
     target = initialized_kb / "synthetic/webhook-retry-policy.md"
     raced_bytes = b"raced-in bytes\n"
-    original_open = os.open
+    real_create = pipeline.create_rooted_file_bytes
     raced = False
 
-    def racing_open(path, flags, mode=0o777, *, dir_fd=None):
+    def racing_create(
+        root,
+        relative,
+        content,
+        root_identity,
+        *,
+        parent_expected=None,
+    ):
         nonlocal raced
-        if Path(path) == target and flags & os.O_CREAT and not raced:
+        if root / relative == target and not raced:
             raced = True
             target.write_bytes(raced_bytes)
-        if dir_fd is None:
-            return original_open(path, flags, mode)
-        return original_open(path, flags, mode, dir_fd=dir_fd)
+        real_create(
+            root,
+            relative,
+            content,
+            root_identity,
+            parent_expected=parent_expected,
+        )
 
-    monkeypatch.setattr(os, "open", racing_open)
+    monkeypatch.setattr(pipeline, "create_rooted_file_bytes", racing_create)
     result = invoke_valid(invoke_create, initialized_kb)
 
     assert raced
@@ -1324,6 +1541,51 @@ def test_document_race_uses_exclusive_create_and_preserves_raced_bytes(
     assert snapshot(initialized_kb) == before | {
         "synthetic/webhook-retry-policy.md": raced_bytes
     }
+
+
+def test_birth_link_race_after_filename_selection_is_typed_io_without_writes(
+    monkeypatch, tmp_path, initialized_kb, invoke_create
+) -> None:
+    import kb.core.create as create_core
+
+    add_chat(initialized_kb)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    external = outside / "external.md"
+    external.write_bytes(b"external bytes\n")
+    probe = tmp_path / "symlink-probe"
+    try:
+        probe.symlink_to(external)
+        probe.unlink()
+    except (NotImplementedError, OSError) as error:
+        pytest.skip(f"symlinks unsupported: {error}")
+
+    target = initialized_kb / "synthetic/webhook-retry-policy.md"
+    real_prepare = create_core.prepare_write
+    at_preflight: dict[str, dict[str, bytes] | str] = {}
+
+    def insert_link_after_filename_selection(context, intent):
+        assert intent.birth.path == Path("synthetic/webhook-retry-policy.md")
+        target.symlink_to(external)
+        at_preflight["kb"] = snapshot(initialized_kb)
+        at_preflight["outside"] = snapshot(outside)
+        at_preflight["link"] = os.readlink(target)
+        return real_prepare(context, intent)
+
+    monkeypatch.setattr(
+        create_core,
+        "prepare_write",
+        insert_link_after_filename_selection,
+    )
+
+    result = invoke_valid(invoke_create, initialized_kb)
+
+    assert result.exit_code == 2
+    assert "E_CREATE_IO" in result.stderr
+    assert snapshot(initialized_kb) == at_preflight["kb"]
+    assert snapshot(outside) == at_preflight["outside"]
+    assert target.is_symlink() and os.readlink(target) == at_preflight["link"]
+    assert external.read_bytes() == b"external bytes\n"
 
 
 @pytest.mark.parametrize(
@@ -1435,13 +1697,254 @@ def test_symlinked_supersession_target_outside_is_invalid_without_writes(
     outside_before = snapshot(outside)
     link_target = os.readlink(target)
 
-    result = supersede(invoke_create, initialized_kb)
+    result = invoke_create(
+        initialized_kb,
+        "--type", "spec",
+        "--title", "Replacement",
+        "--description", "Replacement.",
+        "--supersedes", "synthetic/old.md",
+    )
 
     assert result.exit_code == 1
     assert "E_CREATE_SUPERSEDES_INVALID" in result.stderr
     assert snapshot(initialized_kb) == kb_before
     assert snapshot(outside) == outside_before
     assert target.is_symlink() and os.readlink(target) == link_target
+
+
+@pytest.mark.parametrize("json_output", [False, True], ids=["text", "json"])
+def test_supersession_path_race_keeps_exact_invalid_envelope_and_no_cli_writes(
+    json_output,
+    tmp_path,
+    initialized_kb,
+    invoke_create,
+    monkeypatch,
+) -> None:
+    import kb.core.safeio as safeio
+
+    add_chat(initialized_kb)
+    target = add_synthetic(initialized_kb)
+    target_before = target.read_bytes()
+    outside = tmp_path / "outside-target.md"
+    outside.write_bytes(b"outside")
+    log_before = (initialized_kb / "log.md").read_bytes()
+    index_before = (initialized_kb / "synthetic/index.md").read_bytes()
+    real_open = safeio.os.open
+    injected = False
+
+    def replace_listed_target(path, flags, mode=0o777, *, dir_fd=None):
+        nonlocal injected
+        if path == "old.md" and dir_fd is not None and not injected:
+            injected = True
+            os.rename(
+                "old.md",
+                "old-original.md",
+                src_dir_fd=dir_fd,
+                dst_dir_fd=dir_fd,
+            )
+            os.symlink(outside, "old.md", dir_fd=dir_fd)
+        return real_open(path, flags, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr(safeio.os, "open", replace_listed_target)
+    arguments = [
+        "--type", "spec",
+        "--title", "Replacement",
+        "--description", "Replacement.",
+        "--supersedes", "synthetic/old.md",
+    ]
+    if json_output:
+        arguments.append("--json")
+
+    result = invoke_create(initialized_kb, *arguments)
+
+    assert injected
+    assert result.exit_code == 1
+    assert isinstance(result.exception, SystemExit)
+    if json_output:
+        error = json.loads(result.stdout)["error"]
+        assert error["code"] == "E_CREATE_SUPERSEDES_INVALID"
+        assert result.stderr == ""
+    else:
+        assert "E_CREATE_SUPERSEDES_INVALID" in result.stderr
+        assert result.stdout == ""
+    assert (initialized_kb / "synthetic/old-original.md").read_bytes() == target_before
+    assert target.is_symlink() and os.readlink(target) == str(outside)
+    assert outside.read_bytes() == b"outside"
+    assert not (initialized_kb / "synthetic/replacement.md").exists()
+    assert (initialized_kb / "synthetic/index.md").read_bytes() == index_before
+    assert (initialized_kb / "log.md").read_bytes() == log_before
+
+
+@pytest.mark.parametrize("json_output", [False, True], ids=["text", "json"])
+def test_supersession_target_lstat_failure_keeps_exact_invalid_envelope(
+    json_output,
+    initialized_kb,
+    invoke_create,
+    monkeypatch,
+) -> None:
+    import kb.core.safeio as safeio
+
+    add_chat(initialized_kb)
+    add_synthetic(initialized_kb)
+    before = snapshot(initialized_kb)
+    real_stat = safeio.os.stat
+    injected = False
+
+    def fail_listed_target(path, *, dir_fd=None, follow_symlinks=True):
+        nonlocal injected
+        if path == "old.md" and dir_fd is not None and not injected:
+            injected = True
+            raise FileNotFoundError(errno.ENOENT, "listed entry vanished", path)
+        return real_stat(path, dir_fd=dir_fd, follow_symlinks=follow_symlinks)
+
+    monkeypatch.setattr(safeio.os, "stat", fail_listed_target)
+    arguments = [
+        "--type", "spec",
+        "--title", "Replacement",
+        "--description", "Replacement.",
+        "--supersedes", "synthetic/old.md",
+    ]
+    if json_output:
+        arguments.append("--json")
+
+    result = invoke_create(initialized_kb, *arguments)
+
+    assert injected
+    assert result.exit_code == 1
+    assert isinstance(result.exception, SystemExit)
+    if json_output:
+        error = json.loads(result.stdout)["error"]
+        assert error["code"] == "E_CREATE_SUPERSEDES_INVALID"
+        assert result.stderr == ""
+    else:
+        assert "E_CREATE_SUPERSEDES_INVALID" in result.stderr
+        assert result.stdout == ""
+    assert snapshot(initialized_kb) == before
+
+
+@pytest.mark.parametrize("json_output", [False, True], ids=["text", "json"])
+def test_unknown_supersedes_id_with_unrelated_unsafe_markdown_is_generic_io(
+    json_output, tmp_path, initialized_kb, invoke_create
+) -> None:
+    add_chat(initialized_kb)
+    outside = tmp_path / "outside-unknown-supersedes"
+    external = add_synthetic(
+        outside,
+        relative="external.md",
+        doc_id="KB-900001",
+    )
+    unrelated = initialized_kb / "synthetic/unrelated.md"
+    try:
+        unrelated.symlink_to(external)
+    except (NotImplementedError, OSError) as error:
+        pytest.skip(f"symlinks unsupported: {error}")
+    kb_before = snapshot(initialized_kb)
+    outside_before = snapshot(outside)
+    arguments = [
+        "--type", "spec",
+        "--title", "Replacement",
+        "--description", "Replacement.",
+        "--supersedes", "KB-999999",
+    ]
+    if json_output:
+        arguments.append("--json")
+
+    result = invoke_create(initialized_kb, *arguments)
+
+    assert result.exit_code == 2
+    assert isinstance(result.exception, SystemExit)
+    if json_output:
+        error = json.loads(result.stdout)["error"]
+        assert error["code"] == "E_CREATE_IO"
+        assert "supersedes target" not in error["message"]
+        assert result.stderr == ""
+    else:
+        assert "E_CREATE_IO" in result.stderr
+        assert "E_CREATE_SUPERSEDES_INVALID" not in result.stderr
+        assert "supersedes target" not in result.stderr
+        assert result.stdout == ""
+    assert snapshot(initialized_kb) == kb_before
+    assert snapshot(outside) == outside_before
+
+
+def test_regular_supersession_with_unrelated_markdown_symlink_maps_to_create_io(
+    tmp_path, initialized_kb, invoke_create
+) -> None:
+    add_chat(initialized_kb)
+    add_synthetic(initialized_kb)
+    outside = tmp_path / "outside-unrelated"
+    external = add_synthetic(
+        outside,
+        relative="external.md",
+        doc_id="KB-900001",
+    )
+    unrelated = initialized_kb / "synthetic/unrelated.md"
+    try:
+        unrelated.symlink_to(external)
+    except (NotImplementedError, OSError) as error:
+        pytest.skip(f"symlinks unsupported: {error}")
+    kb_before = snapshot(initialized_kb)
+    outside_before = snapshot(outside)
+
+    result = supersede(invoke_create, initialized_kb)
+
+    assert result.exit_code == 2
+    assert "E_CREATE_IO" in result.stderr
+    assert "E_CREATE_SUPERSEDES_INVALID" not in result.stderr
+    assert snapshot(initialized_kb) == kb_before
+    assert snapshot(outside) == outside_before
+
+
+def test_final_config_access_failure_remains_config_invalid_for_create(
+    initialized_kb,
+    invoke_create,
+    monkeypatch,
+) -> None:
+    import kb.core.safeio as safeio
+
+    add_chat(initialized_kb)
+    before = snapshot(initialized_kb)
+    real_read = safeio._RootedReader.read_file
+
+    def fail_config_read(reader, relative, **kwargs):
+        if relative == Path("kb-config.json"):
+            raise PermissionError(errno.EACCES, "config unreadable")
+        return real_read(reader, relative, **kwargs)
+
+    monkeypatch.setattr(safeio._RootedReader, "read_file", fail_config_read)
+
+    result = invoke_valid(invoke_create, initialized_kb)
+
+    assert result.exit_code == 2
+    assert "E_CONFIG_INVALID" in result.stderr
+    assert "E_CREATE_IO" not in result.stderr
+    assert snapshot(initialized_kb) == before
+
+
+def test_index_losing_closing_delimiter_during_create_preflight_maps_to_io(
+    initialized_kb,
+    invoke_create,
+    monkeypatch,
+) -> None:
+    import kb.core.create as create_core
+
+    add_chat(initialized_kb)
+    index = initialized_kb / "synthetic/index.md"
+    real_prepare = create_core.prepare_write
+    injected: dict[str, dict[str, bytes]] = {}
+
+    def corrupt_index_then_prepare(context, intent):
+        index.write_bytes(b"---\ntype: index\n")
+        injected["snapshot"] = snapshot(initialized_kb)
+        return real_prepare(context, intent)
+
+    monkeypatch.setattr(create_core, "prepare_write", corrupt_index_then_prepare)
+
+    result = invoke_valid(invoke_create, initialized_kb)
+
+    assert result.exit_code == 2
+    assert "E_CREATE_IO" in result.stderr
+    assert snapshot(initialized_kb) == injected["snapshot"]
 
 
 def test_symlinked_existing_index_outside_fails_before_any_writes(
@@ -1504,3 +2007,34 @@ def test_symlinked_existing_log_outside_fails_before_any_writes(
     assert snapshot(initialized_kb) == kb_before
     assert snapshot(outside) == outside_before
     assert log.is_symlink() and os.readlink(log) == link_target
+
+
+def test_replaced_root_before_preparation_maps_to_create_io_without_writes(
+    tmp_path,
+    initialized_kb,
+    invoke_create,
+    monkeypatch,
+) -> None:
+    import kb.core.create as create_core
+    from kb.core.housekeeping import init_kb
+
+    add_chat(initialized_kb)
+    original = tmp_path / "original-kb"
+    replacement_holder: dict[str, Path] = {}
+    real_prepare = create_core.prepare_write
+
+    def replace_root(context, intent):
+        initialized_kb.rename(original)
+        assert init_kb(initialized_kb).root == initialized_kb.resolve()
+        replacement_holder["root"] = initialized_kb
+        return real_prepare(context, intent)
+
+    monkeypatch.setattr(create_core, "prepare_write", replace_root)
+
+    result = invoke_valid(invoke_create, initialized_kb)
+
+    replacement = replacement_holder["root"]
+    assert result.exit_code == 2
+    assert "E_CREATE_IO" in result.stderr
+    assert not (original / "synthetic/webhook-retry-policy.md").exists()
+    assert not (replacement / "synthetic/webhook-retry-policy.md").exists()

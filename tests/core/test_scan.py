@@ -1,3 +1,4 @@
+import io
 from pathlib import Path
 
 import pytest
@@ -5,6 +6,22 @@ import pytest
 from kb.core.ids import next_id
 from kb.core.model import DocClass
 from kb.core.scan import RootDiscoveryError, discover_root, resolve_ref, scan
+
+
+class ObservedBytesIO(io.BytesIO):
+    def __init__(self, content: bytes) -> None:
+        super().__init__(content)
+        self.bytes_read = 0
+
+    def read(self, size: int = -1) -> bytes:
+        content = super().read(size)
+        self.bytes_read += len(content)
+        return content
+
+    def readline(self, size: int = -1) -> bytes:
+        content = super().readline(size)
+        self.bytes_read += len(content)
+        return content
 
 
 def write_doc(root: Path, relative: str, frontmatter: str, body: str = "body\n") -> Path:
@@ -100,6 +117,63 @@ def test_document_body_is_loaded_lazily(tmp_path, monkeypatch) -> None:
     kb = scan(tmp_path)
     path.write_text(path.read_text(encoding="utf-8").replace("one", "two"), encoding="utf-8")
     assert kb.documents[0].body == "two\n"
+
+
+def test_scan_reads_only_frontmatter_prefix_and_retains_no_source_bytes(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    path = tmp_path / "synthetic/large.md"
+    path.parent.mkdir(parents=True)
+    prefix = b"---\nid: KB-000001\ntype: spec\ntitle: Large\n---\n"
+    content = prefix + (b"body bytes that allocation must not read\n" * 100_000)
+    path.write_bytes(content)
+    opened: list[ObservedBytesIO] = []
+    real_open = Path.open
+
+    def observed_open(candidate: Path, mode: str = "r", *args, **kwargs):
+        if candidate == path and mode == "rb":
+            stream = ObservedBytesIO(content)
+            opened.append(stream)
+            return stream
+        return real_open(candidate, mode, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", observed_open)
+
+    kb = scan(tmp_path)
+
+    assert len(opened) == 1
+    assert opened[0].bytes_read == len(prefix)
+    document = kb.by_id["KB-000001"]
+    assert not hasattr(document, "_source_bytes")
+
+
+def test_scan_reads_to_eof_when_closing_delimiter_is_missing(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    path = tmp_path / "synthetic/unclosed.md"
+    path.parent.mkdir(parents=True)
+    content = b"---\nid: KB-000001\ntype: spec\n" + (b"not a delimiter\n" * 500)
+    path.write_bytes(content)
+    opened: list[ObservedBytesIO] = []
+    real_open = Path.open
+
+    def observed_open(candidate: Path, mode: str = "r", *args, **kwargs):
+        if candidate == path and mode == "rb":
+            stream = ObservedBytesIO(content)
+            opened.append(stream)
+            return stream
+        return real_open(candidate, mode, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", observed_open)
+
+    kb = scan(tmp_path)
+
+    assert len(opened) == 1
+    assert opened[0].bytes_read == len(content)
+    assert kb.malformed[0][0] == Path("synthetic/unclosed.md")
+    assert "closing frontmatter delimiter" in kb.malformed[0][1]
 
 
 def test_resolve_ref_prefers_ids_and_accepts_extensionless_paths(tmp_path) -> None:

@@ -3,9 +3,9 @@ from __future__ import annotations
 import platform
 import re
 import shutil
+import stat
 import subprocess
 import sys
-import unicodedata
 from collections.abc import Callable
 from pathlib import Path, PurePosixPath
 from typing import Literal
@@ -13,12 +13,21 @@ from typing import Literal
 import yaml
 from pydantic import BaseModel, Field
 
-from kb.core.housekeeping import LogEntry, append_log, utc_now
+from kb.core.housekeeping import LogEntry, utc_now
 from kb.core.ids import next_id
-from kb.core.indexing import create_directory_index, regenerate_directory_index
-from kb.core.model import ConfigLoadError, RawClass, RawFrontmatter, load_config
-from kb.core.safeio import create_file_bytes
-from kb.core.scan import KB, RootDiscoveryError, discover_root, resolve_ref, scan
+from kb.core.model import ConfigLoadError, RawClass, RawFrontmatter
+from kb.core.naming import slug
+from kb.core.scan import KB, RootDiscoveryError, resolve_ref
+from kb.core.write_pipeline import (
+    AllocationBlocked,
+    CompanionBirth,
+    DocumentBirth,
+    WriteFailure,
+    WriteIntent,
+    apply_write,
+    load_write_context,
+    prepare_write,
+)
 
 CLASS_DIR = {
     RawClass.SOURCE: Path("raw/sources"),
@@ -154,14 +163,6 @@ ADAPTERS: dict[str, Adapter] = {
 }
 
 
-def slug(value: str, fallback: str) -> str:
-    ascii_value = unicodedata.normalize("NFKD", value).encode(
-        "ascii", "ignore"
-    ).decode()
-    candidate = re.sub(r"[^a-z0-9]+", "-", ascii_value.lower()).strip("-")
-    return candidate or fallback.lower()
-
-
 def _normalized_input(
     payload: AdapterPayload, source_kind: str
 ) -> tuple[str | None, bytes | None]:
@@ -200,6 +201,16 @@ def _surface(request: IngestRequest) -> None:
         )
 
 
+def _invalid_destination(
+    value: str | None,
+    error: OSError | RuntimeError | None = None,
+) -> IngestFailure:
+    message = f"invalid --dest: {value}"
+    if error is not None:
+        message += f": {error}"
+    return IngestFailure("E_INGEST_DEST_INVALID", message, 2)
+
+
 def _destination_parts(value: str | None) -> tuple[str, ...]:
     if value is None:
         return ()
@@ -213,8 +224,24 @@ def _destination_parts(value: str | None) -> tuple[str, ...]:
         or not candidate.parts
         or any(part in {".", ".."} for part in stripped.split("/"))
     ):
-        raise IngestFailure("E_INGEST_DEST_INVALID", f"invalid --dest: {value}", 2)
+        raise _invalid_destination(value)
     return candidate.parts
+
+
+def _unsafe_path_is_destination_component(
+    error: WriteFailure,
+    request: IngestRequest,
+) -> bool:
+    try:
+        destination_parts = _destination_parts(request.dest)
+    except IngestFailure:
+        return False
+    current = Path()
+    for part in (*CLASS_DIR[request.raw_class].parts, *destination_parts):
+        current /= part
+        if current == error.path:
+            return True
+    return False
 
 
 def _target_directory(
@@ -226,32 +253,26 @@ def _target_directory(
     class_dir = root / CLASS_DIR[raw_class]
     target_dir = class_dir.joinpath(*destination_parts)
     try:
-        resolved_class_dir = class_dir.resolve(strict=True)
-        resolved_target_dir = target_dir.resolve(strict=False)
+        current = class_dir
+        for part in (None, *destination_parts):
+            if part is not None:
+                current /= part
+            try:
+                metadata = current.lstat()
+            except FileNotFoundError:
+                if current == class_dir:
+                    raise
+                break
+            if stat.S_ISLNK(metadata.st_mode) or (
+                getattr(metadata, "st_file_attributes", 0)
+                & stat.FILE_ATTRIBUTE_REPARSE_POINT
+            ):
+                raise OSError("destination contains a symlink or junction")
+            if not stat.S_ISDIR(metadata.st_mode):
+                raise OSError("destination component is not a directory")
     except (OSError, RuntimeError) as error:
-        raise IngestFailure(
-            "E_INGEST_DEST_INVALID",
-            f"invalid --dest: {destination_value}: {error}",
-            2,
-        ) from error
-    if (
-        resolved_target_dir != resolved_class_dir
-        and not resolved_target_dir.is_relative_to(resolved_class_dir)
-    ):
-        raise IngestFailure(
-            "E_INGEST_DEST_INVALID", f"invalid --dest: {destination_value}", 2
-        )
+        raise _invalid_destination(destination_value, error) from error
     return class_dir, target_dir
-
-
-def _new_directories(class_dir: Path, target_dir: Path) -> list[Path]:
-    missing: list[Path] = []
-    current = class_dir
-    for part in target_dir.relative_to(class_dir).parts:
-        current /= part
-        if not current.exists():
-            missing.append(current)
-    return missing
 
 
 def _canonical_about(kb: KB, request: IngestRequest) -> str | None:
@@ -316,27 +337,30 @@ def _non_text_original_path(
 
 def ingest(request: IngestRequest) -> IngestResult:
     try:
-        root = discover_root(request.kb_root)
+        context = load_write_context(request.kb_root)
     except RootDiscoveryError as error:
         raise IngestFailure(error.code, error.message, 2) from error
-    try:
-        config = load_config(root)
     except ConfigLoadError as error:
         raise _failure_from_config(error) from error
-    kb = scan(root)
-    if kb.malformed:
-        paths = ", ".join(path.as_posix() for path, _ in kb.malformed)
+    except WriteFailure as error:
+        if _unsafe_path_is_destination_component(error, request):
+            raise _invalid_destination(request.dest, error.cause) from error
+        raise IngestFailure("E_INGEST_IO", str(error.cause), 2) from error
+    except AllocationBlocked as error:
+        paths = ", ".join(path.as_posix() for path in error.paths)
         raise IngestFailure(
             "E_INGEST_MALFORMED",
             f"malformed documents block id allocation: {paths}; run kb validate",
             2,
-        )
+        ) from error
+    root = context.root
+    config = context.config
+    kb = context.kb
     _surface(request)
     destination_parts = _destination_parts(request.dest)
-    class_dir, target_dir = _target_directory(
+    _, target_dir = _target_directory(
         root, request.raw_class, destination_parts, request.dest
     )
-    new_directories = _new_directories(class_dir, target_dir)
     payload = ADAPTERS[request.source_kind](request.source)
     text_body, original_bytes = _normalized_input(payload, request.source_kind)
     about = _canonical_about(kb, request)
@@ -352,13 +376,16 @@ def ingest(request: IngestRequest) -> IngestResult:
     if original_bytes is not None and payload.source_filename is not None:
         extension = Path(payload.source_filename).suffix.lower()
     document_path = target_dir / f"{stem}.md"
+    implicit_index_path = target_dir / "index.md"
     original_path = (
         _non_text_original_path(target_dir, stem, extension)
         if original_bytes is not None
         else None
     )
-    if document_path.exists() or (
-        original_path is not None and original_path.exists()
+    if (
+        document_path.exists()
+        or document_path == implicit_index_path
+        or (original_path is not None and original_path.exists())
     ):
         stem = f"{stem}-{doc_id.lower()}"
         document_path = target_dir / f"{stem}.md"
@@ -393,47 +420,44 @@ def ingest(request: IngestRequest) -> IngestResult:
         about=about,
     )
     relative = path.relative_to(root).as_posix()
-    created = [relative]
-    original_relative = None
-    updated: list[str] = []
-    try:
-        if new_directories:
-            target_dir.mkdir(parents=True)
-        if original_path is not None and original_bytes is not None:
-            create_file_bytes(original_path, original_bytes)
-            original_relative = original_path.relative_to(root).as_posix()
-            created.append(original_relative)
-        create_file_bytes(path, _document(frontmatter, body).encode("utf-8"))
-        for directory in reversed(new_directories):
-            index_path = directory / "index.md"
-            index_path.write_text(
-                create_directory_index(root, directory), encoding="utf-8", newline="\n"
+    original_relative = (
+        original_path.relative_to(root).as_posix()
+        if original_path is not None
+        else None
+    )
+    companions = (
+        [
+            CompanionBirth(
+                path=Path(original_relative),
+                content=original_bytes,
             )
-            created.append(index_path.relative_to(root).as_posix())
-        refresh_directory = new_directories[0].parent if new_directories else target_dir
-        refresh_index = refresh_directory / "index.md"
-        refresh_index.write_text(
-            regenerate_directory_index(root, refresh_directory),
-            encoding="utf-8",
-            newline="\n",
-        )
-        updated.append(refresh_index.relative_to(root).as_posix())
-        append_log(
-            root,
-            LogEntry(
-                at=timestamp,
-                action="ingested",
-                actor=request.actor,
-                doc_ids=[doc_id],
-                note=f"{relative} from {frontmatter.origin}",
-            ),
-        )
-    except OSError as error:
-        raise IngestFailure("E_INGEST_IO", str(error), 2) from error
+        ]
+        if original_relative is not None and original_bytes is not None
+        else []
+    )
+    intent = WriteIntent(
+        birth=DocumentBirth(
+            path=Path(relative),
+            content=_document(frontmatter, body).encode("utf-8"),
+            companions_before=companions,
+        ),
+        log_entry=LogEntry(
+            at=timestamp,
+            action="ingested",
+            actor=request.actor,
+            doc_ids=[doc_id],
+            note=f"{relative} from {frontmatter.origin}",
+        ),
+    )
+    try:
+        prepared_write = prepare_write(context, intent)
+        receipt = apply_write(prepared_write)
+    except WriteFailure as error:
+        raise IngestFailure("E_INGEST_IO", str(error.cause), 2) from error
     return IngestResult(
         id=doc_id,
         path=relative,
         original=original_relative,
-        created=sorted(created),
-        updated=sorted(updated),
+        created=receipt.created,
+        updated=receipt.updated,
     )
