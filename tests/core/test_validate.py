@@ -1,3 +1,5 @@
+import json
+
 import kb.core.validate as validate_module
 import pytest
 
@@ -34,6 +36,13 @@ def _chat_values() -> dict[str, object]:
         "origin": "stdin",
         "title": "Session",
     }
+
+
+def _set_link_types(root, link_types: list[str]) -> None:
+    config_path = root / "kb-config.json"
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    config["link_types"] = link_types
+    config_path.write_text(json.dumps(config) + "\n", encoding="utf-8")
 
 
 def test_ac76_links_and_pending_upstream_are_legal_synthetic_keys(tmp_path) -> None:
@@ -199,6 +208,184 @@ def test_ac77_empty_links_and_pending_upstream_are_well_shaped(tmp_path) -> None
     findings = validate(ValidateRequest(kb_root=root)).findings
 
     assert findings == []
+
+
+def test_ac78_declared_link_type_does_not_warn(tmp_path) -> None:
+    root = make_kb(tmp_path / "kb")
+    _set_link_types(root, ["references"])
+    make_doc(root, "raw/chats/session.md", _chat_values())
+    make_doc(
+        root,
+        "synthetic/note.md",
+        _valid_synthetic_values(links={"references": ["CHAT-000001"]}),
+    )
+
+    findings = validate(ValidateRequest(kb_root=root)).findings
+
+    assert "LINKTYPE_UNDECLARED" not in [finding.code for finding in findings]
+
+
+def test_ac78_undeclared_link_type_warns(tmp_path) -> None:
+    root = make_kb(tmp_path / "kb")
+    _set_link_types(root, ["references"])
+    make_doc(root, "raw/chats/session.md", _chat_values())
+    make_doc(
+        root,
+        "synthetic/note.md",
+        _valid_synthetic_values(links={"blocks": ["CHAT-000001"]}),
+    )
+
+    findings = validate(ValidateRequest(kb_root=root)).findings
+
+    assert any(
+        finding.code == "LINKTYPE_UNDECLARED"
+        and finding.severity == "warning"
+        and "link type 'blocks'" in finding.message
+        for finding in findings
+    )
+
+
+def test_ac78_empty_link_type_vocabulary_declares_nothing(tmp_path) -> None:
+    root = make_kb(tmp_path / "kb")
+    _set_link_types(root, [])
+    make_doc(root, "raw/chats/session.md", _chat_values())
+    make_doc(
+        root,
+        "synthetic/note.md",
+        _valid_synthetic_values(links={"references": ["CHAT-000001"]}),
+    )
+
+    findings = validate(ValidateRequest(kb_root=root)).findings
+
+    assert any(finding.code == "LINKTYPE_UNDECLARED" for finding in findings)
+
+
+def test_ac79_unresolvable_associative_link_target_is_an_error(tmp_path) -> None:
+    root = make_kb(tmp_path / "kb")
+    _set_link_types(root, ["references"])
+    make_doc(root, "raw/chats/session.md", _chat_values())
+    make_doc(
+        root,
+        "synthetic/note.md",
+        _valid_synthetic_values(links={"references": ["KB-999999"]}),
+    )
+
+    findings = validate(ValidateRequest(kb_root=root)).findings
+
+    assert any(
+        finding.code == "LINK_UNRESOLVED"
+        and "links reference 'KB-999999'" in finding.message
+        for finding in findings
+    )
+
+
+def test_ac79_unresolvable_pending_marker_is_an_error(tmp_path) -> None:
+    root = make_kb(tmp_path / "kb")
+    make_doc(root, "raw/chats/session.md", _chat_values())
+    make_doc(
+        root,
+        "synthetic/note.md",
+        _valid_synthetic_values(pending_upstream=["KB-999999"]),
+    )
+
+    findings = validate(ValidateRequest(kb_root=root)).findings
+
+    assert any(
+        finding.code == "LINK_UNRESOLVED"
+        and "pending_upstream reference 'KB-999999'" in finding.message
+        for finding in findings
+    )
+    assert "PU_NOT_PARENT" not in [finding.code for finding in findings]
+
+
+def test_ac80_pending_marker_not_among_parents_is_an_error(tmp_path) -> None:
+    root = make_kb(tmp_path / "kb")
+    make_doc(root, "raw/chats/session.md", _chat_values())
+    make_doc(
+        root,
+        "raw/sources/source.md",
+        {
+            "id": "RAW-000001",
+            "type": "raw-source",
+            "ingested_at": "2026-07-16T08:00:00Z",
+            "origin": "file",
+        },
+    )
+    make_doc(
+        root,
+        "synthetic/note.md",
+        _valid_synthetic_values(pending_upstream=["RAW-000001"]),
+    )
+
+    findings = validate(ValidateRequest(kb_root=root)).findings
+
+    assert any(
+        finding.code == "PU_NOT_PARENT"
+        and finding.severity == "error"
+        and "pending_upstream reference 'RAW-000001'" in finding.message
+        for finding in findings
+    )
+
+
+@pytest.mark.parametrize("derived_from", ["CHAT-000001", None])
+def test_ac80_pending_parent_check_requires_well_shaped_derived_from(
+    tmp_path, derived_from: object
+) -> None:
+    root = make_kb(tmp_path / "kb")
+    make_doc(root, "raw/chats/session.md", _chat_values())
+    values = _valid_synthetic_values(pending_upstream=["CHAT-000001"])
+    if derived_from is None:
+        del values["derived_from"]
+    else:
+        values["derived_from"] = derived_from
+    make_doc(root, "synthetic/note.md", values)
+
+    findings = validate(ValidateRequest(kb_root=root)).findings
+
+    assert any(finding.code == "FM1_FIELD_INVALID" for finding in findings) or any(
+        finding.code == "FM1_FIELD_MISSING" for finding in findings
+    )
+    assert "PU_NOT_PARENT" not in [finding.code for finding in findings]
+
+
+def test_ac80_pending_marker_that_is_a_parent_is_clean(tmp_path) -> None:
+    root = make_kb(tmp_path / "kb")
+    make_doc(root, "raw/chats/session.md", _chat_values())
+    make_doc(
+        root,
+        "synthetic/note.md",
+        _valid_synthetic_values(pending_upstream=["CHAT-000001"]),
+    )
+
+    findings = validate(ValidateRequest(kb_root=root)).findings
+
+    assert "PU_NOT_PARENT" not in [finding.code for finding in findings]
+    assert "LINK_UNRESOLVED" not in [finding.code for finding in findings]
+
+
+def test_ac81_associative_link_cycles_are_legal(tmp_path) -> None:
+    root = make_kb(tmp_path / "kb")
+    _set_link_types(root, ["references"])
+    make_doc(root, "raw/chats/session.md", _chat_values())
+    make_doc(
+        root,
+        "synthetic/first.md",
+        _valid_synthetic_values(
+            links={"references": ["KB-000002"]},
+        ),
+    )
+    make_doc(
+        root,
+        "synthetic/second.md",
+        _valid_synthetic_values(
+            id="KB-000002",
+            links={"references": ["KB-000001"]},
+        ),
+    )
+
+    findings = validate(ValidateRequest(kb_root=root)).findings
+
+    assert "DG2_CYCLE" not in [finding.code for finding in findings]
 
 
 def test_ac75_charter_document_is_valid_under_governance(tmp_path) -> None:

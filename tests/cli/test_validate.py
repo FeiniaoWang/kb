@@ -1121,6 +1121,25 @@ def test_ac56_strict_changes_only_the_warning_gate(tmp_path, invoke_validate) ->
     assert strict.exit_code == 1
 
 
+def test_ac82_strict_promotes_undeclared_link_type_warning(
+    tmp_path, invoke_validate
+) -> None:
+    root = make_kb(tmp_path / "kb")
+    config_path = root / "kb-config.json"
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    config["link_types"] = []
+    config_path.write_text(json.dumps(config) + "\n", encoding="utf-8")
+    synthetic(root, links={"references": ["CHAT-000001"]})
+
+    normal = invoke_validate(root)
+    strict = invoke_validate(root, "--strict")
+
+    assert "LINKTYPE_UNDECLARED" in normal.stdout
+    assert normal.stdout == strict.stdout
+    assert normal.exit_code == 0
+    assert strict.exit_code == 1
+
+
 def test_ac57_errors_exit_one_with_and_without_strict(
     tmp_path, invoke_validate
 ) -> None:

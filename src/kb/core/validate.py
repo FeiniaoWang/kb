@@ -427,6 +427,21 @@ def _vocabulary_findings(file: ScannedMarkdown, config: Config) -> list[Finding]
                         (key_occurrence, offset),
                     )
                 )
+    links = values.get("links")
+    if isinstance(links, dict) and _invalid_reason("links", links) is None:
+        key_occurrence = list(values).index("links")
+        for offset, link_type in enumerate(links):
+            if link_type not in config.link_types:
+                findings.append(
+                    _finding(
+                        file,
+                        "LINKTYPE_UNDECLARED",
+                        "warning",
+                        f"link type '{link_type}' is not declared in the "
+                        "kb-config.json link_types vocabulary",
+                        (key_occurrence, offset),
+                    )
+                )
     return findings
 
 
@@ -562,6 +577,54 @@ def _relationship_findings(file: ScannedMarkdown, kb: KB) -> list[Finding]:
                     list(values).index("supersedes"),
                 )
             )
+        links = values.get("links")
+        if isinstance(links, dict) and _invalid_reason("links", links) is None:
+            key_occurrence = list(values).index("links")
+            offset = 0
+            for targets in links.values():
+                for target in targets:
+                    if _resolved_document(kb, target) is None:
+                        findings.append(
+                            _finding(
+                                file,
+                                "LINK_UNRESOLVED",
+                                "error",
+                                f"links reference '{target}' does not resolve "
+                                "to a document id",
+                                (key_occurrence, offset),
+                            )
+                        )
+                    offset += 1
+        pending = values.get("pending_upstream")
+        if _well_shaped_string_list(pending):
+            key_occurrence = list(values).index("pending_upstream")
+            parents = values.get("derived_from")
+            parent_set = (
+                set(parents) if _well_shaped_string_list(parents) else None
+            )
+            for offset, marker in enumerate(pending):
+                if _resolved_document(kb, marker) is None:
+                    findings.append(
+                        _finding(
+                            file,
+                            "LINK_UNRESOLVED",
+                            "error",
+                            f"pending_upstream reference '{marker}' does not "
+                            "resolve to a document id",
+                            (key_occurrence, offset),
+                        )
+                    )
+                elif parent_set is not None and marker not in parent_set:
+                    findings.append(
+                        _finding(
+                            file,
+                            "PU_NOT_PARENT",
+                            "error",
+                            f"pending_upstream reference '{marker}' is not "
+                            "among derived_from parents",
+                            (key_occurrence, offset),
+                        )
+                    )
     if type_name == "feedback":
         about = values.get("about")
         if (
