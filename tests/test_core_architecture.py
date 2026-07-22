@@ -541,7 +541,7 @@ class _ArchitectureScanner(ast.NodeVisitor):
         frame.flow = original
         return result
 
-    def _visit_try(self, node: ast.Try | ast.TryStar) -> None:
+    def _visit_try(self, node: ast.Try) -> None:
         before = {
             name: set(targets)
             for name, targets in self.current_frame.flow.items()
@@ -565,8 +565,36 @@ class _ArchitectureScanner(ast.NodeVisitor):
     def visit_Try(self, node: ast.Try) -> None:
         self._visit_try(node)
 
+    def _visit_try_star(self, node: ast.TryStar) -> None:
+        before = {
+            name: set(targets)
+            for name, targets in self.current_frame.flow.items()
+        }
+        body_flow, handler_input = self._visit_try_body(node.body, before)
+        normal_flow = (
+            self._visit_branch(node.orelse, body_flow)
+            if node.orelse
+            else body_flow
+        )
+        handler_flows: list[dict[str, set[str]]] = []
+        next_handler_input = handler_input
+        for handler in node.handlers:
+            handler_flow = self._visit_exception_handler(
+                handler,
+                next_handler_input,
+            )
+            handler_flows.append(handler_flow)
+            next_handler_input = self._merge_flows(
+                [handler_input, *handler_flows]
+            )
+        self.current_frame.flow = self._merge_flows(
+            [normal_flow, *handler_flows]
+        )
+        for statement in node.finalbody:
+            self.visit(statement)
+
     def visit_TryStar(self, node: ast.TryStar) -> None:
-        self._visit_try(node)
+        self._visit_try_star(node)
 
     def visit_Raise(self, node: ast.Raise) -> None:
         if node.exc is not None:
@@ -741,6 +769,20 @@ def test_scanner_applies_finally_after_exception_flow_merge() -> None:
         "dependency.system('not a process launch')\n"
     )
     assert violations(Path("src/kb/core/example.py"), source) == []
+
+
+def test_try_star_propagates_bindings_between_sequential_handlers() -> None:
+    source = (
+        "try:\n"
+        "    raise ExceptionGroup('group', [])\n"
+        "except* ValueError:\n"
+        "    import os as dependency\n"
+        "except* TypeError:\n"
+        "    dependency.system('x')\n"
+    )
+    assert violations(Path("src/kb/core/example.py"), source) == [
+        "forbidden process launch: os.system"
+    ]
 
 
 def test_class_namespace_does_not_shadow_module_global_in_method() -> None:
