@@ -12,11 +12,14 @@ from kb.core.write_pipeline import (
     AllocationBlocked,
     CompanionBirth,
     DocumentBirth,
+    MutationIntent,
     MutationTarget,
     WriteFailure,
     WriteIntent,
+    apply_mutation_write,
     apply_write,
     load_write_context,
+    prepare_mutation_write,
     prepare_write,
 )
 
@@ -52,6 +55,16 @@ def initialized(tmp_path: Path) -> Path:
     root = tmp_path / "kb"
     assert init_kb(root).root == root.resolve()
     return root
+
+
+SYNTHETIC_DOC = document_bytes()
+LOG_ENTRY = LogEntry(
+    at="2026-07-22T00:00:00Z",
+    action="revised",
+    actor="kb-cli",
+    doc_ids=["KB-000001"],
+    note="synthetic/doc.md",
+)
 
 
 def _create_descriptor_relative_deep_tree(root: Path, depth: int) -> Path:
@@ -2394,3 +2407,180 @@ def test_prepare_index_rendering_performs_no_path_based_listing_reads(
     )
 
     assert prepared.sources == {}
+
+
+def test_mutation_write_overwrites_and_logs(tmp_path) -> None:
+    root = initialized(tmp_path)
+    (root / "synthetic/doc.md").write_bytes(SYNTHETIC_DOC)
+    context = load_write_context(root)
+    intent = MutationIntent(
+        mutations=[
+            MutationTarget(key="document", path=Path("synthetic/doc.md"))
+        ],
+        log_entry=LOG_ENTRY,
+    )
+
+    prepared = prepare_mutation_write(context, intent)
+
+    assert prepared.sources["document"].content == SYNTHETIC_DOC
+    receipt = apply_mutation_write(
+        prepared,
+        {"document": b"---\ntype: spec\n---\n"},
+    )
+    assert receipt.updated == ["synthetic/doc.md"]
+    assert receipt.created == []
+    assert (root / "synthetic/doc.md").read_bytes() == b"---\ntype: spec\n---\n"
+    assert "| revised | kb-cli | KB-000001 |" in (
+        root / "log.md"
+    ).read_text(encoding="utf-8")
+
+
+def test_mutation_write_requires_targets_and_matching_keys(tmp_path) -> None:
+    root = initialized(tmp_path)
+    target = root / "synthetic/doc.md"
+    target.write_bytes(SYNTHETIC_DOC)
+    context = load_write_context(root)
+
+    with pytest.raises(ValueError):
+        prepare_mutation_write(
+            context,
+            MutationIntent(mutations=[], log_entry=LOG_ENTRY),
+        )
+
+    prepared = prepare_mutation_write(
+        context,
+        MutationIntent(
+            mutations=[
+                MutationTarget(key="document", path=Path("synthetic/doc.md"))
+            ],
+            log_entry=LOG_ENTRY,
+        ),
+    )
+    log_before = (root / "log.md").read_bytes()
+
+    with pytest.raises(ValueError, match="exactly match"):
+        apply_mutation_write(prepared, {})
+
+    assert target.read_bytes() == SYNTHETIC_DOC
+    assert (root / "log.md").read_bytes() == log_before
+    receipt = apply_mutation_write(prepared, {"document": b"replacement"})
+    assert receipt.updated == ["synthetic/doc.md"]
+
+
+def test_mutation_write_missing_target_is_preflight_failure(tmp_path) -> None:
+    root = initialized(tmp_path)
+    context = load_write_context(root)
+
+    with pytest.raises(WriteFailure) as excinfo:
+        prepare_mutation_write(
+            context,
+            MutationIntent(
+                mutations=[
+                    MutationTarget(
+                        key="document",
+                        path=Path("synthetic/gone.md"),
+                    )
+                ],
+                log_entry=LOG_ENTRY,
+            ),
+        )
+
+    assert excinfo.value.phase == "preflight"
+    assert excinfo.value.operation == "inspect"
+    assert excinfo.value.role == "mutation"
+    assert excinfo.value.key == "document"
+
+
+@pytest.mark.parametrize(
+    "mutations",
+    [
+        [
+            MutationTarget(key="document", path=Path("synthetic/one.md")),
+            MutationTarget(key="document", path=Path("synthetic/two.md")),
+        ],
+        [
+            MutationTarget(key="one", path=Path("synthetic/one.md")),
+            MutationTarget(key="two", path=Path("synthetic/one.md")),
+        ],
+    ],
+)
+def test_mutation_write_rejects_duplicate_keys_or_paths_before_writes(
+    tmp_path,
+    mutations,
+) -> None:
+    root = initialized(tmp_path)
+    (root / "synthetic/one.md").write_bytes(SYNTHETIC_DOC)
+    (root / "synthetic/two.md").write_bytes(document_bytes("KB-000002"))
+    before = {path: path.read_bytes() for path in root.rglob("*") if path.is_file()}
+
+    with pytest.raises(ValueError):
+        prepare_mutation_write(
+            load_write_context(root),
+            MutationIntent(mutations=mutations, log_entry=LOG_ENTRY),
+        )
+
+    assert {path: path.read_bytes() for path in root.rglob("*") if path.is_file()} == before
+
+
+def test_mutation_write_rejects_log_collision_before_writes(tmp_path) -> None:
+    root = initialized(tmp_path)
+    before = {path: path.read_bytes() for path in root.rglob("*") if path.is_file()}
+
+    with pytest.raises(ValueError, match="implicit pipeline path"):
+        prepare_mutation_write(
+            load_write_context(root),
+            MutationIntent(
+                mutations=[MutationTarget(key="document", path=Path("log.md"))],
+                log_entry=LOG_ENTRY,
+            ),
+        )
+
+    assert {path: path.read_bytes() for path in root.rglob("*") if path.is_file()} == before
+
+
+def test_mutation_write_is_single_use(tmp_path) -> None:
+    root = initialized(tmp_path)
+    (root / "synthetic/doc.md").write_bytes(SYNTHETIC_DOC)
+    prepared = prepare_mutation_write(
+        load_write_context(root),
+        MutationIntent(
+            mutations=[
+                MutationTarget(key="document", path=Path("synthetic/doc.md"))
+            ],
+            log_entry=LOG_ENTRY,
+        ),
+    )
+
+    apply_mutation_write(prepared, {"document": b"replacement"})
+
+    with pytest.raises(ValueError, match="already consumed"):
+        apply_mutation_write(prepared, {"document": b"replacement again"})
+
+
+def test_mutation_write_preflights_log_content_and_apply_does_not_read_it(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    import kb.core.write_pipeline as pipeline
+
+    root = initialized(tmp_path)
+    (root / "synthetic/doc.md").write_bytes(SYNTHETIC_DOC)
+    prepared = prepare_mutation_write(
+        load_write_context(root),
+        MutationIntent(
+            mutations=[
+                MutationTarget(key="document", path=Path("synthetic/doc.md"))
+            ],
+            log_entry=LOG_ENTRY,
+        ),
+    )
+
+    def forbidden_read(*_args, **_kwargs):
+        raise AssertionError("apply_mutation_write must use preflighted log content")
+
+    monkeypatch.setattr(pipeline, "read_rooted_bytes", forbidden_read)
+    apply_mutation_write(prepared, {"document": b"replacement"})
+
+    assert "| revised | kb-cli | KB-000001 |" in (
+        root / "log.md"
+    ).read_text(encoding="utf-8")

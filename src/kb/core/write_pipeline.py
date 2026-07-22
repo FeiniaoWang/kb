@@ -126,6 +126,24 @@ class WriteReceipt(BaseModel):
     updated: list[str] = Field(default_factory=list)
 
 
+class MutationIntent(BaseModel):
+    mutations: list[MutationTarget] = Field(min_length=1)
+    log_entry: LogEntry
+
+
+class PreparedMutation(BaseModel):
+    sources: dict[str, MutationSource]
+    _root: Path = PrivateAttr()
+    _root_identity: FileIdentity = PrivateAttr()
+    _intent: MutationIntent = PrivateAttr()
+    _mutation_identities: dict[str, FileIdentity] = PrivateAttr(default_factory=dict)
+    _log_identity: FileIdentity | None = PrivateAttr(default=None)
+    _log_row: bytes = PrivateAttr()
+    _log_separator: bytes = PrivateAttr(default=b"")
+    _updated: list[str] = PrivateAttr(default_factory=list)
+    _consumed: bool = PrivateAttr(default=False)
+
+
 @dataclass(frozen=True)
 class _RootedIndexSnapshot:
     identity: FileIdentity
@@ -498,6 +516,198 @@ def _rooted_index_snapshot(
             subdirectories=subdirectories,
         ),
     )
+
+
+def prepare_mutation_write(
+    context: WriteContext,
+    intent: MutationIntent,
+) -> PreparedMutation:
+    root = context.root
+    root_identity = context._root_identity
+    if not intent.mutations:
+        raise ValueError("mutation intent requires at least one target")
+    keys = [mutation.key for mutation in intent.mutations]
+    if len(set(keys)) != len(keys):
+        raise ValueError("mutation keys must be unique")
+    relatives = [_relative_path(mutation.path) for mutation in intent.mutations]
+    if len(set(relatives)) != len(relatives):
+        raise ValueError("write intent paths must be distinct")
+    if Path("log.md") in relatives:
+        raise ValueError("write intent collides with implicit pipeline path: log.md")
+
+    try:
+        verify_root(root, root_identity)
+    except OSError as error:
+        raise WriteFailure(
+            "preflight",
+            "inspect",
+            "directory",
+            Path("."),
+            error,
+        ) from error
+
+    sources: dict[str, MutationSource] = {}
+    mutation_identities: dict[str, FileIdentity] = {}
+    for mutation, relative in zip(intent.mutations, relatives, strict=True):
+        try:
+            identity = inspect_rooted_file(root, relative, root_identity)
+        except OSError as error:
+            raise WriteFailure(
+                "preflight",
+                "inspect",
+                "mutation",
+                relative,
+                error,
+                key=mutation.key,
+            ) from error
+        assert identity is not None
+        try:
+            content = read_rooted_bytes(root, relative, root_identity, identity)
+        except OSError as error:
+            raise WriteFailure(
+                "preflight",
+                "read",
+                "mutation",
+                relative,
+                error,
+                key=mutation.key,
+            ) from error
+        mutation_identities[mutation.key] = identity
+        sources[mutation.key] = MutationSource(
+            key=mutation.key,
+            path=relative,
+            content=content,
+        )
+
+    try:
+        log_identity = inspect_rooted_file(
+            root,
+            Path("log.md"),
+            root_identity,
+            allow_missing=True,
+        )
+    except OSError as error:
+        raise WriteFailure(
+            "preflight",
+            "inspect",
+            "log",
+            Path("log.md"),
+            error,
+        ) from error
+    log_content: bytes | None = None
+    if log_identity is not None:
+        try:
+            log_content = read_rooted_bytes(
+                root,
+                Path("log.md"),
+                root_identity,
+                log_identity,
+            )
+        except OSError as error:
+            raise WriteFailure(
+                "preflight",
+                "read",
+                "log",
+                Path("log.md"),
+                error,
+            ) from error
+
+    try:
+        formatted_log_row = format_log_entry(intent.log_entry)
+    except (TypeError, ValueError) as error:
+        cause = OSError(errno.EINVAL, "log row could not be formatted")
+        raise WriteFailure(
+            "preflight",
+            "render",
+            "log",
+            Path("log.md"),
+            cause,
+        ) from error
+    try:
+        log_row = f"{formatted_log_row}\n".encode("utf-8")
+    except UnicodeEncodeError as error:
+        cause = OSError(errno.EILSEQ, "log row is not valid UTF-8")
+        raise WriteFailure(
+            "preflight",
+            "render",
+            "log",
+            Path("log.md"),
+            cause,
+        ) from error
+
+    prepared = PreparedMutation(sources=sources)
+    prepared._root = root
+    prepared._root_identity = root_identity
+    prepared._intent = intent.model_copy(deep=True)
+    prepared._mutation_identities = mutation_identities
+    prepared._log_identity = log_identity
+    prepared._log_row = log_row
+    prepared._log_separator = (
+        b"" if log_content is None or log_content.endswith(b"\n") else b"\n"
+    )
+    prepared._updated = sorted(path.as_posix() for path in relatives)
+    return prepared
+
+
+def apply_mutation_write(
+    prepared: PreparedMutation,
+    replacements: Mapping[str, bytes],
+) -> WriteReceipt:
+    if prepared._consumed:
+        raise ValueError("prepared write is already consumed")
+    replacement_map = dict(replacements)
+    if set(replacement_map) != set(prepared.sources):
+        raise ValueError("replacement keys must exactly match prepared mutation keys")
+    prepared._consumed = True
+
+    root = prepared._root
+    root_identity = prepared._root_identity
+    for mutation in prepared._intent.mutations:
+        source = prepared.sources[mutation.key]
+        try:
+            overwrite_rooted_bytes(
+                root,
+                source.path,
+                replacement_map[mutation.key],
+                root_identity,
+                prepared._mutation_identities[mutation.key],
+            )
+        except OSError as error:
+            raise WriteFailure(
+                "write",
+                "overwrite",
+                "mutation",
+                source.path,
+                error,
+                key=mutation.key,
+            ) from error
+
+    try:
+        if prepared._log_identity is None:
+            _create_rooted_final_file_bytes(
+                root,
+                Path("log.md"),
+                _EMPTY_LOG_CONTENT + prepared._log_row,
+                root_identity,
+            )
+        else:
+            _append_rooted_final_bytes(
+                root,
+                Path("log.md"),
+                prepared._log_separator + prepared._log_row,
+                root_identity,
+                prepared._log_identity,
+            )
+    except OSError as error:
+        raise WriteFailure(
+            "write",
+            "append",
+            "log",
+            Path("log.md"),
+            error,
+        ) from error
+
+    return WriteReceipt(created=[], updated=prepared._updated)
 
 
 def prepare_write(context: WriteContext, intent: WriteIntent) -> PreparedWrite:
