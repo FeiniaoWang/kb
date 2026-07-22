@@ -26,12 +26,15 @@ The file is a JSON object. Minimum content written by `kb init`:
   "schema": 1,
   "types": [],
   "tags": [],
+  "link_types": ["references", "contradicts", "constrains"],
   "id_prefixes": { "synthetic": "KB", "source": "RAW", "chat": "CHAT", "feedback": "FEED" },
   "propagation_auto_safe": []
 }
 ```
 
 `schema` is the KB layout schema version — a **reserved, tooling-owned** key, not hand-edited by stewards. Commands MUST refuse (exit 2, `E_SCHEMA_UNSUPPORTED`) a schema newer than they know. The file carries no comment/annotation keys; unknown keys are ignored by `load_config`. Field-by-field documentation for `kb-config.json` lives in the governance document `governance/kb-config.md` (id `GOVERNANCE-KB-CONFIG`), not inside the data file.
+
+`link_types` is the associative link-type vocabulary (PRD §6.9): the typed, non-provenance relationships synthetic documents may declare under the `links:` frontmatter key. `kb init` seeds the PRD's default vocabulary (`references`, `contradicts`, `constrains`); an **empty** list means no link types are declared, so every use flags in `kb validate` (same semantics as `tags`, opposite of `types`).
 
 ## 2. Exit codes
 
@@ -65,6 +68,8 @@ Resolution rules:
 - Unresolvable `REF` → reported on stderr with exit 1; in a batch (`REF...`), remaining refs are still processed (batch-friendly, per §2).
 - `REF...` means one or more references as positional arguments; commands that accept `REF...` also read them from stdin (§4.2).
 
+Write commands that take a single `REF` positional (`kb revise`) resolve it by the same two-step rule; an unresolvable target is that command's own typed failure, not the batch-partial exit-1 pattern.
+
 ### 4.2 Pipelines
 
 - Commands accepting `REF...` (`show`, `filter`, `frontmatter`, `resolve`, `validate`) read newline-separated refs from stdin when stdin is piped and no refs were passed as arguments.
@@ -77,7 +82,7 @@ Resolution rules:
 - **`type` is mandatory and authoritative (OKF).** Every `*.md` file in the KB MUST carry a `type` frontmatter field; `kb validate` enforces this on **every** markdown file, including `log.md`. A file missing `type` is malformed (§ malformed-file handling below). `type` is the single source of truth for classification — `DocClass` and `RawClass` are **derived from `type`, never from path**:
     - `type: index` → `INDEX`
     - `type: raw-source | chat | feedback` → `RAW` (`RawClass` `SOURCE | CHAT | FEEDBACK`)
-    - reserved governance types `conventions | kb-config | health` → `GOVERNANCE`
+    - reserved governance types `charter | conventions | kb-config | health` → `GOVERNANCE`
     - `type: log` → operational (not a `DocClass`; excluded from the document set)
     - any other `type` → `SYNTHETIC` (the open project vocabulary in `kb-config.json`)
 - **Location must agree with `type`.** A document's directory is expected to match its `type`, and `kb validate` flags any mismatch (it never silently reclassifies): `index` → file named `index.md`; `raw-source|chat|feedback` → under `raw/sources|chats|feedback/`; governance types → under `governance/`; synthetic types → under `synthetic/`. `type` wins; a misplaced file is a validation error to be fixed (e.g. via `kb mv`), not a reclassification.
@@ -129,12 +134,12 @@ Pinned so that independently implemented commands land on the same names. **Grow
 | `DocId` | `core/ids.py` | `prefix: str`, `number: int`; models the **numeric** id form only; `parse(s)`, `format()` (zero-pad to 6), ordering by (prefix, number); `next_id(kb, prefix) -> DocId`. Reserved slug ids (`GOVERNANCE-CONVENTIONS`, …) are literal id strings, not `DocId`s | kb-init (grammar), kb-ingest (raw allocation), kb-create (synthetic allocation) |
 | `Frontmatter` | `core/model.py` | ordered mapping preserving unknown keys; round-trips YAML without reordering | kb-init |
 | `RawFrontmatter` | `core/model.py` | `id`, `type` (raw-source\|chat\|feedback), `ingested_at` (ISO-8601 UTC), `origin: str`, `title: str` (always written by `kb ingest`; not part of FM1's mandatory set), `about: str \| None` (feedback only). Enforced across the KB by `kb validate` (kb-validate §4.1, §7.1) | kb-ingest |
-| `SyntheticFrontmatter` | `core/model.py` | `id`, `type`, `title`, `description`, `status` (draft\|current\|superseded\|retired), `derived_from: list`, `timestamp`, `last_human_touch`; optional `tags`, `supersedes`, `instructions`. **Constructed and emitted by kb-create** in exactly this key order (kb-create §5.1; optional keys last, only when present; `derived_from`/`tags` as block sequences); enforced across the KB by `kb validate` (kb-validate §4.1, §7.1) | kb-create (emission), kb-validate (enforcement) |
+| `SyntheticFrontmatter` | `core/model.py` | `id`, `type`, `title`, `description`, `status` (draft\|current\|superseded\|retired), `derived_from: list`, `timestamp`, `last_human_touch`; optional `tags`, `supersedes`, `instructions`, `links: dict[str, list[str]] \| None = None`, `pending_upstream: list[str] \| None = None`. **Constructed and emitted by kb-create** in exactly this key order (kb-create §5.1; optional keys last, only when present; `derived_from`/`tags` as block sequences); enforced across the KB by `kb validate` (kb-validate §4.1, §7.1) | kb-create (emission), kb-validate (enforcement) |
 | `GovernanceFrontmatter` | `core/model.py` | `id` (reserved slug, e.g. `GOVERNANCE-CONVENTIONS`), `type`, `title`, `description`; the two system files scaffolded by `kb init`. Enforced across the KB by `kb validate` (kb-validate §4.1, §7.1) | kb-init |
 | `IndexFrontmatter` | `core/model.py` | `type: index`, `description`; optional `title`; **no `id`** (index docs are path-addressed). One per directory (`DocClass INDEX`). CLI-maintained and read-only for humans/agents: the body is a generated child listing (`kb index` regenerates it). Enforced across the KB by `kb validate` (kb-validate §4.1, §7.1) | kb-init |
 | `Document` | `core/model.py` | `id: str \| None` (the literal frontmatter id; numeric ids parse via `DocId`), `path` (KB-root-relative), `doc_class: DocClass`, `frontmatter: Frontmatter`, `body` (lazy property) | kb-ingest |
 | `KB` | `core/scan.py` | `root: Path`, `documents: list[Document]`, `by_id: dict[str, Document]`, `malformed: list[(path, error)]`; built by `scan(root)` | kb-ingest |
-| `Config` | `core/model.py` | `schema: int`, `types: list[str]`, `tags: list[str]`, `id_prefixes: dict[str, str]`, `propagation_auto_safe: list[str]`; parsed by `load_config(root)` as a JSON object from `kb-config.json` at the KB root (stdlib `json`); unknown keys ignored; every field has the documented default when the key is absent; unparseable file → `E_CONFIG_INVALID` | kb-init |
+| `Config` | `core/model.py` | `schema: int`, `types: list[str]`, `tags: list[str]`, `link_types: list[str]`, `id_prefixes: dict[str, str]`, `propagation_auto_safe: list[str]`; parsed by `load_config(root)` as a JSON object from `kb-config.json` at the KB root (stdlib `json`); unknown keys ignored; every field has the documented default when the key is absent; unparseable file → `E_CONFIG_INVALID` | kb-init |
 | `LogEntry` | `core/housekeeping.py` | `at` (ISO-8601 UTC), `action`, `actor`, `doc_ids: list[str]`, `note`; line format §8 | kb-init |
 | `Finding` | `core/validate.py` | `code: str` (stable finding code, kb-validate §7.1 — a separate namespace from `E_*` command errors), `severity` (`error`\|`warning`), `path` (KB-root-relative; always present — malformed, index, and log files have no id), `id: str \| None` (the literal frontmatter id when present as a string), `message: str`. Findings sort by (path, code, occurrence); produced only by `kb validate` | kb-validate |
 
