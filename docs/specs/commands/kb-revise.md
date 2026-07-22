@@ -39,9 +39,9 @@ At least one change option is required: `--add-parent`, `--link`,
 
 ## 3. Execution
 
-Pre-flight then write: steps 1–12 complete before the first byte is written;
+Pre-flight then write: steps 1–13 complete before the first byte is written;
 any failure among them leaves the KB untouched. Only an OS error inside the
-write phase (steps 13–14) can leave partial state (documented, not rolled
+write phase (steps 14–15) can leave partial state (documented, not rolled
 back — same stance as kb create E14).
 
 1. Discover root, load config (00-shared §1): `E_NO_KB` / `E_CONFIG_INVALID`
@@ -97,13 +97,20 @@ back — same stance as kb create E14).
     `derived_from`/`links`/`pending_upstream`/`status` per steps 6–9 (only
     keys actually changed are rewritten; untouched keys — including unknown
     extension keys, FM2 — are preserved byte-for-byte).
-12. Format the `revised` log row (actor, target id, note = target path plus
+12. Validate the complete proposed target state with the document-integrity
+    rules enforced by `kb validate`, including schema validity, existing and
+    proposed references, and all `derived_from` graph effects (DG2). Any
+    error finding anchored to the proposed target or introduced by its new
+    graph edges → `E_REVISE_VALIDATION`, exit 1, listing stable finding codes;
+    unrelated pre-existing findings elsewhere do not block. Warnings do not
+    block and are reported once.
+13. Format the `revised` log row (actor, target id, note = target path plus
     a change summary such as `+parent CHAT-000031, +link references=KB-000012,
     status current, body, +pending KB-000007, -pending KB-000003`). Encoding
     failure here is pre-flight `E_REVISE_IO`, exit 2.
-13. Write phase: overwrite the target document (identity-checked, symlink-
+14. Write phase: overwrite the target document (identity-checked, symlink-
     resistant — 00-shared safeio conventions), append the log row.
-14. Report.
+15. Report.
 
 ## 4. Errors
 
@@ -127,6 +134,7 @@ back — same stance as kb create E14).
 | E16 | `--body-file` path missing/unreadable/not regular | `E_REVISE_BODY_NOT_FOUND` | 2 |
 | E17 | Body bytes not UTF-8 | `E_REVISE_BODY_NOT_TEXT` | 1 |
 | E18 | OS error in context acquisition, preparation, or write | `E_REVISE_IO` | 2 |
+| E19 | Proposed revised document fails document-integrity validation | `E_REVISE_VALIDATION` | 1 |
 
 ## 5. Output
 
@@ -203,10 +211,14 @@ AC36 malformed scan → E3 naming paths.
 AC37 log gains one `revised` row: timestamp `T`, actor, target id, note
 starting with the target path.
 AC38 no `index.md` content changes in any revise run.
-AC39 every error case leaves the KB byte-for-byte untouched (pre-flight
-guarantee).
+AC39 every pre-flight error leaves the KB byte-for-byte untouched. A
+write-phase `E_REVISE_IO` may leave partial state only as documented.
 AC40 `--json` success envelope exactly as §5; error envelope carries the
 typed code; exit codes as §4.
 AC41 combined run (`--add-parent` + `--link` + `--status` + `--body-file` +
 `--pending`) applies all changes in one write and one log row.
 AC42 `--actor` value appears in the log row; default `kb-cli`.
+AC43 a proposed revised document that retains or introduces a document-
+integrity error (including schema invalidity or a DG2 cycle) fails
+`E_REVISE_VALIDATION`, lists stable finding codes, and writes nothing;
+unrelated pre-existing findings elsewhere do not block.
