@@ -48,10 +48,19 @@ lossless transformation. `Document.body` remains lazy, and no live descriptor
 crosses `load_write_context()`, `prepare_write()`, or `apply_write()`.
 
 Every created directory is first made under a high-entropy private staging
-name beneath the verified parent. The implementation opens and holds that
-directory, captures its `FileIdentity`, atomically publishes it to the final
-name with a kernel no-replace primitive, and verifies that the published entry
-matches the held identity before returning it. Darwin uses
+name beneath the verified parent. Because portable Darwin/Linux `mkdirat` does
+not atomically return a descriptor, that pathname has no trusted creator
+identity. The first descriptor-relative no-follow directory open and its
+`fstat` bind the authoritative `FileIdentity`; a real-directory substitution
+before that first open may be bound and published. A symlink or non-directory
+at binding fails. Every replacement after binding is rejected before and after
+publication, during child writes, and before log/success. Root containment is
+mandatory, but creator-provenance authentication before first open is not
+promised.
+
+The implementation atomically publishes the bound directory to the final name
+with a kernel no-replace primitive and verifies that the published entry
+matches the bound identity before returning it. Darwin uses
 `renameatx_np(..., RENAME_EXCL)` and Linux uses
 `renameat2(..., RENAME_NOREPLACE)`; ordinary rename is never an acceptable
 fallback because it may overwrite an empty late occupant. Unsupported
@@ -152,12 +161,15 @@ fallible pipeline operation follows a successful log write.
   frontmatter prefix; allocation contexts retain no document body or complete
   Markdown source bytes, while full rooted mutation-source acquisition remains
   deferred to preparation.
-- Every born directory identity is captured from an opened private staging
-  directory before atomic exclusive publication, required for all later
+- Every born directory identity is bound by the first no-follow directory open
+  and `fstat` after staging-path creation, before atomic exclusive publication,
+  required for all later
   child/index/companion/document births below it, and verified before success;
   no descriptor survives an individual rooted operation and no ordinary rename
-  fallback may overwrite a late occupant. Failed staging is never path-deleted
-  after a separate check and remains identifiable partial state when present.
+  fallback may overwrite a late occupant. A real-directory substitution before
+  that first open may become the bound identity, but all writes remain beneath
+  the captured root. Failed staging is never path-deleted after a separate check
+  and remains identifiable partial state when present.
 - Every existing mutation target, existing affected index, and existing `log.md` is inspected before the write boundary and updated using the captured `FileIdentity`.
 - The fixed application order is: missing directories and born indexes root-to-leaf; companions in declared order; citable document; mutations in declared order; nearest pre-existing affected index; log last.
 - Binary ingest represents the byte-identical original as a companion, so the original is created before the Markdown stub.
@@ -325,6 +337,9 @@ cache/index and is `None` when no safely parsed partial snapshot is available.
 
 ### Task 1: Extract Deterministic Naming
 
+**Historical execution record:** Complete in `7d72ce0`. The unchecked steps
+below preserve the original TDD instructions; they are not pending work.
+
 **Files:**
 - Create: `src/kb/core/naming.py`
 - Create: `tests/core/test_naming.py`
@@ -431,6 +446,9 @@ Expected: the commit contains only the naming move and its direct test.
 ---
 
 ### Task 2: Add Projected Index Rendering
+
+**Historical execution record:** Complete in `85e4b26`. The unchecked steps
+below preserve the original TDD instructions; they are not pending work.
 
 **Files:**
 - Modify: `src/kb/core/indexing.py`
@@ -629,6 +647,10 @@ git commit -m "refactor(index): support projected write listings"
 ---
 
 ### Task 3: Implement the Shared Write Pipeline
+
+**Historical execution record:** Complete in `174101a` through `0c6c036`. The
+unchecked steps below preserve the original TDD instructions; they are not
+pending work.
 
 **Files:**
 - Create: `src/kb/core/write_pipeline.py`
@@ -1635,6 +1657,11 @@ git commit -m "feat(core): add identity-checked write pipeline"
 
 ### Task 4: Migrate `kb create` to the Pipeline
 
+**Historical execution record:** Complete in `81bc4e5` and `236ea2c`. Commit
+`81bc4e5` used `CLI-7` in its immutable historical subject by mistake; the
+normative create requirement and this plan's traceability are `CLI-13`. The
+unchecked steps below are not pending work.
+
 **Files:**
 - Modify: `src/kb/core/create.py`
 - Create: `tests/test_write_pipeline_architecture.py`
@@ -1824,6 +1851,9 @@ git commit -m "refactor(create): use shared write pipeline (CLI-13)"
 ---
 
 ### Task 5: Migrate and Strengthen `kb ingest`
+
+**Historical execution record:** Complete in `42f8bfd`. The unchecked steps
+below preserve the original TDD instructions; they are not pending work.
 
 **Files:**
 - Modify: `src/kb/core/ingest.py`
@@ -2022,6 +2052,11 @@ git commit -m "refactor(ingest): use safe shared write pipeline (CLI-8)"
 
 ### Task 6: Enforce the Architecture and Complete Regression
 
+**Historical execution record:** Complete in `944ce87`, `715b6d9`, and
+`8df47e4`. The unchecked steps below preserve the original TDD instructions;
+they are not pending work. The downstream input-seam inspection found a deeper
+interface assumption, so its revalidation remains explicitly deferred.
+
 **Files:**
 - Modify: `tests/test_write_pipeline_architecture.py`
 - Modify: `docs/superpowers/plans/2026-07-20-cli-core-input-seam.md` only if an exact file-path reference became stale; do not change its stable interfaces in this task.
@@ -2211,6 +2246,10 @@ into agreement with the normative command specs.
 
 ### Task 10: Classify Destination Context Failures and Pre-render Logs
 
+**Historical execution record:** Complete in `43063f5` and `62c6068`. The
+unchecked steps below preserve the original TDD instructions; they are not
+pending work.
+
 **Files:**
 - Modify: `docs/specs/commands/00-shared.md`
 - Modify: `docs/specs/commands/kb-create.md`
@@ -2308,6 +2347,21 @@ and `git diff --check`.
 
 ---
 
+### Task 12: Pin the First-Open Born-Directory Binding Boundary
+
+**Decision:** The user selected first-open binding after the platform review
+established that `mkdirat` cannot atomically return a created-directory
+descriptor on supported Darwin/Linux systems.
+
+- [x] Document that staging-path creation does not authenticate creator
+      provenance and that first no-follow open plus `fstat` binds identity.
+- [ ] Pin deterministic pre-binding real-directory and symlink substitutions.
+- [ ] Remove authoritative pre-open pathname `stat`; publish and verify only
+      the identity acquired from the opened descriptor.
+- [ ] Verify focused, command, architecture, AC, and full regressions.
+
+---
+
 ## Implementation Completion Checklist
 
 - [x] `slug()` is defined only in `src/kb/core/naming.py` and both commands import it.
@@ -2330,6 +2384,9 @@ and `git diff --check`.
 - [x] Full repository tests and `git diff --check` pass through Task 10.
 - [x] Task 11 iterative traversal, prefix-only projected child acquisition,
       and pre-log final verification are complete.
+- [ ] Task 12 first-open born-directory binding is implemented and verified;
+      all post-binding swaps are rejected and no write can escape the captured
+      root.
 - [ ] Revalidate the downstream CLI/core input-seam plan after this branch is
       integrated. Its source paths exist, but its separate prepared models
       still contain stale `missing_directories` assumptions and are explicitly

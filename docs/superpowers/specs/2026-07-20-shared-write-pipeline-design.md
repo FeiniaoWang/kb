@@ -105,12 +105,26 @@ typed metadata between stages.
 ### Born-directory identity binding
 
 `create_rooted_directory()` creates a high-entropy private staging directory
-under the verified immediate parent, opens and holds that staging directory,
-and captures its identity before publication. It then publishes the held
-directory to the final name with a kernel atomic no-replace primitive
+under the verified immediate parent. Portable Darwin and Linux `mkdirat`
+interfaces do not atomically return a descriptor, so creation of the staging
+pathname does not establish creator provenance. The first successful
+descriptor-relative `open(..., O_DIRECTORY | O_NOFOLLOW)` followed by `fstat`
+is the binding point: its directory identity is held and becomes authoritative.
+A non-symlink real-directory substitution installed after `mkdirat` but before
+that first open may therefore be bound and published. The module promises root
+containment, not authentication that the bound inode was created by this
+process.
+
+At the binding point, a symlink or non-directory fails. The bound directory is
+then published to the final name with a kernel atomic no-replace primitive
 (`renameatx_np(..., RENAME_EXCL)` on Darwin or
 `renameat2(..., RENAME_NOREPLACE)` on Linux), verifies that the final entry is
-the held identity, and only then returns it. Ordinary rename is forbidden
+the bound identity, and only then returns it. Every replacement after binding
+is rejected by identity checks before and after publication, during child
+writes, and during the final pre-log verification. All writes remain
+descriptor-relative beneath the captured root and verified immediate parent,
+so neither a pre-binding substitution nor a later race can redirect bytes
+outside the KB root. Ordinary rename is forbidden
 because it may overwrite an empty late occupant. A platform without a reliable
 descriptor-relative atomic no-replace publication primitive fails safely; a
 failed publication preserves the late occupant. It never path-deletes the
