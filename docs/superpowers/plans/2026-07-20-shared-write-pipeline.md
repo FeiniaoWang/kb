@@ -2355,10 +2355,10 @@ descriptor on supported Darwin/Linux systems.
 
 - [x] Document that staging-path creation does not authenticate creator
       provenance and that first no-follow open plus `fstat` binds identity.
-- [ ] Pin deterministic pre-binding real-directory and symlink substitutions.
-- [ ] Remove authoritative pre-open pathname `stat`; publish and verify only
+- [x] Pin deterministic pre-binding real-directory and symlink substitutions.
+- [x] Remove authoritative pre-open pathname `stat`; publish and verify only
       the identity acquired from the opened descriptor.
-- [ ] Verify focused, command, architecture, AC, and full regressions.
+- [x] Verify focused, command, architecture, AC, and full regressions.
 
 ---
 
@@ -2384,7 +2384,7 @@ descriptor on supported Darwin/Linux systems.
 - [x] Full repository tests and `git diff --check` pass through Task 10.
 - [x] Task 11 iterative traversal, prefix-only projected child acquisition,
       and pre-log final verification are complete.
-- [ ] Task 12 first-open born-directory binding is implemented and verified;
+- [x] Task 12 first-open born-directory binding is implemented and verified;
       all post-binding swaps are rejected and no write can escape the captured
       root.
 - [ ] Revalidate the downstream CLI/core input-seam plan after this branch is
