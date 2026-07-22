@@ -450,6 +450,33 @@ def test_ac81_associative_link_cycles_are_legal(tmp_path) -> None:
     assert codes_by_path["synthetic/second.md"] == ["DG5_NO_SESSION_PARENT"]
 
 
+def test_ac81_mutual_associative_links_with_chat_parents_are_clean(
+    tmp_path,
+) -> None:
+    root = make_kb(tmp_path / "kb")
+    _set_link_types(root, ["references"])
+    make_doc(root, "raw/chats/session.md", _chat_values())
+    make_doc(
+        root,
+        "synthetic/first.md",
+        _valid_synthetic_values(
+            links={"references": ["KB-000002"]},
+        ),
+    )
+    make_doc(
+        root,
+        "synthetic/second.md",
+        _valid_synthetic_values(
+            id="KB-000002",
+            links={"references": ["KB-000001"]},
+        ),
+    )
+
+    findings = validate(ValidateRequest(kb_root=root)).findings
+
+    assert findings == []
+
+
 def test_ac75_charter_document_is_valid_under_governance(tmp_path) -> None:
     root = make_kb(tmp_path / "kb")
     make_doc(
