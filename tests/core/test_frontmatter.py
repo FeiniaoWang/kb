@@ -299,3 +299,101 @@ def test_replace_body_preserves_frontmatter_bytes_and_eol() -> None:
 
     assert changed.split(b"---\r\n", 2)[:2] == original_frontmatter
     assert changed.endswith(b"---\r\nreplacement")
+
+
+def test_replace_keys_preserves_inter_entry_and_trailing_comments() -> None:
+    source = (
+        b"---\n"
+        b"status: draft  # touched comment may go\n"
+        b"# Describes the untouched title.\n"
+        b"title: 'Exact: untouched'  # exact inline comment\n"
+        b"# trailing frontmatter comment\n"
+        b"---\n"
+        b"body\n"
+    )
+    untouched = (
+        b"# Describes the untouched title.\n"
+        b"title: 'Exact: untouched'  # exact inline comment\n"
+        b"# trailing frontmatter comment\n"
+    )
+
+    updated = replace_frontmatter_keys(source, set_keys={"status": "current"})
+    removed = replace_frontmatter_keys(
+        source, set_keys={}, remove_keys=("status",)
+    )
+
+    assert updated == b"---\nstatus: current\n" + untouched + b"---\nbody\n"
+    assert removed == b"---\n" + untouched + b"---\nbody\n"
+
+
+def test_replace_keys_removing_only_key_emits_empty_mapping() -> None:
+    source = b"---\nstatus: draft\n---\nbody\n"
+
+    changed = replace_frontmatter_keys(
+        source, set_keys={}, remove_keys=("status",)
+    )
+
+    assert changed == b"---\n{}\n---\nbody\n"
+    assert yaml.safe_load(changed.split(b"---", 2)[1]) == {}
+
+
+def test_replace_keys_noop_preserves_flow_empty_mapping() -> None:
+    source = b"---\n{}\n---\nbody\n"
+
+    assert replace_frontmatter_keys(source, set_keys={}) == source
+
+
+def test_replace_keys_adds_first_key_to_flow_empty_mapping() -> None:
+    source = b"---\n{}\n---\nbody\n"
+
+    changed = replace_frontmatter_keys(source, set_keys={"status": "draft"})
+
+    assert changed == b"---\nstatus: draft\n---\nbody\n"
+
+
+def test_replace_keys_rejects_non_string_semantic_source_key() -> None:
+    source = b"---\ntrue: value\n---\nbody\n"
+
+    with pytest.raises(ValueError, match="frontmatter keys must be strings"):
+        replace_frontmatter_keys(source, set_keys={})
+
+
+def test_replace_keys_rejects_yaml_equivalent_duplicate_keys() -> None:
+    source = b"---\ntrue: first\nyes: second\n---\nbody\n"
+
+    with pytest.raises(ValueError, match="must occur exactly once"):
+        replace_frontmatter_keys(source, set_keys={"status": "current"})
+
+
+def test_replace_keys_renders_new_top_level_keys_yaml_safely() -> None:
+    changed = replace_frontmatter_keys(SOURCE, set_keys={"true": "new"})
+    frontmatter = yaml.safe_load(changed.split(b"---", 2)[1])
+
+    assert b"'true': new\n" in changed
+    assert frontmatter["true"] == "new"
+    assert True not in frontmatter
+
+
+@pytest.mark.parametrize(
+    "invalid",
+    [
+        {"links": {"references": [1]}},
+        {"links": {1: ["KB-000001"]}},
+        {"links": {"references": ("KB-000001",)}},
+        {"derived_from": ["CHAT-000001", 2]},
+    ],
+)
+def test_replace_keys_rejects_invalid_nested_member_shapes(
+    invalid: dict[str, object],
+) -> None:
+    with pytest.raises(ValueError, match="unsupported frontmatter"):
+        replace_frontmatter_keys(SOURCE, set_keys=invalid)
+
+
+def test_replace_body_handles_closing_delimiter_at_eof() -> None:
+    source = b"---\ntype: spec\n---"
+
+    assert replace_document_body(source, "replacement") == (
+        b"---\ntype: spec\n---\nreplacement"
+    )
+    assert replace_document_body(source, "") == source

@@ -8,6 +8,7 @@ from yaml.nodes import MappingNode, ScalarNode
 from yaml.tokens import FlowEntryToken, FlowMappingEndToken, ScalarToken, Token
 
 from kb.core.model import SyntheticFrontmatter
+from kb.core.scan import _FrontmatterSafeLoader
 
 
 def yaml_scalar(value: str) -> str:
@@ -221,20 +222,21 @@ def _render_structural_scalar(key: str, value: str) -> str:
 
 
 def _render_key_block(key: str, value: object) -> str:
+    rendered_key = yaml_scalar(key)
     if isinstance(value, str):
-        return f"{key}: {_render_structural_scalar(key, value)}"
+        return f"{rendered_key}: {_render_structural_scalar(key, value)}"
     if isinstance(value, list):
         if not all(isinstance(item, str) for item in value):
             raise ValueError(f"unsupported frontmatter list value for {key!r}")
         if not value:
-            return f"{key}: []"
+            return f"{rendered_key}: []"
         return "\n".join(
-            [f"{key}:", *(f"  - {yaml_scalar(item)}" for item in value)]
+            [f"{rendered_key}:", *(f"  - {yaml_scalar(item)}" for item in value)]
         )
     if isinstance(value, dict):
         if not value:
-            return f"{key}: {{}}"
-        lines = [f"{key}:"]
+            return f"{rendered_key}: {{}}"
+        lines = [f"{rendered_key}:"]
         for subkey, items in value.items():
             if not isinstance(subkey, str) or not isinstance(items, list) or not all(
                 isinstance(item, str) for item in items
@@ -252,86 +254,66 @@ def _render_key_block(key: str, value: object) -> str:
     raise ValueError(f"unsupported frontmatter value for {key!r}")
 
 
-def _structural_node_value(node: yaml.Node) -> object:
-    if isinstance(node, ScalarNode):
-        return node.value
-    if isinstance(node, yaml.SequenceNode):
-        return [_structural_node_value(item) for item in node.value]
-    if isinstance(node, MappingNode):
-        value: dict[str, object] = {}
-        for key_node, item_node in node.value:
-            if not isinstance(key_node, ScalarNode):
-                raise ValueError("prepared frontmatter keys must be scalars")
-            if key_node.value in value:
-                raise ValueError(
-                    f"prepared frontmatter key {key_node.value!r} "
-                    "must occur exactly once"
-                )
-            value[key_node.value] = _structural_node_value(item_node)
-        return value
-    raise ValueError("prepared frontmatter contains an unsupported YAML node")
-
-
-def _compose_frontmatter(yaml_text: str, *, prepared: bool = False) -> MappingNode:
+def _load_structural_mapping(
+    yaml_text: str, *, prepared: bool = False
+) -> tuple[MappingNode, list[str], dict[str, object]]:
     label = "prepared frontmatter" if prepared else "frontmatter"
+    loader = _FrontmatterSafeLoader(yaml_text)
     try:
-        node = yaml.compose(yaml_text)
+        node = loader.get_single_node()
+        if not isinstance(node, MappingNode):
+            raise ValueError(f"{label} must be a YAML mapping")
+        semantic_keys: list[object] = []
+        for key_node, _ in node.value:
+            if not isinstance(key_node, ScalarNode):
+                raise ValueError(f"{label} keys must be scalars")
+            semantic_keys.append(loader.construct_object(key_node, deep=True))
+        for position, key in enumerate(semantic_keys):
+            if any(key == previous for previous in semantic_keys[:position]):
+                raise ValueError(f"{label} key {key!r} must occur exactly once")
+        if not all(isinstance(key, str) for key in semantic_keys):
+            raise ValueError(f"{label} keys must be strings")
+        effective = loader.construct_object(node, deep=True)
     except yaml.YAMLError as error:
         raise ValueError(f"{label} is invalid YAML: {error}") from error
-    if not isinstance(node, MappingNode):
+    finally:
+        loader.dispose()
+    if not isinstance(effective, dict):
         raise ValueError(f"{label} must be a YAML mapping")
-    return node
+    return node, [key for key in semantic_keys if isinstance(key, str)], effective
 
 
-def replace_frontmatter_keys(
-    source: bytes,
+def _entry_content_end(
+    yaml_text: str,
+    tokens: list[Token],
+    *,
+    entry_start: int,
+    next_entry_start: int,
+) -> int:
+    syntax_end = max(
+        (
+            token.end_mark.index
+            for token in tokens
+            if entry_start <= token.start_mark.index < next_entry_start
+            and token.start_mark.index < token.end_mark.index <= next_entry_start
+        ),
+        default=entry_start,
+    )
+    if syntax_end and yaml_text[syntax_end - 1 : syntax_end] in {"\n", "\r"}:
+        return syntax_end
+    line_ending = re.search(r"\r\n|\n|\r", yaml_text[syntax_end:next_entry_start])
+    if line_ending is None:
+        return next_entry_start
+    return syntax_end + line_ending.end()
+
+
+def _validate_structural_replacements(
+    yaml_text: str,
     *,
     set_keys: Mapping[str, object],
-    remove_keys: tuple[str, ...] = (),
-) -> bytes:
-    if set(set_keys) & set(remove_keys):
-        raise ValueError("a frontmatter key cannot be both set and removed")
-    text = source.decode("utf-8", errors="strict")
-    start, end, eol = _frontmatter_bounds(text)
-    yaml_text = text[start:end]
-    node = _compose_frontmatter(yaml_text)
-    seen: set[str] = set()
-    for key_node, _ in node.value:
-        if not isinstance(key_node, ScalarNode):
-            raise ValueError("frontmatter keys must be scalars")
-        if key_node.value in seen:
-            raise ValueError(
-                f"frontmatter key {key_node.value!r} must occur exactly once"
-            )
-        seen.add(key_node.value)
-
-    touched = set(set_keys) | set(remove_keys)
-    entries = node.value
-    pieces: list[str] = []
-    if entries:
-        pieces.append(yaml_text[: entries[0][0].start_mark.index])
-    for position, (key_node, _value_node) in enumerate(entries):
-        entry_start = key_node.start_mark.index
-        entry_end = (
-            entries[position + 1][0].start_mark.index
-            if position + 1 < len(entries)
-            else len(yaml_text)
-        )
-        key = key_node.value
-        if key not in touched:
-            pieces.append(yaml_text[entry_start:entry_end])
-        elif key in set_keys:
-            rendered = _render_key_block(key, set_keys[key]).replace("\n", eol)
-            pieces.append(rendered + eol)
-    for key, value in set_keys.items():
-        if key not in seen:
-            rendered = _render_key_block(key, value).replace("\n", eol)
-            pieces.append(rendered + eol)
-    new_yaml = "".join(pieces)
-
-    prepared = _compose_frontmatter(new_yaml, prepared=True)
-    effective = _structural_node_value(prepared)
-    assert isinstance(effective, dict)
+    remove_keys: tuple[str, ...],
+) -> None:
+    _, _, effective = _load_structural_mapping(yaml_text, prepared=True)
     for key, value in set_keys.items():
         if effective.get(key) != value:
             raise ValueError(
@@ -340,6 +322,88 @@ def replace_frontmatter_keys(
     for key in remove_keys:
         if key in effective:
             raise ValueError(f"prepared frontmatter key {key!r} was not removed")
+
+
+def replace_frontmatter_keys(
+    source: bytes,
+    *,
+    set_keys: Mapping[str, object],
+    remove_keys: tuple[str, ...] = (),
+) -> bytes:
+    if not all(isinstance(key, str) for key in set_keys):
+        raise ValueError("replacement frontmatter keys must be strings")
+    if not all(isinstance(key, str) for key in remove_keys):
+        raise ValueError("removed frontmatter keys must be strings")
+    if set(set_keys) & set(remove_keys):
+        raise ValueError("a frontmatter key cannot be both set and removed")
+    text = source.decode("utf-8", errors="strict")
+    start, end, eol = _frontmatter_bounds(text)
+    yaml_text = text[start:end]
+    node, keys, _ = _load_structural_mapping(yaml_text)
+    seen = set(keys)
+    if not set_keys and not remove_keys:
+        return source
+
+    touched = set(set_keys) | set(remove_keys)
+    entries = node.value
+    tokens = list(yaml.scan(yaml_text))
+    if not entries:
+        if not set_keys:
+            return source
+        empty_end = _entry_content_end(
+            yaml_text,
+            tokens,
+            entry_start=node.start_mark.index,
+            next_entry_start=len(yaml_text),
+        )
+        pieces = [yaml_text[: node.start_mark.index]]
+        for key, value in set_keys.items():
+            rendered = _render_key_block(key, value).replace("\n", eol)
+            pieces.append(rendered + eol)
+        pieces.append(yaml_text[empty_end:])
+        new_yaml = "".join(pieces)
+        _validate_structural_replacements(
+            new_yaml, set_keys=set_keys, remove_keys=remove_keys
+        )
+        return (text[:start] + new_yaml + text[end:]).encode("utf-8")
+
+    pieces = [yaml_text[: entries[0][0].start_mark.index]]
+    cursor = entries[0][0].start_mark.index
+    result_is_empty = not (seen - set(remove_keys)) and not set_keys
+    for position, (key_node, _value_node) in enumerate(entries):
+        entry_start = key_node.start_mark.index
+        next_entry_start = (
+            entries[position + 1][0].start_mark.index
+            if position + 1 < len(entries)
+            else len(yaml_text)
+        )
+        entry_end = _entry_content_end(
+            yaml_text,
+            tokens,
+            entry_start=entry_start,
+            next_entry_start=next_entry_start,
+        )
+        pieces.append(yaml_text[cursor:entry_start])
+        key = keys[position]
+        if key not in touched:
+            pieces.append(yaml_text[entry_start:entry_end])
+        elif key in set_keys:
+            rendered = _render_key_block(key, set_keys[key]).replace("\n", eol)
+            pieces.append(rendered + eol)
+        elif result_is_empty and position == 0:
+            pieces.append("{}" + eol)
+        cursor = entry_end
+    trailing = yaml_text[cursor:]
+    for key, value in set_keys.items():
+        if key not in seen:
+            rendered = _render_key_block(key, value).replace("\n", eol)
+            pieces.append(rendered + eol)
+    pieces.append(trailing)
+    new_yaml = "".join(pieces)
+
+    _validate_structural_replacements(
+        new_yaml, set_keys=set_keys, remove_keys=remove_keys
+    )
     return (text[:start] + new_yaml + text[end:]).encode("utf-8")
 
 
