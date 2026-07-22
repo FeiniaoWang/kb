@@ -23,6 +23,7 @@ from kb.core.model import Config, ConfigLoadError, parse_config_bytes
 from kb.core.safeio import (
     FileIdentity,
     _RootedReader,
+    _RootedTreeAcquisitionError,
     RootedContainmentError,
     append_rooted_bytes,
     create_rooted_directory,
@@ -214,10 +215,26 @@ def load_write_context(kb_root: Path | None) -> WriteContext:
 def _snapshot_markdown_prefixes(reader: _RootedReader) -> dict[Path, bytes]:
     files: dict[Path, bytes] = {}
     unsafe: list[tuple[int, str, Path]] = []
-    for entry in reader.acquire_tree_files(
-        suffix=".md",
-        acquire=read_frontmatter_prefix,
-    ):
+    try:
+        entries = reader.acquire_tree_files(
+            suffix=".md",
+            acquire=read_frontmatter_prefix,
+        )
+    except _RootedTreeAcquisitionError as error:
+        files.update(
+            {
+                entry.path: entry.content
+                for entry in error.acquired
+                if entry.kind == "file" and entry.content is not None
+            }
+        )
+        raise _MarkdownSnapshotError(
+            error.errno or errno.EIO,
+            error.strerror or str(error.cause),
+            error.path,
+            files,
+        ) from error
+    for entry in entries:
         if entry.kind == "file":
             assert entry.content is not None
             files[entry.path] = entry.content
@@ -328,21 +345,53 @@ def _render_born_indexes(
         raise ValueError("planned document parent does not match write destination")
     contents: dict[Path, bytes] = {}
     for offset, directory in enumerate(reversed(missing)):
+        index_path = directory / "index.md"
         relative = directory.as_posix()
-        if offset == 0:
-            listing = "## Files\n" + document_listing
-        else:
-            child = missing[len(missing) - offset]
-            child_relative = child.as_posix()
-            listing = "## Subdirectories\n" + subdirectory_listing_line(
-                child.name,
-                f"Documents under {child_relative}/.",
+        try:
+            if offset == 0:
+                listing = "## Files\n" + document_listing
+            else:
+                child = missing[len(missing) - offset]
+                child_relative = child.as_posix()
+                listing = "## Subdirectories\n" + subdirectory_listing_line(
+                    child.name,
+                    f"Documents under {child_relative}/.",
+                )
+            rendered = render_index(
+                directory.name,
+                f"Documents under {relative}/.",
+                listing,
             )
-        contents[directory / "index.md"] = render_index(
-            directory.name,
-            f"Documents under {relative}/.",
-            listing,
-        ).encode("utf-8")
+            if not isinstance(rendered, str):
+                raise TypeError("born index renderer must return text")
+        except (TypeError, ValueError) as error:
+            cause = OSError(
+                errno.EINVAL,
+                "born index could not be formatted",
+                index_path,
+            )
+            raise WriteFailure(
+                "preflight",
+                "render",
+                "index",
+                index_path,
+                cause,
+            ) from error
+        try:
+            contents[index_path] = rendered.encode("utf-8")
+        except UnicodeEncodeError as error:
+            cause = OSError(
+                errno.EILSEQ,
+                "born index is not valid UTF-8",
+                index_path,
+            )
+            raise WriteFailure(
+                "preflight",
+                "render",
+                "index",
+                index_path,
+                cause,
+            ) from error
     return {
         directory / "index.md": contents[directory / "index.md"]
         for directory in missing

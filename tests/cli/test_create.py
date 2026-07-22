@@ -1100,6 +1100,35 @@ def test_unencodable_actor_is_stable_create_io_without_any_mutation(
     assert snapshot(initialized_kb) == before
 
 
+@pytest.mark.parametrize("json_output", [False, True], ids=["text", "json"])
+def test_unencodable_born_destination_is_stable_create_io_without_mutation(
+    json_output,
+    initialized_kb,
+    invoke_create,
+) -> None:
+    add_chat(initialized_kb)
+    before = snapshot(initialized_kb)
+    destination = os.fsdecode(b"bad-\xff")
+    arguments = ["--dest", destination]
+    if json_output:
+        arguments.append("--json")
+
+    result = invoke_valid(invoke_create, initialized_kb, *arguments)
+
+    assert result.exit_code == 2
+    assert isinstance(result.exception, SystemExit)
+    if json_output:
+        error = json.loads(result.stdout)["error"]
+        assert error["code"] == "E_CREATE_IO"
+        assert "UTF-8" in error["message"]
+        assert result.stderr == ""
+    else:
+        assert "E_CREATE_IO" in result.stderr
+        assert "UTF-8" in result.stderr
+        assert result.stdout == ""
+    assert snapshot(initialized_kb) == before
+
+
 def test_ac48_missing_log_is_recreated_without_initialized_entry(
     initialized_kb, invoke_create
 ) -> None:
@@ -1668,6 +1697,69 @@ def test_symlinked_supersession_target_outside_is_invalid_without_writes(
     assert snapshot(initialized_kb) == kb_before
     assert snapshot(outside) == outside_before
     assert target.is_symlink() and os.readlink(target) == link_target
+
+
+@pytest.mark.parametrize("json_output", [False, True], ids=["text", "json"])
+def test_supersession_path_race_keeps_exact_invalid_envelope_and_no_cli_writes(
+    json_output,
+    tmp_path,
+    initialized_kb,
+    invoke_create,
+    monkeypatch,
+) -> None:
+    import kb.core.safeio as safeio
+
+    add_chat(initialized_kb)
+    target = add_synthetic(initialized_kb)
+    target_before = target.read_bytes()
+    outside = tmp_path / "outside-target.md"
+    outside.write_bytes(b"outside")
+    log_before = (initialized_kb / "log.md").read_bytes()
+    index_before = (initialized_kb / "synthetic/index.md").read_bytes()
+    real_open = safeio.os.open
+    injected = False
+
+    def replace_listed_target(path, flags, mode=0o777, *, dir_fd=None):
+        nonlocal injected
+        if path == "old.md" and dir_fd is not None and not injected:
+            injected = True
+            os.rename(
+                "old.md",
+                "old-original.md",
+                src_dir_fd=dir_fd,
+                dst_dir_fd=dir_fd,
+            )
+            os.symlink(outside, "old.md", dir_fd=dir_fd)
+        return real_open(path, flags, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr(safeio.os, "open", replace_listed_target)
+    arguments = [
+        "--type", "spec",
+        "--title", "Replacement",
+        "--description", "Replacement.",
+        "--supersedes", "synthetic/old.md",
+    ]
+    if json_output:
+        arguments.append("--json")
+
+    result = invoke_create(initialized_kb, *arguments)
+
+    assert injected
+    assert result.exit_code == 1
+    assert isinstance(result.exception, SystemExit)
+    if json_output:
+        error = json.loads(result.stdout)["error"]
+        assert error["code"] == "E_CREATE_SUPERSEDES_INVALID"
+        assert result.stderr == ""
+    else:
+        assert "E_CREATE_SUPERSEDES_INVALID" in result.stderr
+        assert result.stdout == ""
+    assert (initialized_kb / "synthetic/old-original.md").read_bytes() == target_before
+    assert target.is_symlink() and os.readlink(target) == str(outside)
+    assert outside.read_bytes() == b"outside"
+    assert not (initialized_kb / "synthetic/replacement.md").exists()
+    assert (initialized_kb / "synthetic/index.md").read_bytes() == index_before
+    assert (initialized_kb / "log.md").read_bytes() == log_before
 
 
 @pytest.mark.parametrize("json_output", [False, True], ids=["text", "json"])

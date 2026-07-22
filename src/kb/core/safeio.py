@@ -86,6 +86,25 @@ class RootedContainmentError(OSError):
     """A rooted operation could no longer prove its acquisition boundary."""
 
 
+class _RootedTreeAcquisitionError(OSError):
+    """A tree acquisition failed after zero or more entries were bound."""
+
+    def __init__(
+        self,
+        cause: OSError,
+        path: Path,
+        acquired: tuple[RootedAcquiredEntry, ...],
+    ) -> None:
+        super().__init__(
+            cause.errno or errno.EIO,
+            cause.strerror or str(cause),
+            path,
+        )
+        self.cause = cause
+        self.path = path
+        self.acquired = acquired
+
+
 def _identity(status: os.stat_result) -> FileIdentity:
     return FileIdentity(device=status.st_dev, inode=status.st_ino)
 
@@ -333,8 +352,8 @@ class _RootedReader:
         acquire: Callable[[BinaryIO], bytes],
     ) -> tuple[RootedAcquiredEntry, ...]:
         """Acquire matching files with iterative, descriptor-relative DFS."""
-        self.verify_root()
-        descriptor = os.dup(self._descriptor)
+        descriptor: int | None = None
+        failure_path = Path()
         parts: tuple[str, ...] = ()
         expected = self.identity
         frames: list[
@@ -348,15 +367,19 @@ class _RootedReader:
         ] = []
         acquired: list[RootedAcquiredEntry] = []
         try:
+            self.verify_root()
+            descriptor = os.dup(self._descriptor)
             listing = _list_open_directory(descriptor, expected, Path())
             entries = listing.entries
             offset = 0
             while True:
+                failure_path = Path()
                 self.verify_root()
                 if offset < len(entries):
                     entry = entries[offset]
                     offset += 1
                     if entry.kind == "directory":
+                        failure_path = Path(*parts, entry.name)
                         child = os.open(
                             entry.name,
                             _directory_flags(),
@@ -400,6 +423,7 @@ class _RootedReader:
                             )
                         )
                         continue
+                    failure_path = relative
                     file_descriptor = os.open(
                         entry.name,
                         os.O_RDONLY | os.O_NOFOLLOW,
@@ -419,8 +443,6 @@ class _RootedReader:
                             content = acquire(stream)
                     finally:
                         os.close(file_descriptor)
-                    if _identity(os.fstat(descriptor)) != listing.identity:
-                        raise _stale_error(Path(*parts))
                     acquired.append(
                         RootedAcquiredEntry(
                             path=relative,
@@ -428,7 +450,11 @@ class _RootedReader:
                             content=content,
                         )
                     )
+                    failure_path = Path(*parts)
+                    if _identity(os.fstat(descriptor)) != listing.identity:
+                        raise _stale_error(Path(*parts))
                     continue
+                failure_path = Path(*parts)
                 if _identity(os.fstat(descriptor)) != expected:
                     raise _stale_error(Path(*parts))
                 if not frames:
@@ -440,6 +466,7 @@ class _RootedReader:
                     parent_offset,
                     entered_child,
                 ) = frames.pop()
+                failure_path = Path(*parent_parts)
                 parent = os.open("..", _directory_flags(), dir_fd=descriptor)
                 try:
                     if _identity(os.fstat(parent)) != parent_identity:
@@ -453,6 +480,10 @@ class _RootedReader:
                         not stat.S_ISDIR(child_status.st_mode)
                         or _identity(child_status) != entered_child.identity
                     ):
+                        failure_path = Path(
+                            *parent_parts,
+                            entered_child.name,
+                        )
                         raise _stale_error(
                             Path(*parent_parts, entered_child.name)
                         )
@@ -469,10 +500,20 @@ class _RootedReader:
                 )
                 entries = parent_entries
                 offset = parent_offset
+            failure_path = Path()
             self.verify_root()
             return tuple(acquired)
+        except _RootedTreeAcquisitionError:
+            raise
+        except OSError as error:
+            raise _RootedTreeAcquisitionError(
+                error,
+                failure_path,
+                tuple(acquired),
+            ) from error
         finally:
-            os.close(descriptor)
+            if descriptor is not None:
+                os.close(descriptor)
 
     def read_file(
         self,

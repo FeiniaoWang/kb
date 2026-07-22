@@ -229,9 +229,11 @@ def _unsafe_path_is_supersedes_target(
     error: WriteFailure,
     ref: str | None,
 ) -> bool:
-    if ref is None or error.snapshot_kb is None:
+    if ref is None:
         return False
     if ID_REF_PATTERN.fullmatch(ref):
+        if error.snapshot_kb is None:
+            return False
         document = resolve_ref(error.snapshot_kb, ref)
         return document is not None and document.path == error.path
     candidate = PurePosixPath(ref)

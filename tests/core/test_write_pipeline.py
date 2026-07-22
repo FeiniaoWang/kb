@@ -420,6 +420,48 @@ def test_load_context_documents_keep_body_access_lazy(tmp_path) -> None:
     assert context.kb.by_id["KB-000007"].body == "Body\ntwo\n"
 
 
+def test_load_context_failure_keeps_exact_path_and_partial_snapshot(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    import kb.core.safeio as safeio
+
+    root = initialized(tmp_path)
+    target = root / "synthetic/a-target.md"
+    target.write_bytes(document_bytes("KB-000007", "Target", "Target."))
+    failing = root / "synthetic/z-failing.md"
+    failing.write_bytes(document_bytes("KB-000008", "Failing", "Failing."))
+    outside = tmp_path / "outside.md"
+    outside.write_bytes(b"outside")
+    real_open = safeio.os.open
+    injected = False
+
+    def replace_later_file(path, flags, mode=0o777, *, dir_fd=None):
+        nonlocal injected
+        if path == "z-failing.md" and dir_fd is not None and not injected:
+            injected = True
+            os.rename(
+                "z-failing.md",
+                "z-original.md",
+                src_dir_fd=dir_fd,
+                dst_dir_fd=dir_fd,
+            )
+            os.symlink(outside, "z-failing.md", dir_fd=dir_fd)
+        return real_open(path, flags, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr(safeio.os, "open", replace_later_file)
+
+    with pytest.raises(WriteFailure) as raised:
+        load_write_context(root)
+
+    assert injected
+    assert raised.value.path == Path("synthetic/z-failing.md")
+    assert raised.value.snapshot_kb is not None
+    assert raised.value.snapshot_kb.by_id["KB-000007"].path == Path(
+        "synthetic/a-target.md"
+    )
+
+
 def test_load_context_unclosed_frontmatter_reads_to_eof_deterministically(
     tmp_path,
     monkeypatch,
@@ -783,6 +825,71 @@ def test_prepare_wraps_log_formatting_failure_as_typed_preflight_failure(
     assert raised.value.operation == "render"
     assert raised.value.role == "log"
     assert raised.value.path == Path("log.md")
+    assert type(raised.value.cause) is OSError
+    assert raised.value.cause.errno == errno.EINVAL
+    assert "formatted" in str(raised.value.cause)
+    assert {path: path.read_bytes() for path in root.rglob("*") if path.is_file()} == before
+
+
+def test_prepare_wraps_unencodable_born_index_as_typed_preflight_failure(
+    tmp_path,
+) -> None:
+    root = initialized(tmp_path)
+    before = {path: path.read_bytes() for path in root.rglob("*") if path.is_file()}
+    born_index = Path("synthetic/bad-\udcff/index.md")
+
+    with pytest.raises(WriteFailure) as raised:
+        prepare_write(
+            load_write_context(root),
+            WriteIntent(
+                birth=DocumentBirth(
+                    path=Path("synthetic/bad-\udcff/planned.md"),
+                    content=document_bytes(),
+                ),
+                log_entry=log_entry(),
+            ),
+        )
+
+    assert raised.value.phase == "preflight"
+    assert raised.value.operation == "render"
+    assert raised.value.role == "index"
+    assert raised.value.path == born_index
+    assert type(raised.value.cause) is OSError
+    assert raised.value.cause.errno == errno.EILSEQ
+    assert "UTF-8" in str(raised.value.cause)
+    assert {path: path.read_bytes() for path in root.rglob("*") if path.is_file()} == before
+
+
+def test_prepare_wraps_born_index_formatting_failure_as_typed_preflight_failure(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    import kb.core.write_pipeline as pipeline
+
+    root = initialized(tmp_path)
+    before = {path: path.read_bytes() for path in root.rglob("*") if path.is_file()}
+
+    def fail_born_index(*_args, **_kwargs):
+        raise ValueError("born index formatting failed")
+
+    monkeypatch.setattr(pipeline, "render_index", fail_born_index)
+
+    with pytest.raises(WriteFailure) as raised:
+        prepare_write(
+            load_write_context(root),
+            WriteIntent(
+                birth=DocumentBirth(
+                    path=Path("synthetic/new/planned.md"),
+                    content=document_bytes(),
+                ),
+                log_entry=log_entry(),
+            ),
+        )
+
+    assert raised.value.phase == "preflight"
+    assert raised.value.operation == "render"
+    assert raised.value.role == "index"
+    assert raised.value.path == Path("synthetic/new/index.md")
     assert type(raised.value.cause) is OSError
     assert raised.value.cause.errno == errno.EINVAL
     assert "formatted" in str(raised.value.cause)

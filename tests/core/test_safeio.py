@@ -786,3 +786,43 @@ def test_rooted_directory_birth_rechecks_emptiness_before_publication(
     assert not (root / "born").exists()
     assert staging_name is not None
     assert (root / staging_name / "late.md").is_file()
+
+
+def test_tree_acquisition_failure_preserves_exact_path_and_prior_files(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    root = tmp_path / "root"
+    outside = tmp_path / "outside.md"
+    root.mkdir()
+    (root / "a.md").write_bytes(b"a prefix")
+    (root / "b.md").write_bytes(b"b prefix")
+    outside.write_bytes(b"outside")
+    real_open = safeio.os.open
+    injected = False
+
+    def replace_listed_file(path, flags, mode=0o777, *, dir_fd=None):
+        nonlocal injected
+        if path == "b.md" and dir_fd is not None and not injected:
+            injected = True
+            os.rename(
+                "b.md",
+                "b-original.md",
+                src_dir_fd=dir_fd,
+                dst_dir_fd=dir_fd,
+            )
+            os.symlink(outside, "b.md", dir_fd=dir_fd)
+        return real_open(path, flags, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr(safeio.os, "open", replace_listed_file)
+
+    with safeio.rooted_reader(root) as reader:
+        with pytest.raises(safeio._RootedTreeAcquisitionError) as raised:
+            reader.acquire_tree_files(suffix=".md", acquire=lambda stream: stream.read())
+
+    assert injected
+    assert raised.value.path == Path("b.md")
+    assert raised.value.cause.errno in {errno.ELOOP, errno.EMLINK}
+    assert [(entry.path, entry.content) for entry in raised.value.acquired] == [
+        (Path("a.md"), b"a prefix")
+    ]

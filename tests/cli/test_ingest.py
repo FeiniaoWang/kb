@@ -1125,6 +1125,91 @@ def test_md_named_destination_link_found_by_context_is_exact_destination_error(
     assert source.read_bytes() == source_before
 
 
+@pytest.mark.parametrize("json_output", [False, True], ids=["text", "json"])
+def test_requested_destination_directory_race_keeps_exact_invalid_envelope(
+    json_output,
+    initialized_kb,
+    tmp_path,
+    invoke_ingest,
+    monkeypatch,
+) -> None:
+    import kb.core.ingest as ingest_core
+    import kb.core.safeio as safeio
+
+    source = tmp_path / "race-source.md"
+    source.write_bytes(b"source\n")
+    raced = initialized_kb / "raw/sources/raced.md"
+    raced.mkdir()
+    raced.joinpath("index.md").write_text(
+        "---\ntype: index\ndescription: Raced.\n---\n# Raced\n",
+        encoding="utf-8",
+    )
+    sources_status = (initialized_kb / "raw/sources").stat()
+    outside = tmp_path / "outside-destination"
+    outside.mkdir()
+    sentinel = outside / "sentinel.bin"
+    sentinel.write_bytes(b"outside")
+    log_before = (initialized_kb / "log.md").read_bytes()
+    class_index_before = (initialized_kb / "raw/sources/index.md").read_bytes()
+    source_before = source.read_bytes()
+    real_open = safeio.os.open
+    injected = False
+    acquired: list[str | None] = []
+
+    def replace_listed_destination(path, flags, mode=0o777, *, dir_fd=None):
+        nonlocal injected
+        if path == "raced.md" and dir_fd is not None and not injected:
+            parent_status = os.fstat(dir_fd)
+            if (
+                parent_status.st_dev == sources_status.st_dev
+                and parent_status.st_ino == sources_status.st_ino
+            ):
+                injected = True
+                os.rename(
+                    "raced.md",
+                    "raced-original",
+                    src_dir_fd=dir_fd,
+                    dst_dir_fd=dir_fd,
+                )
+                os.symlink(outside, "raced.md", dir_fd=dir_fd)
+        return real_open(path, flags, mode, dir_fd=dir_fd)
+
+    def forbidden_adapter(value: str | None):
+        acquired.append(value)
+        raise AssertionError("context failure must precede adapter acquisition")
+
+    monkeypatch.setattr(safeio.os, "open", replace_listed_destination)
+    monkeypatch.setitem(ingest_core.ADAPTERS, "file", forbidden_adapter)
+    arguments = ["--dest", "raced.md/child"]
+    if json_output:
+        arguments.append("--json")
+
+    result = ingest_file(
+        invoke_ingest,
+        initialized_kb,
+        source,
+        *arguments,
+    )
+
+    assert injected
+    assert result.exit_code == 2
+    assert isinstance(result.exception, SystemExit)
+    if json_output:
+        error = json.loads(result.stdout)["error"]
+        assert error["code"] == "E_INGEST_DEST_INVALID"
+        assert result.stderr == ""
+    else:
+        assert "E_INGEST_DEST_INVALID" in result.stderr
+        assert result.stdout == ""
+    assert acquired == []
+    assert source.read_bytes() == source_before
+    assert raced.is_symlink() and os.readlink(raced) == str(outside)
+    assert (initialized_kb / "raw/sources/raced-original/index.md").is_file()
+    assert sentinel.read_bytes() == b"outside"
+    assert (initialized_kb / "raw/sources/index.md").read_bytes() == class_index_before
+    assert (initialized_kb / "log.md").read_bytes() == log_before
+
+
 @pytest.mark.parametrize(
     ("arguments", "absent_code"),
     [
@@ -1618,6 +1703,44 @@ def test_surrogate_escaped_source_origin_is_stable_ingest_io_without_mutation(
 
     monkeypatch.setitem(ingest_core.ADAPTERS, "file", surrogate_payload)
     arguments = ["--title", "Evidence"]
+    if json_output:
+        arguments.append("--json")
+
+    result = ingest_file(
+        invoke_ingest,
+        initialized_kb,
+        source,
+        *arguments,
+    )
+
+    assert result.exit_code == 2
+    assert isinstance(result.exception, SystemExit)
+    if json_output:
+        error = json.loads(result.stdout)["error"]
+        assert error["code"] == "E_INGEST_IO"
+        assert "UTF-8" in error["message"]
+        assert result.stderr == ""
+    else:
+        assert "E_INGEST_IO" in result.stderr
+        assert "UTF-8" in result.stderr
+        assert result.stdout == ""
+    assert snapshot(initialized_kb) == before
+    assert source.read_bytes() == source_before
+
+
+@pytest.mark.parametrize("json_output", [False, True], ids=["text", "json"])
+def test_unencodable_born_destination_is_stable_ingest_io_without_mutation(
+    json_output,
+    initialized_kb,
+    tmp_path,
+    invoke_ingest,
+) -> None:
+    source = tmp_path / "adapter-source.md"
+    source.write_bytes(b"evidence\n")
+    source_before = source.read_bytes()
+    before = snapshot(initialized_kb)
+    destination = os.fsdecode(b"bad-\xff")
+    arguments = ["--dest", destination]
     if json_output:
         arguments.append("--json")
 
