@@ -618,6 +618,16 @@ def create_rooted_directory(
                     relative,
                 )
             bound_identity = _identity(status)
+            staging_status = os.stat(
+                staging_name,
+                dir_fd=parent_descriptor,
+                follow_symlinks=False,
+            )
+            if (
+                not stat.S_ISDIR(staging_status.st_mode)
+                or _identity(staging_status) != bound_identity
+            ):
+                raise _stale_error(relative)
             _publish_directory_exclusive(
                 parent_descriptor,
                 staging_name,

@@ -469,8 +469,10 @@ def test_rooted_directory_birth_opens_before_inspecting_staging_path(
     root.mkdir()
     root_identity = inspect_root(root)
     real_mkdir = safeio.os.mkdir
+    real_open = safeio.os.open
     real_stat = safeio.os.stat
     replacement_identity = None
+    staging_opened = False
 
     def replace_staging_before_mkdir_returns(path, mode=0o777, *, dir_fd=None):
         nonlocal replacement_identity
@@ -489,12 +491,24 @@ def test_rooted_directory_birth_opens_before_inspecting_staging_path(
                 inode=status.st_ino,
             )
 
-    def reject_pre_open_staging_stat(path, *, dir_fd=None, follow_symlinks=True):
+    def record_staging_open(path, flags, mode=0o777, *, dir_fd=None):
+        nonlocal staging_opened
+        descriptor = real_open(path, flags, mode, dir_fd=dir_fd)
         if isinstance(path, str) and path.startswith(".kb-born-"):
+            staging_opened = True
+        return descriptor
+
+    def reject_pre_open_staging_stat(path, *, dir_fd=None, follow_symlinks=True):
+        if (
+            isinstance(path, str)
+            and path.startswith(".kb-born-")
+            and not staging_opened
+        ):
             raise AssertionError("staging path was inspected before first open")
         return real_stat(path, dir_fd=dir_fd, follow_symlinks=follow_symlinks)
 
     monkeypatch.setattr(safeio.os, "mkdir", replace_staging_before_mkdir_returns)
+    monkeypatch.setattr(safeio.os, "open", record_staging_open)
     monkeypatch.setattr(safeio.os, "stat", reject_pre_open_staging_stat)
 
     bound_identity = create_rooted_directory(root, Path("born"), root_identity)
@@ -601,3 +615,50 @@ def test_rooted_directory_birth_rejects_real_swap_after_binding(
     assert len(retained) == 1
     assert retained[0].is_dir()
     assert not any(retained[0].iterdir())
+
+
+def test_rooted_directory_birth_rejects_swap_before_publication(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    root = tmp_path / "kb"
+    root.mkdir()
+    root_identity = inspect_root(root)
+    real_stat = safeio.os.stat
+    injected = False
+
+    def replace_bound_staging_at_prepublication_check(
+        path,
+        *,
+        dir_fd=None,
+        follow_symlinks=True,
+    ):
+        nonlocal injected
+        is_staging = isinstance(path, str) and path.startswith(".kb-born-")
+        if is_staging and not injected:
+            injected = True
+            os.rename(
+                path,
+                f"{path}-bound",
+                src_dir_fd=dir_fd,
+                dst_dir_fd=dir_fd,
+            )
+            os.mkdir(path, dir_fd=dir_fd)
+        return real_stat(path, dir_fd=dir_fd, follow_symlinks=follow_symlinks)
+
+    monkeypatch.setattr(
+        safeio.os,
+        "stat",
+        replace_bound_staging_at_prepublication_check,
+    )
+
+    with pytest.raises(OSError, match="identity changed"):
+        create_rooted_directory(root, Path("born"), root_identity)
+
+    assert injected
+    assert not (root / "born").exists()
+    staging_entries = [
+        path for path in root.iterdir() if path.name.startswith(".kb-born-")
+    ]
+    assert len(staging_entries) == 2
+    assert all(path.is_dir() and not any(path.iterdir()) for path in staging_entries)
