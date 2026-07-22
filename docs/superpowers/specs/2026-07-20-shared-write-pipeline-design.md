@@ -145,9 +145,10 @@ leaves no staging pathname.
 During `apply_write()`, every returned born directory identity is retained as
 immutable local state and is required as the expected immediate-parent
 identity for its own `index.md`, the next child directory, and every companion
-or citable document born beneath it. A replacement installed before, during,
-or after publication is therefore never trusted for a later pipeline write.
-Every born directory is identity-verified again before success is returned.
+or citable document born beneath it. A replacement installed after binding,
+whether before, during, or after publication, is therefore never trusted for a
+later pipeline write. Every born directory is identity-verified again before
+success is returned.
 
 Only identities cross individual rooted operations. Parent and staging
 descriptors remain operation-local and are closed before the next pipeline
