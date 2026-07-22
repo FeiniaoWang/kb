@@ -601,7 +601,6 @@ def test_ac27_superseded_directory_index_is_not_regenerated(
 def test_ac28_reserved_synthetic_types_are_rejected_verbatim(
     reserved, initialized_kb, invoke_create
 ) -> None:
-    add_chat(initialized_kb)
     before = snapshot(initialized_kb)
     result = invoke_create(
         initialized_kb,
