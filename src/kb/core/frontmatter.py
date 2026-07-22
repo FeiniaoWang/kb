@@ -210,3 +210,145 @@ def replace_frontmatter_scalars(
         yaml_text = yaml_text[:value_start] + replacement + yaml_text[value_end:]
     _validate_prepared_frontmatter(yaml_text, replacements)
     return (text[:start] + yaml_text + text[end:]).encode("utf-8")
+
+
+def _render_structural_scalar(key: str, value: str) -> str:
+    if key in {"timestamp", "last_human_touch"} and re.fullmatch(
+        r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z", value
+    ):
+        return value
+    return yaml_scalar(value)
+
+
+def _render_key_block(key: str, value: object) -> str:
+    if isinstance(value, str):
+        return f"{key}: {_render_structural_scalar(key, value)}"
+    if isinstance(value, list):
+        if not all(isinstance(item, str) for item in value):
+            raise ValueError(f"unsupported frontmatter list value for {key!r}")
+        if not value:
+            return f"{key}: []"
+        return "\n".join(
+            [f"{key}:", *(f"  - {yaml_scalar(item)}" for item in value)]
+        )
+    if isinstance(value, dict):
+        if not value:
+            return f"{key}: {{}}"
+        lines = [f"{key}:"]
+        for subkey, items in value.items():
+            if not isinstance(subkey, str) or not isinstance(items, list) or not all(
+                isinstance(item, str) for item in items
+            ):
+                raise ValueError(
+                    f"unsupported frontmatter mapping value for {key!r}"
+                )
+            rendered_subkey = yaml_scalar(subkey)
+            if not items:
+                lines.append(f"  {rendered_subkey}: []")
+                continue
+            lines.append(f"  {rendered_subkey}:")
+            lines.extend(f"    - {yaml_scalar(item)}" for item in items)
+        return "\n".join(lines)
+    raise ValueError(f"unsupported frontmatter value for {key!r}")
+
+
+def _structural_node_value(node: yaml.Node) -> object:
+    if isinstance(node, ScalarNode):
+        return node.value
+    if isinstance(node, yaml.SequenceNode):
+        return [_structural_node_value(item) for item in node.value]
+    if isinstance(node, MappingNode):
+        value: dict[str, object] = {}
+        for key_node, item_node in node.value:
+            if not isinstance(key_node, ScalarNode):
+                raise ValueError("prepared frontmatter keys must be scalars")
+            if key_node.value in value:
+                raise ValueError(
+                    f"prepared frontmatter key {key_node.value!r} "
+                    "must occur exactly once"
+                )
+            value[key_node.value] = _structural_node_value(item_node)
+        return value
+    raise ValueError("prepared frontmatter contains an unsupported YAML node")
+
+
+def _compose_frontmatter(yaml_text: str, *, prepared: bool = False) -> MappingNode:
+    label = "prepared frontmatter" if prepared else "frontmatter"
+    try:
+        node = yaml.compose(yaml_text)
+    except yaml.YAMLError as error:
+        raise ValueError(f"{label} is invalid YAML: {error}") from error
+    if not isinstance(node, MappingNode):
+        raise ValueError(f"{label} must be a YAML mapping")
+    return node
+
+
+def replace_frontmatter_keys(
+    source: bytes,
+    *,
+    set_keys: Mapping[str, object],
+    remove_keys: tuple[str, ...] = (),
+) -> bytes:
+    if set(set_keys) & set(remove_keys):
+        raise ValueError("a frontmatter key cannot be both set and removed")
+    text = source.decode("utf-8", errors="strict")
+    start, end, eol = _frontmatter_bounds(text)
+    yaml_text = text[start:end]
+    node = _compose_frontmatter(yaml_text)
+    seen: set[str] = set()
+    for key_node, _ in node.value:
+        if not isinstance(key_node, ScalarNode):
+            raise ValueError("frontmatter keys must be scalars")
+        if key_node.value in seen:
+            raise ValueError(
+                f"frontmatter key {key_node.value!r} must occur exactly once"
+            )
+        seen.add(key_node.value)
+
+    touched = set(set_keys) | set(remove_keys)
+    entries = node.value
+    pieces: list[str] = []
+    if entries:
+        pieces.append(yaml_text[: entries[0][0].start_mark.index])
+    for position, (key_node, _value_node) in enumerate(entries):
+        entry_start = key_node.start_mark.index
+        entry_end = (
+            entries[position + 1][0].start_mark.index
+            if position + 1 < len(entries)
+            else len(yaml_text)
+        )
+        key = key_node.value
+        if key not in touched:
+            pieces.append(yaml_text[entry_start:entry_end])
+        elif key in set_keys:
+            rendered = _render_key_block(key, set_keys[key]).replace("\n", eol)
+            pieces.append(rendered + eol)
+    for key, value in set_keys.items():
+        if key not in seen:
+            rendered = _render_key_block(key, value).replace("\n", eol)
+            pieces.append(rendered + eol)
+    new_yaml = "".join(pieces)
+
+    prepared = _compose_frontmatter(new_yaml, prepared=True)
+    effective = _structural_node_value(prepared)
+    assert isinstance(effective, dict)
+    for key, value in set_keys.items():
+        if effective.get(key) != value:
+            raise ValueError(
+                f"prepared frontmatter value for {key!r} does not match replacement"
+            )
+    for key in remove_keys:
+        if key in effective:
+            raise ValueError(f"prepared frontmatter key {key!r} was not removed")
+    return (text[:start] + new_yaml + text[end:]).encode("utf-8")
+
+
+def replace_document_body(source: bytes, body: str) -> bytes:
+    text = source.decode("utf-8", errors="strict")
+    _, end, eol = _frontmatter_bounds(text)
+    closing = re.match(r"---(?:\r\n|\n|\r)?", text[end:])
+    assert closing is not None
+    head = text[: end + closing.end()]
+    if body and not head.endswith(("\n", "\r")):
+        head += eol
+    return (head + body).encode("utf-8")
