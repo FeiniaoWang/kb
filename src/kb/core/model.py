@@ -41,7 +41,7 @@ class GovernanceFrontmatter(BaseModel):
     model_config = ConfigDict(extra="allow")
 
     id: str
-    type: Literal["conventions", "kb-config", "health"]
+    type: Literal["charter", "conventions", "kb-config", "health"]
     title: str
     description: str
 
@@ -79,6 +79,8 @@ class SyntheticFrontmatter(BaseModel):
     tags: list[str] | None = None
     supersedes: str | None = None
     instructions: str | None = None
+    links: dict[str, list[str]] | None = None
+    pending_upstream: list[str] | None = None
 
 
 class Document(BaseModel):
@@ -136,6 +138,7 @@ class Config(BaseModel):
     )
     types: list[str] = Field(default_factory=list)
     tags: list[str] = Field(default_factory=list)
+    link_types: list[str] = Field(default_factory=list)
     id_prefixes: dict[str, str] = Field(default_factory=_default_prefixes)
     propagation_auto_safe: list[str] = Field(default_factory=list)
 

@@ -5,7 +5,13 @@ import pytest
 
 from kb.core.ids import next_id
 from kb.core.model import DocClass
-from kb.core.scan import RootDiscoveryError, discover_root, resolve_ref, scan
+from kb.core.scan import (
+    RootDiscoveryError,
+    discover_root,
+    doc_class_from_type,
+    resolve_ref,
+    scan,
+)
 
 
 class ObservedBytesIO(io.BytesIO):
@@ -67,6 +73,10 @@ def test_scan_classifies_from_type_and_excludes_log(tmp_path) -> None:
     ]
     assert "RAW-000001" in kb.by_id
     assert all(doc.path != Path("log.md") for doc in kb.documents)
+
+
+def test_charter_type_classifies_as_governance():
+    assert doc_class_from_type("charter") is DocClass.GOVERNANCE
 
 
 def test_scan_retains_parse_failures_and_missing_type_in_complete_file_view(tmp_path) -> None:

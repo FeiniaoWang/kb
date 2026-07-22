@@ -112,7 +112,7 @@ def doc_class_from_type(type_name: str) -> DocClass | None:
         return DocClass.INDEX
     if type_name in {"raw-source", "chat", "feedback"}:
         return DocClass.RAW
-    if type_name in {"conventions", "kb-config", "health"}:
+    if type_name in {"charter", "conventions", "kb-config", "health"}:
         return DocClass.GOVERNANCE
     return DocClass.SYNTHETIC
 

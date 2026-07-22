@@ -9,6 +9,7 @@ from pydantic import ValidationError
 import kb.core.model as model_module
 from kb.core.ids import DocId
 from kb.core.model import (
+    Config,
     ConfigLoadError,
     DocClass,
     Frontmatter,
@@ -16,6 +17,7 @@ from kb.core.model import (
     IndexFrontmatter,
     RawClass,
     load_config,
+    parse_config_bytes,
 )
 from kb.core.model import RawFrontmatter
 from kb.core.model import SyntheticFrontmatter
@@ -67,6 +69,7 @@ def test_load_config_defaults_missing_fields_and_ignores_unknown_keys(tmp_path) 
         "schema": 1,
         "types": [],
         "tags": [],
+        "link_types": [],
         "id_prefixes": {
             "synthetic": "KB",
             "source": "RAW",
@@ -200,3 +203,38 @@ def test_synthetic_frontmatter_rejects_non_lifecycle_status() -> None:
             timestamp="2026-07-16T10:00:00Z",
             last_human_touch="2026-07-16T10:00:00Z",
         )
+
+
+def test_governance_frontmatter_accepts_charter_type():
+    fm = GovernanceFrontmatter(
+        id="GOVERNANCE-CHARTER",
+        type="charter",
+        title="KB Charter",
+        description="The KB's purpose. Human-maintained.",
+    )
+    assert fm.type == "charter"
+
+
+def test_synthetic_frontmatter_accepts_links_and_pending_upstream():
+    fm = SyntheticFrontmatter(
+        id="KB-000001",
+        type="spec",
+        title="T",
+        description="D.",
+        status="current",
+        derived_from=["CHAT-000001"],
+        timestamp="2026-07-22T00:00:00Z",
+        last_human_touch="2026-07-22T00:00:00Z",
+        links={"references": ["KB-000002"]},
+        pending_upstream=["CHAT-000001"],
+    )
+    assert fm.links == {"references": ["KB-000002"]}
+    assert fm.pending_upstream == ["CHAT-000001"]
+
+
+def test_config_link_types_defaults_empty_and_parses():
+    assert Config().link_types == []
+    config = parse_config_bytes(
+        b'{"schema": 1, "link_types": ["references", "contradicts"]}'
+    )
+    assert config.link_types == ["references", "contradicts"]
