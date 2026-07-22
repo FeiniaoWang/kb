@@ -1,4 +1,5 @@
 import kb.core.validate as validate_module
+import pytest
 
 from conftest import make_doc, make_kb
 from kb.core.validate import (
@@ -56,62 +57,148 @@ def test_ac76_links_and_pending_upstream_are_legal_synthetic_keys(tmp_path) -> N
     )
 
 
-def test_ac76_links_on_raw_document_are_forbidden(tmp_path) -> None:
+@pytest.mark.parametrize(
+    ("relative", "values"),
+    [
+        (
+            "raw/sources/source.md",
+            {
+                "id": "RAW-000001",
+                "type": "raw-source",
+                "ingested_at": "2026-07-16T08:00:00Z",
+                "origin": "file",
+            },
+        ),
+        (
+            "governance/conventions.md",
+            {
+                "id": "GOVERNANCE-CONVENTIONS",
+                "type": "conventions",
+                "title": "Project Conventions",
+                "description": "Standing conventions.",
+            },
+        ),
+        (
+            "synthetic/index.md",
+            {
+                "type": "index",
+                "title": "Synthetic Documents",
+                "description": "Synthetic documents.",
+            },
+        ),
+    ],
+)
+def test_ac76_links_and_pending_upstream_are_forbidden_outside_synthetic(
+    tmp_path, relative: str, values: dict[str, object]
+) -> None:
     root = make_kb(tmp_path / "kb")
     make_doc(
         root,
-        "raw/sources/source.md",
+        relative,
         {
-            "id": "RAW-000001",
-            "type": "raw-source",
-            "ingested_at": "2026-07-16T08:00:00Z",
-            "origin": "file",
-            "links": {"references": []},
+            **values,
+            "links": {"undeclared": ["KB-999999"]},
+            "pending_upstream": ["KB-999999"],
         },
     )
 
     findings = validate(ValidateRequest(kb_root=root)).findings
+    document_findings = [
+        finding for finding in findings if finding.path == relative
+    ]
 
-    assert any(
-        finding.code == "FM1_KEY_FORBIDDEN" and "links" in finding.message
-        for finding in findings
+    assert [finding.code for finding in document_findings] == [
+        "FM1_KEY_FORBIDDEN",
+        "FM1_KEY_FORBIDDEN",
+    ]
+    assert {finding.message.split("'")[1] for finding in document_findings} == {
+        "links",
+        "pending_upstream",
+    }
+    assert not any(
+        finding.code
+        in {"LINKTYPE_UNDECLARED", "LINK_UNRESOLVED", "PU_NOT_PARENT"}
+        for finding in document_findings
     )
 
 
-def test_ac77_links_shape_must_be_mapping_of_string_lists(tmp_path) -> None:
+@pytest.mark.parametrize(
+    "links",
+    [
+        ["KB-000002"],
+        {"": []},
+        {1: []},
+        {"references": "KB-000002"},
+        {"references": ["", 1]},
+    ],
+)
+def test_ac77_links_shape_must_be_mapping_of_string_lists(tmp_path, links) -> None:
     root = make_kb(tmp_path / "kb")
     make_doc(root, "raw/chats/session.md", _chat_values())
     make_doc(
         root,
         "synthetic/note.md",
-        _valid_synthetic_values(links=["KB-000002"]),
+        _valid_synthetic_values(links=links),
     )
 
     findings = validate(ValidateRequest(kb_root=root)).findings
+    document_findings = [
+        finding for finding in findings if finding.path == "synthetic/note.md"
+    ]
 
     assert any(
         finding.code == "FM1_FIELD_INVALID"
         and "mapping of link type to a list of non-empty strings" in finding.message
-        for finding in findings
+        for finding in document_findings
+    )
+    assert not any(
+        finding.code
+        in {"LINKTYPE_UNDECLARED", "LINK_UNRESOLVED", "PU_NOT_PARENT"}
+        for finding in document_findings
     )
 
 
-def test_ac77_pending_upstream_shape_must_be_string_list(tmp_path) -> None:
+@pytest.mark.parametrize("pending_upstream", ["CHAT-000001", [""], [1]])
+def test_ac77_pending_upstream_shape_must_be_string_list(
+    tmp_path, pending_upstream
+) -> None:
     root = make_kb(tmp_path / "kb")
     make_doc(root, "raw/chats/session.md", _chat_values())
     make_doc(
         root,
         "synthetic/note.md",
-        _valid_synthetic_values(pending_upstream="CHAT-000001"),
+        _valid_synthetic_values(pending_upstream=pending_upstream),
     )
 
     findings = validate(ValidateRequest(kb_root=root)).findings
+    document_findings = [
+        finding for finding in findings if finding.path == "synthetic/note.md"
+    ]
 
     assert any(
         finding.code == "FM1_FIELD_INVALID"
         and "list of non-empty strings" in finding.message
-        for finding in findings
+        for finding in document_findings
     )
+    assert not any(
+        finding.code
+        in {"LINKTYPE_UNDECLARED", "LINK_UNRESOLVED", "PU_NOT_PARENT"}
+        for finding in document_findings
+    )
+
+
+def test_ac77_empty_links_and_pending_upstream_are_well_shaped(tmp_path) -> None:
+    root = make_kb(tmp_path / "kb")
+    make_doc(root, "raw/chats/session.md", _chat_values())
+    make_doc(
+        root,
+        "synthetic/note.md",
+        _valid_synthetic_values(links={}, pending_upstream=[]),
+    )
+
+    findings = validate(ValidateRequest(kb_root=root)).findings
+
+    assert findings == []
 
 
 def test_ac75_charter_document_is_valid_under_governance(tmp_path) -> None:
