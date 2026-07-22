@@ -130,9 +130,11 @@ class AdapterPayload(BaseModel):
     default_origin: str
     source_filename: str | None = None
 
-class BoundIngestSource(NamedTuple):
-    shape: IngestSourceShape
-    acquire: Callable[[], AdapterPayload]
+class BoundIngestSource:
+    @property
+    def shape(self) -> IngestSourceShape: ...
+
+    def acquire(self) -> AdapterPayload: ...
 ```
 
 `IngestSourceShape` contains no source path and lets core validate the command surface after root/config/scan checks but before acquisition. Adapters only acquire bytes and provenance. Strict decoding, classification, normalization, naming, allocation, and filing remain uniform core behavior. The payload is self-describing; core execution rejects a payload whose `source_kind` differs from the prepared source shape.

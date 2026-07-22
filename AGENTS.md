@@ -29,7 +29,7 @@ kb/                       (this repo; package name `kb`, console script `kb`)
 
 The internal file/folder structure **within** `src/kb/core/` and `src/kb/cli/` is **not fixed** — organize modules however makes the most sense as the implementation grows (split, merge, or rename files freely).
 
-Layering rule: `core/` is delivery-independent application logic. It may read and write the discovered KB filesystem, but it contains no Typer, printing, process exit, process-global standard-stream access, or process-launching calls. Concrete acquisition of user-supplied external files, stdin, and clipboard contents belongs to adapters in `cli/`; those adapters pass explicit bytes and provenance metadata through core-owned Pydantic models. Typer callbacks parse arguments, orchestrate prepare → acquire → execute, render output, and map failures to exit codes. This layering rule is normative; the module breakdown inside each layer is a developer decision.
+Layering rule: `core/` is delivery-independent application logic. It may read and write the discovered KB filesystem, but it contains no Typer, printing, process exit, process-global standard-stream access, or process-launching calls. Concrete acquisition of user-supplied external files, stdin, and clipboard contents belongs to adapters in `cli/`; the create-body adapter passes explicit optional bytes, while ingest adapters pass explicit bytes and provenance metadata through core-owned Pydantic models. Typer callbacks parse arguments, orchestrate prepare → acquire → execute, render output, and map failures to exit codes. This layering rule is normative; the module breakdown inside each layer is a developer decision.
 
 ## Invariants (never violate)
 
