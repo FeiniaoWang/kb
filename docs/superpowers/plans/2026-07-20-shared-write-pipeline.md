@@ -2441,11 +2441,11 @@ the public staged interface, validation/acquisition order, or successful bytes.
 - [x] Pin exact relative-path and safely acquired partial-prefix provenance for
       rooted tree acquisition failures, plus typed born-index render/encoding
       failures, in the design and plan.
-- [ ] Preserve acquisition provenance through the internal safe-I/O seam and
+- [x] Preserve acquisition provenance through the internal safe-I/O seam and
       exact create/ingest command classifications.
-- [ ] Wrap born-index formatting and UTF-8 encoding as exact typed preflight
+- [x] Wrap born-index formatting and UTF-8 encoding as exact typed preflight
       index failures before mutation.
-- [ ] Verify focused, command, architecture, exact AC, full-suite, diff, and
+- [x] Verify focused, command, architecture, exact AC, full-suite, diff, and
       status gates.
 
 ---
@@ -2477,7 +2477,7 @@ the public staged interface, validation/acquisition order, or successful bytes.
       pathname replacements are detected at the available identity checks.
 - [x] Task 13 descriptor/object containment scope and the accepted post-open
       namespace-movement limitation are documented and regression-tested.
-- [ ] Task 14 partial acquisition provenance and born-index typed preflight
+- [x] Task 14 partial acquisition provenance and born-index typed preflight
       envelopes are implemented and verified.
 - [ ] Revalidate the downstream CLI/core input-seam plan after this branch is
       integrated. Its source paths exist, but its separate prepared models
