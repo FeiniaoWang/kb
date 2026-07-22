@@ -2470,11 +2470,11 @@ threat model.
 
 - [x] Pin the prepared nearest-existing-directory identity and its apply-time
       immediate-parent authority in the design and plan.
-- [ ] Retain that identity privately and require it for the first birth below
+- [x] Retain that identity privately and require it for the first birth below
       the nearest existing directory.
-- [ ] Pin existing-target and first-missing-child replacement regressions with
+- [x] Pin existing-target and first-missing-child replacement regressions with
       no replacement bytes or earlier pipeline effects.
-- [ ] Verify focused, command, architecture, exact AC, full-suite, diff, and
+- [x] Verify focused, command, architecture, exact AC, full-suite, diff, and
       status gates.
 
 ---
@@ -2508,7 +2508,7 @@ threat model.
       namespace-movement limitation are documented and regression-tested.
 - [x] Task 14 partial acquisition provenance and born-index typed preflight
       envelopes are implemented and verified.
-- [ ] Task 15 prepared nearest-existing-directory identity prevents a
+- [x] Task 15 prepared nearest-existing-directory identity prevents a
       replacement from receiving the first apply-time birth.
 - [ ] Revalidate the downstream CLI/core input-seam plan after this branch is
       integrated. Its source paths exist, but its separate prepared models
