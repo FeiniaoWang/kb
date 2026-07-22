@@ -70,7 +70,7 @@ ROOT/
 ├── log.md
 ├── governance/
 │   ├── index.md
-│   ├── charter.md           # GOVERNANCE-CHARTER — KB purpose and architectural intent
+│   ├── charter.md           # GOVERNANCE-CHARTER — KB purpose: who it serves, consumers, architectural intent
 │   ├── conventions.md       # GOVERNANCE-CONVENTIONS
 │   ├── kb-config.md         # GOVERNANCE-KB-CONFIG — human-readable field reference for kb-config.json
 │   └── templates/
@@ -328,7 +328,7 @@ KB ready at /abs/path — 13 created, 0 overwritten, 0 skipped
 
 One pytest test per item (00-shared §10), named `test_ac<NN>_<slug>`. These criteria are the input to the detailed behavior specifications that drive development; each is written to be independently testable with an unambiguous pass condition.
 
-**Coverage map:** fresh scaffold & pinned content AC1–AC8 (§5) · idempotency & repair AC9–AC12 (§4 step 2, E3/E5) · `--force` semantics AC13–AC17 (§4 step 2, E4) · root resolution AC18–AC21 (§4 step 1, E1/E6) · errors & edge cases AC22–AC24 (E2/E7/E8) · output contract AC25–AC27 (§6, 00-shared §3) · help & cross-command AC28–AC30 (§3, Git-agnosticism, born-valid).
+**Coverage map:** fresh scaffold & pinned content AC1–AC8 (§5) · idempotency & repair AC9–AC12 (§4 step 2, E3/E5) · `--force` semantics AC13–AC17 (§4 step 2, E4) · root resolution AC18–AC21 (§4 step 1, E1/E6) · errors & edge cases AC22–AC24 (E2/E7/E8) · output contract AC25–AC27 (§6, 00-shared §3) · help & cross-command AC28–AC30 (§3, Git-agnosticism, born-valid) · charter lifecycle AC31 (§5.4).
 
 | # | Given / When / Then |
 |---|---|
@@ -362,6 +362,7 @@ One pytest test per item (00-shared §10), named `test_ac<NN>_<slug>`. These cri
 | AC28 | When `kb init --help` runs, then exit 0 and output contains every normative string from §3 — each description sentence, each option help string, each example line — and mentions no Git operations. |
 | AC29 | Given a fresh KB, when `kb init` ran, then no `.git/` directory exists, no `git` subprocess was invoked (asserted via a PATH shim or subprocess spy), and JSON output contains no `git` key (Git-agnostic). |
 | AC30 | Given a fresh KB, when `kb validate` runs, then exit 0 (the scaffold is born valid; this is a hard gate). |
+| AC31 | Given an empty directory, when `kb init` runs, then `governance/charter.md` is created with the pinned §5.4 content; when `kb init` re-runs it is skipped; when `kb init --force` runs it is never overwritten. |
 
 ## 9. Out of scope
 
