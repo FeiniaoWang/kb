@@ -146,6 +146,7 @@ GOVERNANCE_LISTING = """## Subdirectories
 * [Templates](templates/index.md) - Optional per-type document templates.
 
 ## Files
+* [GOVERNANCE-CHARTER][KB Charter](charter.md) - The KB's purpose — who it serves, its consumers, and the architectural intent. Human-maintained.
 * [GOVERNANCE-CONVENTIONS][Project Conventions](conventions.md) - Standing conventions for this knowledge base. Human-maintained.
 * [GOVERNANCE-KB-CONFIG][KB Configuration Reference](kb-config.md) - Explains each field in the root kb-config.json. Human-readable companion to the machine-read config."""
 
@@ -158,6 +159,7 @@ CONFIG_CONTENT = """{
   "schema": 1,
   "types": [],
   "tags": [],
+  "link_types": ["references", "contradicts", "constrains"],
   "id_prefixes": {
     "synthetic": "KB",
     "source": "RAW",
@@ -185,6 +187,30 @@ Standing conventions for this knowledge base. Human-maintained.
 (none yet)
 """
 
+CHARTER_CONTENT = """---
+id: GOVERNANCE-CHARTER
+type: charter
+title: KB Charter
+description: The KB's purpose — who it serves, its consumers, and the architectural intent. Human-maintained.
+---
+# KB Charter
+
+The KB's purpose: who it serves, its consumers, and the architectural intent
+behind directory structure, vocabularies, and granularity (PRD G9). Drafted
+with the KB steward by the kb-init skill. Rationale lives here; binding
+authoring rules live in conventions.md; machine-read settings live in
+kb-config.json.
+
+## Purpose
+(not yet drafted)
+
+## Consumers
+(not yet drafted)
+
+## Architectural intent
+(not yet drafted)
+"""
+
 CONFIG_REFERENCE_CONTENT = """---
 id: GOVERNANCE-KB-CONFIG
 type: kb-config
@@ -206,6 +232,10 @@ the project; `schema` is managed by `kb` — do not edit it.
   An empty list means types are not yet constrained.
 - **`tags`** — tag vocabulary. `kb validate` flags any document tag not listed
   here. An empty list means no tags are declared.
+- **`link_types`** — associative link-type vocabulary (PRD §6.9): the typed,
+  non-provenance relationships a synthetic document may declare under `links:`.
+  `kb validate` flags undeclared link types. An empty list means none are
+  declared.
 - **`id_prefixes`** — the id prefix used per document class: `synthetic` (`KB`),
   `source` (`RAW`), `chat` (`CHAT`), `feedback` (`FEED`). Ids are `<PREFIX>-<6+ digits>`.
 - **`propagation_auto_safe`** — change classes governance considers auto-safe
@@ -262,6 +292,9 @@ def append_log(
 
 def _manifest(timestamp: str) -> dict[str, ScaffoldEntry]:
     return {
+        "governance/charter.md": ScaffoldEntry(
+            content=CHARTER_CONTENT, cli_owned=False
+        ),
         "governance/conventions.md": ScaffoldEntry(
             content=CONVENTIONS_CONTENT, cli_owned=False
         ),

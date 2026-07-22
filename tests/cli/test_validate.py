@@ -115,7 +115,7 @@ def test_ac01_fresh_init_scaffold_is_born_valid(
 ) -> None:
     result = invoke_validate(initialized_kb)
     assert result.exit_code == 0
-    assert result.stdout == "no findings — checked 11 files\n"
+    assert result.stdout == "no findings — checked 12 files\n"
 
 
 def test_ac02_fully_conforming_populated_kb_has_no_findings(
@@ -292,7 +292,7 @@ def test_regression_real_write_commands_emit_a_kb_that_validates_cleanly(
     assert ingested.exit_code == 0
     assert created.exit_code == 0
     assert result.exit_code == 0
-    assert result.stdout == "no findings — checked 13 files\n"
+    assert result.stdout == "no findings — checked 14 files\n"
 
 
 def test_regression_date_with_trailing_z_is_not_an_iso_datetime(

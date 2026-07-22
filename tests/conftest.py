@@ -136,6 +136,7 @@ def expected_manifest(timestamp: str) -> dict[str, str]:
 * [Templates](templates/index.md) - Optional per-type document templates.
 
 ## Files
+* [GOVERNANCE-CHARTER][KB Charter](charter.md) - The KB's purpose — who it serves, its consumers, and the architectural intent. Human-maintained.
 * [GOVERNANCE-CONVENTIONS][Project Conventions](conventions.md) - Standing conventions for this knowledge base. Human-maintained.
 * [GOVERNANCE-KB-CONFIG][KB Configuration Reference](kb-config.md) - Explains each field in the root kb-config.json. Human-readable companion to the machine-read config."""
     raw_listing = """## Subdirectories
@@ -143,6 +144,29 @@ def expected_manifest(timestamp: str) -> dict[str, str]:
 * [Feedback](feedback/index.md) - Consumer feedback about synthetic documents (immutable).
 * [Sources](sources/index.md) - Normalized external evidence (immutable)."""
     return {
+        "governance/charter.md": """---
+id: GOVERNANCE-CHARTER
+type: charter
+title: KB Charter
+description: The KB's purpose — who it serves, its consumers, and the architectural intent. Human-maintained.
+---
+# KB Charter
+
+The KB's purpose: who it serves, its consumers, and the architectural intent
+behind directory structure, vocabularies, and granularity (PRD G9). Drafted
+with the KB steward by the kb-init skill. Rationale lives here; binding
+authoring rules live in conventions.md; machine-read settings live in
+kb-config.json.
+
+## Purpose
+(not yet drafted)
+
+## Consumers
+(not yet drafted)
+
+## Architectural intent
+(not yet drafted)
+""",
         "governance/conventions.md": """---
 id: GOVERNANCE-CONVENTIONS
 type: conventions
@@ -185,6 +209,10 @@ the project; `schema` is managed by `kb` — do not edit it.
   An empty list means types are not yet constrained.
 - **`tags`** — tag vocabulary. `kb validate` flags any document tag not listed
   here. An empty list means no tags are declared.
+- **`link_types`** — associative link-type vocabulary (PRD §6.9): the typed,
+  non-provenance relationships a synthetic document may declare under `links:`.
+  `kb validate` flags undeclared link types. An empty list means none are
+  declared.
 - **`id_prefixes`** — the id prefix used per document class: `synthetic` (`KB`),
   `source` (`RAW`), `chat` (`CHAT`), `feedback` (`FEED`). Ids are `<PREFIX>-<6+ digits>`.
 - **`propagation_auto_safe`** — change classes governance considers auto-safe
@@ -202,6 +230,7 @@ the project; `schema` is managed by `kb` — do not edit it.
   "schema": 1,
   "types": [],
   "tags": [],
+  "link_types": ["references", "contradicts", "constrains"],
   "id_prefixes": {
     "synthetic": "KB",
     "source": "RAW",

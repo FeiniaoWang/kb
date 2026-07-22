@@ -186,7 +186,7 @@ def _class_contract(type_name: str) -> tuple[str, tuple[str, ...], set[str]]:
             ("id", "ingested_at", "origin", "about"),
             {"id", "ingested_at", "origin", "title", "about"},
         )
-    if type_name in {"conventions", "kb-config", "health"}:
+    if type_name in {"charter", "conventions", "kb-config", "health"}:
         return (
             "governance",
             ("id", "title", "description"),
@@ -229,7 +229,7 @@ def _location_expectation(type_name: str) -> tuple[bool, str]:
         return False, "under raw/chats/"
     if type_name == "feedback":
         return False, "under raw/feedback/"
-    if type_name in {"conventions", "kb-config", "health"}:
+    if type_name in {"charter", "conventions", "kb-config", "health"}:
         return False, "under governance/"
     if type_name == "log":
         return False, "the root log.md"
@@ -252,7 +252,7 @@ def _location_matches(file: ScannedMarkdown, type_name: str) -> bool:
     if expected is None:
         expected = (
             Path("governance")
-            if type_name in {"conventions", "kb-config", "health"}
+            if type_name in {"charter", "conventions", "kb-config", "health"}
             else Path("synthetic")
         )
     return path.parent == expected or expected in path.parent.parents

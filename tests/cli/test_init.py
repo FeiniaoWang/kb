@@ -62,7 +62,7 @@ def test_ac02_text_output_is_sorted_and_summarized(tmp_path, invoke_init) -> Non
     expected_paths = sorted(expected_manifest("unused"))
     expected_lines = [f"created  {path}" for path in expected_paths]
     expected_lines.append(
-        f"KB ready at {tmp_path.resolve()} — 12 created, 0 overwritten, 0 skipped"
+        f"KB ready at {tmp_path.resolve()} — 13 created, 0 overwritten, 0 skipped"
     )
     assert result.exit_code == 0
     assert result.stdout.splitlines() == expected_lines
@@ -75,6 +75,7 @@ def test_ac03_config_is_strict_json_with_exact_fields(tmp_path, invoke_init) -> 
         "schema": 1,
         "types": [],
         "tags": [],
+        "link_types": ["references", "contradicts", "constrains"],
         "id_prefixes": {
             "synthetic": "KB",
             "source": "RAW",
@@ -120,7 +121,7 @@ def test_ac05_indexes_have_exact_frontmatter_and_bodies(tmp_path, invoke_init) -
 def test_ac06_every_markdown_file_has_type(tmp_path, invoke_init) -> None:
     assert invoke_init(tmp_path).exit_code == 0
     markdown_files = sorted(tmp_path.rglob("*.md"))
-    assert len(markdown_files) == 11
+    assert len(markdown_files) == 12
     assert all("type" in read_frontmatter(path) for path in markdown_files)
 
 
@@ -152,7 +153,7 @@ def test_ac09_rerun_skips_without_writes(tmp_path, invoke_init) -> None:
     expected_paths = sorted(expected_manifest("unused"))
     expected_lines = [f"skipped  {path} (exists)" for path in expected_paths]
     expected_lines.append(
-        f"KB ready at {tmp_path.resolve()} — 0 created, 0 overwritten, 12 skipped"
+        f"KB ready at {tmp_path.resolve()} — 0 created, 0 overwritten, 13 skipped"
     )
     after = {path: (path.read_bytes(), path.stat().st_mtime_ns) for path in before}
     assert result.exit_code == 0
@@ -198,8 +199,8 @@ def test_ac11_partial_scaffold_recreates_only_missing_entries(tmp_path, invoke_i
     assert "created  log.md" in lines
     assert "created  raw/index.md" in lines
     assert sum(line.startswith("created  ") for line in lines) == 2
-    assert sum(line.startswith("skipped  ") for line in lines) == 10
-    assert lines[-1].endswith("— 2 created, 0 overwritten, 10 skipped")
+    assert sum(line.startswith("skipped  ") for line in lines) == 11
+    assert lines[-1].endswith("— 2 created, 0 overwritten, 11 skipped")
     assert (tmp_path / "raw/index.md").read_text(encoding="utf-8") == expected_manifest(
         timestamp_from_log(tmp_path)
     )["raw/index.md"]
@@ -221,7 +222,7 @@ def test_ac12_foreign_content_is_untouched(tmp_path, invoke_init) -> None:
     manifest_paths = sorted(expected_manifest("unused"))
     expected_lines = [f"created  {path}" for path in manifest_paths]
     expected_lines.append(
-        f"KB ready at {tmp_path.resolve()} — 12 created, 0 overwritten, 0 skipped"
+        f"KB ready at {tmp_path.resolve()} — 13 created, 0 overwritten, 0 skipped"
     )
     assert result.exit_code == 0
     assert result.stdout.splitlines() == expected_lines
@@ -250,7 +251,7 @@ def test_ac13_force_on_empty_root_creates_without_overwrites(tmp_path, invoke_in
         (plain / path).read_bytes() == (forced / path).read_bytes()
         for path in files_under(plain)
     )
-    assert result.stdout.splitlines()[-1].endswith("— 12 created, 0 overwritten, 0 skipped")
+    assert result.stdout.splitlines()[-1].endswith("— 13 created, 0 overwritten, 0 skipped")
 
 
 def test_ac14_force_restores_config(tmp_path, invoke_init) -> None:
@@ -278,20 +279,26 @@ def test_ac15_force_restores_index(tmp_path, invoke_init) -> None:
 def test_ac16_force_preserves_protected_entries(tmp_path, invoke_init) -> None:
     assert invoke_init(tmp_path).exit_code == 0
     protected = [
+        tmp_path / "governance/charter.md",
         tmp_path / "governance/conventions.md",
         tmp_path / "governance/kb-config.md",
         tmp_path / "log.md",
     ]
     protected[0].write_text(protected[0].read_text(encoding="utf-8") + "human\n", encoding="utf-8")
     protected[1].write_text(protected[1].read_text(encoding="utf-8") + "human\n", encoding="utf-8")
-    protected[2].write_text(protected[2].read_text(encoding="utf-8") + "extra one\nextra two\n", encoding="utf-8")
+    protected[3].write_text(protected[3].read_text(encoding="utf-8") + "extra one\nextra two\n", encoding="utf-8")
     before = {path: path.read_bytes() for path in protected}
     result = invoke_init(tmp_path, "--force")
     assert result.exit_code == 0
     assert {path: path.read_bytes() for path in protected} == before
-    for relative in ["governance/conventions.md", "governance/kb-config.md", "log.md"]:
+    for relative in [
+        "governance/charter.md",
+        "governance/conventions.md",
+        "governance/kb-config.md",
+        "log.md",
+    ]:
         assert f"skipped  {relative} (exists)" in result.stdout.splitlines()
-    assert result.stdout.splitlines()[-1].endswith("— 0 created, 9 overwritten, 3 skipped")
+    assert result.stdout.splitlines()[-1].endswith("— 0 created, 9 overwritten, 4 skipped")
 
 
 def test_ac17_force_never_writes_non_manifest_document(tmp_path, invoke_init) -> None:
@@ -618,6 +625,29 @@ def test_ac27_text_error_uses_stderr_only(tmp_path, invoke_init) -> None:
     assert result.exit_code == 2
     assert result.stdout == ""
     assert "E_INIT_NOT_DIR" in result.stderr
+
+
+def test_init_scaffolds_charter(tmp_path, runner):
+    result = runner.invoke(app, ["init", "--root", str(tmp_path)])
+    assert result.exit_code == 0
+    charter = (tmp_path / "governance" / "charter.md").read_text(encoding="utf-8")
+    assert charter.startswith("---\nid: GOVERNANCE-CHARTER\ntype: charter\n")
+    config = json.loads((tmp_path / "kb-config.json").read_text(encoding="utf-8"))
+    assert config["link_types"] == ["references", "contradicts", "constrains"]
+    listing = (tmp_path / "governance" / "index.md").read_text(encoding="utf-8")
+    assert "[GOVERNANCE-CHARTER][KB Charter](charter.md)" in listing
+
+
+def test_init_force_never_overwrites_charter(tmp_path, runner):
+    runner.invoke(app, ["init", "--root", str(tmp_path)])
+    charter_path = tmp_path / "governance" / "charter.md"
+    charter_path.write_text(
+        "---\nid: GOVERNANCE-CHARTER\ntype: charter\ntitle: X\ndescription: Y.\n---\nedited\n",
+        encoding="utf-8",
+    )
+    result = runner.invoke(app, ["init", "--root", str(tmp_path), "--force"])
+    assert result.exit_code == 0
+    assert "edited" in charter_path.read_text(encoding="utf-8")
 
 
 def test_ac28_help_contains_normative_copy_and_examples(runner) -> None:
