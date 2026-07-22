@@ -1496,6 +1496,80 @@ def test_nonempty_replacement_at_first_open_fails_pipeline_before_publication(
     assert retained.joinpath("nested").is_dir()
 
 
+def test_post_open_parent_rename_is_typed_with_partial_bytes_on_bound_object(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    import kb.core.safeio as safeio
+
+    root = initialized(tmp_path)
+    born = root / "synthetic/a"
+    outside = tmp_path / "outside"
+    moved = outside / "moved-a"
+    outside.mkdir()
+    index_before = (root / "synthetic/index.md").read_bytes()
+    log_before = (root / "log.md").read_bytes()
+    real_open = safeio.os.open
+    injected = False
+
+    def move_open_parent_before_child_create(
+        path,
+        flags,
+        mode=0o777,
+        *,
+        dir_fd=None,
+    ):
+        nonlocal injected
+        is_child_create = path == "index.md" and bool(flags & os.O_CREAT)
+        if is_child_create and not injected and dir_fd is not None:
+            parent_status = os.fstat(dir_fd)
+            born_status = born.stat()
+            is_bound_born = (
+                parent_status.st_dev == born_status.st_dev
+                and parent_status.st_ino == born_status.st_ino
+            )
+            if is_bound_born:
+                injected = True
+                born.rename(moved)
+                born.mkdir()
+        return real_open(path, flags, mode, dir_fd=dir_fd)
+
+    prepared = prepare_write(
+        load_write_context(root),
+        WriteIntent(
+            birth=DocumentBirth(
+                path=Path("synthetic/a/planned.md"),
+                content=document_bytes(),
+            ),
+            log_entry=log_entry(),
+        ),
+    )
+    monkeypatch.setattr(
+        safeio.os,
+        "open",
+        move_open_parent_before_child_create,
+    )
+
+    with pytest.raises(WriteFailure) as raised:
+        apply_write(prepared)
+
+    assert injected
+    assert raised.value.phase == "write"
+    assert raised.value.operation == "create"
+    assert raised.value.role == "document"
+    assert raised.value.path == Path("synthetic/a/planned.md")
+    assert "identity changed" in str(raised.value.cause)
+    assert list(born.iterdir()) == []
+    assert not (born / "index.md").exists()
+    assert not (born / "planned.md").exists()
+    assert moved.is_dir()
+    assert (moved / "index.md").is_file()
+    assert b"(planned.md)" in (moved / "index.md").read_bytes()
+    assert not (moved / "planned.md").exists()
+    assert (root / "synthetic/index.md").read_bytes() == index_before
+    assert (root / "log.md").read_bytes() == log_before
+
+
 def test_prebinding_staging_symlink_cannot_redirect_pipeline_writes(
     tmp_path,
     monkeypatch,
