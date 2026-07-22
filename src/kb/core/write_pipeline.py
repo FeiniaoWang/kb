@@ -24,8 +24,9 @@ from kb.core.safeio import (
     FileIdentity,
     _RootedReader,
     _RootedTreeAcquisitionError,
+    _append_rooted_final_bytes,
+    _create_rooted_final_file_bytes,
     RootedContainmentError,
-    append_rooted_bytes,
     create_rooted_directory,
     create_rooted_file_bytes,
     inspect_rooted_directory,
@@ -875,7 +876,7 @@ def apply_write(
                 ) from error
         try:
             if prepared._log_identity is None:
-                create_rooted_file_bytes(
+                _create_rooted_final_file_bytes(
                     root,
                     Path("log.md"),
                     _EMPTY_LOG_CONTENT + prepared._log_row,
@@ -889,7 +890,7 @@ def apply_write(
                     prepared._log_identity,
                 )
                 separator = b"" if existing.endswith(b"\n") else b"\n"
-                append_rooted_bytes(
+                _append_rooted_final_bytes(
                     root,
                     Path("log.md"),
                     separator + prepared._log_row,

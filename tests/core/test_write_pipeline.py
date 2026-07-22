@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from kb.core.housekeeping import LogEntry, init_kb
+from kb.core.housekeeping import LogEntry, empty_log_content, init_kb
 from kb.core.model import ConfigLoadError
 from kb.core.write_pipeline import (
     AllocationBlocked,
@@ -1153,6 +1153,199 @@ def test_missing_log_is_recreated_with_only_the_new_entry(tmp_path) -> None:
     log = (root / "log.md").read_text(encoding="utf-8")
     assert "| initialized |" not in log
     assert log.count("| created | test | KB-000001 |") == 1
+
+
+@pytest.mark.parametrize(
+    ("log_exists", "cleanup_target"),
+    [
+        (False, "file"),
+        (True, "file"),
+        (False, "parent"),
+        (True, "parent"),
+    ],
+)
+def test_completed_final_log_write_ignores_descriptor_cleanup_failure(
+    tmp_path,
+    monkeypatch,
+    log_exists,
+    cleanup_target,
+) -> None:
+    import kb.core.safeio as safeio
+
+    root = initialized(tmp_path)
+    log = root / "log.md"
+    if not log_exists:
+        log.unlink()
+    prepared = prepare_write(
+        load_write_context(root),
+        WriteIntent(
+            birth=DocumentBirth(
+                path=Path("synthetic/planned.md"), content=document_bytes()
+            ),
+            log_entry=log_entry(),
+        ),
+    )
+    log_before = log.read_bytes() if log_exists else empty_log_content().encode("utf-8")
+    expected_log = log_before + prepared._log_row
+    real_open = safeio.os.open
+    real_write = safeio.os.write
+    real_close = safeio.os.close
+    parent_descriptor = None
+    log_descriptor = None
+    log_write_completed = False
+    cleanup_failed = False
+
+    def track_log_descriptors(path, flags, mode=0o777, *, dir_fd=None):
+        nonlocal parent_descriptor, log_descriptor
+        descriptor = real_open(path, flags, mode, dir_fd=dir_fd)
+        if path == root and dir_fd is None:
+            parent_descriptor = descriptor
+        is_log_create = path == "log.md" and bool(flags & os.O_CREAT)
+        is_log_append = path == "log.md" and bool(flags & os.O_APPEND)
+        if is_log_create or is_log_append:
+            log_descriptor = descriptor
+        return descriptor
+
+    def track_completed_log_write(descriptor, content):
+        nonlocal log_write_completed
+        written = real_write(descriptor, content)
+        if descriptor == log_descriptor:
+            log_write_completed = True
+        return written
+
+    def fail_selected_cleanup(descriptor):
+        nonlocal cleanup_failed
+        fail_file = cleanup_target == "file" and descriptor == log_descriptor
+        fail_parent = (
+            cleanup_target == "parent"
+            and log_write_completed
+            and descriptor == parent_descriptor
+        )
+        real_close(descriptor)
+        if not cleanup_failed and (fail_file or fail_parent):
+            cleanup_failed = True
+            raise OSError(errno.EIO, "injected post-log cleanup failure")
+
+    monkeypatch.setattr(safeio.os, "open", track_log_descriptors)
+    monkeypatch.setattr(safeio.os, "write", track_completed_log_write)
+    monkeypatch.setattr(safeio.os, "close", fail_selected_cleanup)
+
+    receipt = apply_write(prepared)
+
+    assert cleanup_failed
+    assert receipt.created == ["synthetic/planned.md"]
+    assert receipt.updated == ["synthetic/index.md"]
+    assert log.read_bytes() == expected_log
+
+
+def test_pre_log_open_failure_is_not_hidden_by_parent_cleanup(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    import kb.core.safeio as safeio
+
+    root = initialized(tmp_path)
+    log = root / "log.md"
+    log_before = log.read_bytes()
+    prepared = prepare_write(
+        load_write_context(root),
+        WriteIntent(
+            birth=DocumentBirth(
+                path=Path("synthetic/planned.md"), content=document_bytes()
+            ),
+            log_entry=log_entry(),
+        ),
+    )
+    real_open = safeio.os.open
+    real_close = safeio.os.close
+    parent_descriptor = None
+    log_open_attempted = False
+
+    def fail_log_open(path, flags, mode=0o777, *, dir_fd=None):
+        nonlocal parent_descriptor, log_open_attempted
+        if path == "log.md" and bool(flags & os.O_APPEND):
+            log_open_attempted = True
+            raise PermissionError(errno.EACCES, "injected log open failure", path)
+        descriptor = real_open(path, flags, mode, dir_fd=dir_fd)
+        if path == root and dir_fd is None:
+            parent_descriptor = descriptor
+        return descriptor
+
+    def fail_parent_cleanup(descriptor):
+        should_fail = log_open_attempted and descriptor == parent_descriptor
+        real_close(descriptor)
+        if should_fail:
+            raise OSError(errno.EIO, "injected parent cleanup failure")
+
+    monkeypatch.setattr(safeio.os, "open", fail_log_open)
+    monkeypatch.setattr(safeio.os, "close", fail_parent_cleanup)
+
+    with pytest.raises(WriteFailure) as raised:
+        apply_write(prepared)
+
+    assert log_open_attempted
+    assert raised.value.operation == "append"
+    assert raised.value.role == "log"
+    assert raised.value.cause.errno == errno.EACCES
+    assert log.read_bytes() == log_before
+
+
+def test_log_write_failure_is_not_hidden_or_ignored_by_descriptor_cleanup(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    import kb.core.safeio as safeio
+
+    root = initialized(tmp_path)
+    log = root / "log.md"
+    log_before = log.read_bytes()
+    prepared = prepare_write(
+        load_write_context(root),
+        WriteIntent(
+            birth=DocumentBirth(
+                path=Path("synthetic/planned.md"), content=document_bytes()
+            ),
+            log_entry=log_entry(),
+        ),
+    )
+    real_open = safeio.os.open
+    real_write = safeio.os.write
+    real_close = safeio.os.close
+    log_descriptor = None
+    cleanup_failed = False
+
+    def track_log_descriptor(path, flags, mode=0o777, *, dir_fd=None):
+        nonlocal log_descriptor
+        descriptor = real_open(path, flags, mode, dir_fd=dir_fd)
+        if path == "log.md" and bool(flags & os.O_APPEND):
+            log_descriptor = descriptor
+        return descriptor
+
+    def fail_log_write(descriptor, content):
+        if descriptor == log_descriptor:
+            raise OSError(errno.ENOSPC, "injected log write failure")
+        return real_write(descriptor, content)
+
+    def fail_log_cleanup(descriptor):
+        nonlocal cleanup_failed
+        is_log = descriptor == log_descriptor
+        real_close(descriptor)
+        if is_log:
+            cleanup_failed = True
+            raise OSError(errno.EIO, "injected log cleanup failure")
+
+    monkeypatch.setattr(safeio.os, "open", track_log_descriptor)
+    monkeypatch.setattr(safeio.os, "write", fail_log_write)
+    monkeypatch.setattr(safeio.os, "close", fail_log_cleanup)
+
+    with pytest.raises(WriteFailure) as raised:
+        apply_write(prepared)
+
+    assert cleanup_failed
+    assert raised.value.operation == "append"
+    assert raised.value.role == "log"
+    assert raised.value.cause.errno == errno.ENOSPC
+    assert log.read_bytes() == log_before
 
 
 def test_replacement_keys_are_exact_and_checked_before_consumption(tmp_path) -> None:

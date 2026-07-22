@@ -2117,8 +2117,9 @@ git commit -m "refactor(ingest): use safe shared write pipeline (CLI-8)"
 
 **Historical execution record:** Complete in `944ce87`, `715b6d9`, and
 `8df47e4`. The unchecked steps below preserve the original TDD instructions;
-they are not pending work. The downstream input-seam inspection found a deeper
-interface assumption, so its revalidation remains explicitly deferred.
+they are not pending work. The downstream input-seam inspection found deeper
+interface assumptions; their post-integration revalidation completed on
+2026-07-22 and is recorded in the implementation completion checklist.
 
 **Files:**
 - Modify: `tests/test_write_pipeline_architecture.py`
@@ -2510,7 +2511,12 @@ threat model.
       envelopes are implemented and verified.
 - [x] Task 15 prepared nearest-existing-directory identity prevents a
       replacement from receiving the first apply-time birth.
-- [ ] Revalidate the downstream CLI/core input-seam plan after this branch is
-      integrated. Its source paths exist, but its separate prepared models
-      still contain stale `missing_directories` assumptions and are explicitly
-      outside this extraction.
+- [x] Revalidated the downstream CLI/core input-seam plan after integration.
+      Its existing source paths remain valid. Its separate `PreparedCreate`
+      and `PreparedIngest` models require two downstream-only corrections:
+      remove the stale public `missing_directories` state because directory
+      planning is private to `PreparedWrite`, and retain the original
+      `WriteContext` (publicly or privately) across external acquisition so
+      `prepare_write()` receives the captured root identity without a second
+      scan. Those corrections remain in the downstream plan's pre-flight scope
+      and do not require a change to this extraction.

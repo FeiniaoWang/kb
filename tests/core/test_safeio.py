@@ -860,3 +860,53 @@ def test_tree_listing_lstat_failure_preserves_child_path_and_prior_files(
     assert [(entry.path, entry.content) for entry in raised.value.acquired] == [
         (Path("a.md"), b"a prefix")
     ]
+
+
+def test_tree_unwind_lstat_failure_preserves_entered_child_path(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    root = tmp_path / "root"
+    nested = root / "nested"
+    nested.mkdir(parents=True)
+    (nested / "acquired.md").write_bytes(b"acquired prefix")
+    real_stat = safeio.os.stat
+    nested_stats = 0
+
+    def fail_entered_child_on_unwind(path, *, dir_fd=None, follow_symlinks=True):
+        nonlocal nested_stats
+        if path == "nested" and dir_fd is not None:
+            nested_stats += 1
+            if nested_stats == 2:
+                raise FileNotFoundError(
+                    errno.ENOENT,
+                    "entered directory vanished during unwind",
+                    path,
+                )
+        return real_stat(path, dir_fd=dir_fd, follow_symlinks=follow_symlinks)
+
+    monkeypatch.setattr(
+        safeio.os,
+        "stat",
+        fail_entered_child_on_unwind,
+    )
+
+    with safeio.rooted_reader(root) as reader:
+        with pytest.raises(safeio._RootedTreeAcquisitionError) as raised:
+            reader.acquire_tree_files(suffix=".md", acquire=lambda stream: stream.read())
+
+    assert nested_stats == 2
+    assert raised.value.path == Path("nested")
+    assert raised.value.cause.errno == errno.ENOENT
+    assert [(entry.path, entry.content) for entry in raised.value.acquired] == [
+        (Path("nested/acquired.md"), b"acquired prefix")
+    ]
+
+
+def test_rooted_helper_dataclass_records_are_private() -> None:
+    assert not hasattr(safeio, "RootedEntry")
+    assert not hasattr(safeio, "RootedDirectoryListing")
+    assert not hasattr(safeio, "RootedAcquiredEntry")
+    assert hasattr(safeio, "_RootedEntry")
+    assert hasattr(safeio, "_RootedDirectoryListing")
+    assert hasattr(safeio, "_RootedAcquiredEntry")

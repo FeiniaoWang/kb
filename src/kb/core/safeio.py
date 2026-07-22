@@ -9,7 +9,7 @@ import sys
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import BinaryIO, Callable, Iterator, Literal
+from typing import BinaryIO, Callable, Iterable, Iterator, Literal
 
 _ROOTED_SUPPORTED = (
     hasattr(os, "O_DIRECTORY")
@@ -63,20 +63,20 @@ class FileIdentity:
 
 
 @dataclass(frozen=True)
-class RootedEntry:
+class _RootedEntry:
     name: str
     kind: Literal["directory", "file", "symlink", "other"]
     identity: FileIdentity
 
 
 @dataclass(frozen=True)
-class RootedDirectoryListing:
+class _RootedDirectoryListing:
     identity: FileIdentity
-    entries: tuple[RootedEntry, ...]
+    entries: tuple[_RootedEntry, ...]
 
 
 @dataclass(frozen=True)
-class RootedAcquiredEntry:
+class _RootedAcquiredEntry:
     path: Path
     kind: Literal["file", "symlink", "other"]
     content: bytes | None = None
@@ -93,7 +93,7 @@ class _RootedTreeAcquisitionError(OSError):
         self,
         cause: OSError,
         path: Path,
-        acquired: tuple[RootedAcquiredEntry, ...],
+        acquired: tuple[_RootedAcquiredEntry, ...],
     ) -> None:
         super().__init__(
             cause.errno or errno.EIO,
@@ -245,14 +245,14 @@ def _list_open_directory(
     descriptor: int,
     expected: FileIdentity,
     relative: Path,
-) -> RootedDirectoryListing:
+) -> _RootedDirectoryListing:
     status = os.fstat(descriptor)
     identity = _identity(status)
     if not stat.S_ISDIR(status.st_mode):
         raise OSError(errno.ENOTDIR, "rooted path is not a directory", relative)
     if identity != expected:
         raise _stale_error(relative)
-    entries: list[RootedEntry] = []
+    entries: list[_RootedEntry] = []
     for name in sorted(os.listdir(descriptor)):
         child_relative = relative / name
         try:
@@ -275,13 +275,13 @@ def _list_open_directory(
         else:
             kind = "other"
         entries.append(
-            RootedEntry(
+            _RootedEntry(
                 name=name,
                 kind=kind,
                 identity=_identity(child_status),
             )
         )
-    return RootedDirectoryListing(identity=identity, entries=tuple(entries))
+    return _RootedDirectoryListing(identity=identity, entries=tuple(entries))
 
 
 class _RootedReader:
@@ -329,12 +329,12 @@ class _RootedReader:
         self,
         relative: Path,
         expected: FileIdentity | None = None,
-    ) -> RootedDirectoryListing:
+    ) -> _RootedDirectoryListing:
         self.verify_root()
         descriptor = self._open_directory(relative, expected)
         try:
             identity = _identity(os.fstat(descriptor))
-            entries: list[RootedEntry] = []
+            entries: list[_RootedEntry] = []
             for name in sorted(os.listdir(descriptor)):
                 status = os.stat(
                     name,
@@ -352,7 +352,7 @@ class _RootedReader:
                 else:
                     kind = "other"
                 entries.append(
-                    RootedEntry(
+                    _RootedEntry(
                         name=name,
                         kind=kind,
                         identity=_identity(status),
@@ -363,14 +363,14 @@ class _RootedReader:
         verification = self._open_directory(relative, identity)
         os.close(verification)
         self.verify_root()
-        return RootedDirectoryListing(identity=identity, entries=tuple(entries))
+        return _RootedDirectoryListing(identity=identity, entries=tuple(entries))
 
     def acquire_tree_files(
         self,
         *,
         suffix: str,
         acquire: Callable[[BinaryIO], bytes],
-    ) -> tuple[RootedAcquiredEntry, ...]:
+    ) -> tuple[_RootedAcquiredEntry, ...]:
         """Acquire matching files with iterative, descriptor-relative DFS."""
         descriptor: int | None = None
         failure_path = Path()
@@ -380,12 +380,12 @@ class _RootedReader:
             tuple[
                 tuple[str, ...],
                 FileIdentity,
-                tuple[RootedEntry, ...],
+                tuple[_RootedEntry, ...],
                 int,
-                RootedEntry,
+                _RootedEntry,
             ]
         ] = []
-        acquired: list[RootedAcquiredEntry] = []
+        acquired: list[_RootedAcquiredEntry] = []
         try:
             self.verify_root()
             descriptor = os.dup(self._descriptor)
@@ -437,7 +437,7 @@ class _RootedReader:
                     relative = Path(*parts, entry.name)
                     if entry.kind != "file":
                         acquired.append(
-                            RootedAcquiredEntry(
+                            _RootedAcquiredEntry(
                                 path=relative,
                                 kind=entry.kind,
                             )
@@ -464,7 +464,7 @@ class _RootedReader:
                     finally:
                         os.close(file_descriptor)
                     acquired.append(
-                        RootedAcquiredEntry(
+                        _RootedAcquiredEntry(
                             path=relative,
                             kind="file",
                             content=content,
@@ -491,6 +491,7 @@ class _RootedReader:
                 try:
                     if _identity(os.fstat(parent)) != parent_identity:
                         raise _stale_error(Path(*parent_parts))
+                    failure_path = Path(*parent_parts, entered_child.name)
                     child_status = os.stat(
                         entered_child.name,
                         dir_fd=parent,
@@ -500,10 +501,6 @@ class _RootedReader:
                         not stat.S_ISDIR(child_status.st_mode)
                         or _identity(child_status) != entered_child.identity
                     ):
-                        failure_path = Path(
-                            *parent_parts,
-                            entered_child.name,
-                        )
                         raise _stale_error(
                             Path(*parent_parts, entered_child.name)
                         )
@@ -514,7 +511,7 @@ class _RootedReader:
                 descriptor = parent
                 parts = parent_parts
                 expected = parent_identity
-                listing = RootedDirectoryListing(
+                listing = _RootedDirectoryListing(
                     identity=parent_identity,
                     entries=parent_entries,
                 )
@@ -604,6 +601,22 @@ def rooted_reader(
         os.close(descriptor)
 
 
+def _close_descriptors(
+    descriptors: Iterable[int],
+    *,
+    suppress_errors: bool,
+) -> None:
+    first_error: OSError | None = None
+    for descriptor in descriptors:
+        try:
+            os.close(descriptor)
+        except OSError as error:
+            if first_error is None:
+                first_error = error
+    if first_error is not None and not suppress_errors:
+        raise first_error
+
+
 @contextmanager
 def _open_rooted_parent(
     root: Path,
@@ -628,7 +641,7 @@ def _open_rooted_parent(
                         part,
                     )
             except BaseException:
-                os.close(descriptor)
+                _close_descriptors((descriptor,), suppress_errors=True)
                 raise
             descriptors.append(descriptor)
         if (
@@ -637,9 +650,11 @@ def _open_rooted_parent(
         ):
             raise _stale_error(relative.parent)
         yield descriptors[-1], parts[-1]
-    finally:
-        for descriptor in reversed(descriptors):
-            os.close(descriptor)
+    except BaseException:
+        _close_descriptors(reversed(descriptors), suppress_errors=True)
+        raise
+    else:
+        _close_descriptors(reversed(descriptors), suppress_errors=False)
 
 
 def create_rooted_directory(
@@ -733,21 +748,67 @@ def create_rooted_file_bytes(
     *,
     parent_expected: FileIdentity | None = None,
 ) -> None:
-    with _open_rooted_parent(
+    _create_rooted_file_bytes(
         root,
         relative,
+        content,
         root_identity,
-        parent_expected,
-    ) as (
-        parent_descriptor,
-        name,
-    ):
-        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
-        descriptor = os.open(name, flags, 0o666, dir_fd=parent_descriptor)
-        try:
-            _write_all(descriptor, content)
-        finally:
-            os.close(descriptor)
+        parent_expected=parent_expected,
+        ignore_cleanup_errors_after_write=False,
+    )
+
+
+def _create_rooted_final_file_bytes(
+    root: Path,
+    relative: Path,
+    content: bytes,
+    root_identity: FileIdentity,
+) -> None:
+    _create_rooted_file_bytes(
+        root,
+        relative,
+        content,
+        root_identity,
+        ignore_cleanup_errors_after_write=True,
+    )
+
+
+def _create_rooted_file_bytes(
+    root: Path,
+    relative: Path,
+    content: bytes,
+    root_identity: FileIdentity,
+    *,
+    parent_expected: FileIdentity | None = None,
+    ignore_cleanup_errors_after_write: bool,
+) -> None:
+    write_completed = False
+    try:
+        with _open_rooted_parent(
+            root,
+            relative,
+            root_identity,
+            parent_expected,
+        ) as (
+            parent_descriptor,
+            name,
+        ):
+            flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
+            descriptor = os.open(name, flags, 0o666, dir_fd=parent_descriptor)
+            try:
+                _write_all(descriptor, content)
+            except BaseException:
+                _close_descriptors((descriptor,), suppress_errors=True)
+                raise
+            else:
+                write_completed = True
+                _close_descriptors(
+                    (descriptor,),
+                    suppress_errors=ignore_cleanup_errors_after_write,
+                )
+    except OSError:
+        if not (ignore_cleanup_errors_after_write and write_completed):
+            raise
 
 
 def inspect_rooted_file(
@@ -846,8 +907,11 @@ def _open_rooted_existing(
             if not stat.S_ISREG(status.st_mode) or _identity(status) != expected:
                 raise _stale_error(relative)
             yield descriptor
-        finally:
-            os.close(descriptor)
+        except BaseException:
+            _close_descriptors((descriptor,), suppress_errors=True)
+            raise
+        else:
+            _close_descriptors((descriptor,), suppress_errors=False)
 
 
 def read_rooted_bytes(
@@ -900,6 +964,29 @@ def append_rooted_bytes(
         expected,
     ) as descriptor:
         _write_all(descriptor, content)
+
+
+def _append_rooted_final_bytes(
+    root: Path,
+    relative: Path,
+    content: bytes,
+    root_identity: FileIdentity,
+    expected: FileIdentity,
+) -> None:
+    write_completed = False
+    try:
+        with _open_rooted_existing(
+            root,
+            relative,
+            os.O_WRONLY | os.O_APPEND,
+            root_identity,
+            expected,
+        ) as descriptor:
+            _write_all(descriptor, content)
+            write_completed = True
+    except OSError:
+        if not write_completed:
+            raise
 
 
 def _open_flags(flags: int) -> int:
