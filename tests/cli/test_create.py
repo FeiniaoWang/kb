@@ -1511,12 +1511,25 @@ def test_document_race_uses_exclusive_create_and_preserves_raced_bytes(
     real_create = pipeline.create_rooted_file_bytes
     raced = False
 
-    def racing_create(root, relative, content, root_identity):
+    def racing_create(
+        root,
+        relative,
+        content,
+        root_identity,
+        *,
+        parent_expected=None,
+    ):
         nonlocal raced
         if root / relative == target and not raced:
             raced = True
             target.write_bytes(raced_bytes)
-        real_create(root, relative, content, root_identity)
+        real_create(
+            root,
+            relative,
+            content,
+            root_identity,
+            parent_expected=parent_expected,
+        )
 
     monkeypatch.setattr(pipeline, "create_rooted_file_bytes", racing_create)
     result = invoke_valid(invoke_create, initialized_kb)

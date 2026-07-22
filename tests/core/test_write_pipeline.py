@@ -945,9 +945,17 @@ def test_companion_is_created_before_document_and_excluded_from_index(
         relative: Path,
         content: bytes,
         root_identity,
+        *,
+        parent_expected=None,
     ) -> None:
         seen.append(relative.as_posix())
-        real_create(rooted_at, relative, content, root_identity)
+        real_create(
+            rooted_at,
+            relative,
+            content,
+            root_identity,
+            parent_expected=parent_expected,
+        )
 
     monkeypatch.setattr(pipeline, "create_rooted_file_bytes", record)
     prepared = prepare_write(
@@ -1302,6 +1310,104 @@ def test_late_birth_parent_link_is_role_specific_write_failure(
     assert (outside / "evidence.pdf").read_bytes() == b"external companion"
 
 
+def test_existing_target_replacement_fails_before_first_companion_birth(
+    tmp_path,
+) -> None:
+    root = initialized(tmp_path)
+    target = root / "raw/sources"
+    original = root / "raw/sources-original"
+    original_index = (target / "index.md").read_bytes()
+    class_index_before = (root / "raw/index.md").read_bytes()
+    log_before = (root / "log.md").read_bytes()
+    prepared = prepare_write(
+        load_write_context(root),
+        WriteIntent(
+            birth=DocumentBirth(
+                path=Path("raw/sources/evidence.md"),
+                content=(
+                    b"---\nid: RAW-000001\ntype: raw-source\n"
+                    b"title: Evidence\n---\nStub\n"
+                ),
+                companions_before=[
+                    CompanionBirth(
+                        path=Path("raw/sources/evidence.pdf"),
+                        content=b"%PDF",
+                    )
+                ],
+            ),
+            log_entry=LogEntry(
+                at="2026-07-20T12:00:00Z",
+                action="ingested",
+                actor="test",
+                doc_ids=["RAW-000001"],
+                note="raw/sources/evidence.md",
+            ),
+        ),
+    )
+    replacement_index = b"replacement index\n"
+    target.rename(original)
+    target.mkdir()
+    (target / "index.md").write_bytes(replacement_index)
+
+    with pytest.raises(WriteFailure) as raised:
+        apply_write(prepared)
+
+    assert raised.value.phase == "write"
+    assert raised.value.operation == "create"
+    assert raised.value.role == "companion"
+    assert raised.value.path == Path("raw/sources/evidence.pdf")
+    assert sorted(path.name for path in target.iterdir()) == ["index.md"]
+    assert (target / "index.md").read_bytes() == replacement_index
+    assert sorted(path.name for path in original.iterdir()) == ["index.md"]
+    assert (original / "index.md").read_bytes() == original_index
+    assert (root / "raw/index.md").read_bytes() == class_index_before
+    assert (root / "log.md").read_bytes() == log_before
+
+
+def test_nearest_existing_ancestor_replacement_blocks_first_missing_directory(
+    tmp_path,
+) -> None:
+    root = initialized(tmp_path)
+    target = root / "synthetic/parent"
+    original = root / "synthetic/parent-original"
+    target.mkdir()
+    target_index = (
+        b"---\ntype: index\ndescription: Parent.\n---\n"
+        b"# Parent\n\n## Files\n"
+    )
+    (target / "index.md").write_bytes(target_index)
+    synthetic_index_before = (root / "synthetic/index.md").read_bytes()
+    log_before = (root / "log.md").read_bytes()
+    prepared = prepare_write(
+        load_write_context(root),
+        WriteIntent(
+            birth=DocumentBirth(
+                path=Path("synthetic/parent/a/b/planned.md"),
+                content=document_bytes(),
+            ),
+            log_entry=log_entry(),
+        ),
+    )
+    replacement_index = b"replacement index\n"
+    target.rename(original)
+    target.mkdir()
+    (target / "index.md").write_bytes(replacement_index)
+
+    with pytest.raises(WriteFailure) as raised:
+        apply_write(prepared)
+
+    assert raised.value.phase == "write"
+    assert raised.value.operation == "mkdir"
+    assert raised.value.role == "directory"
+    assert raised.value.path == Path("synthetic/parent/a")
+    assert sorted(path.name for path in target.iterdir()) == ["index.md"]
+    assert (target / "index.md").read_bytes() == replacement_index
+    assert sorted(path.name for path in original.iterdir()) == ["index.md"]
+    assert (original / "index.md").read_bytes() == target_index
+    assert (root / "synthetic/index.md").read_bytes() == synthetic_index_before
+    assert (root / "log.md").read_bytes() == log_before
+
+
 def test_document_failure_leaves_companion_but_not_index_or_log(
     tmp_path,
     monkeypatch,
@@ -1319,10 +1425,18 @@ def test_document_failure_leaves_companion_but_not_index_or_log(
         relative: Path,
         content: bytes,
         root_identity,
+        *,
+        parent_expected=None,
     ) -> None:
         if relative == document:
             raise OSError("document failure")
-        real_create(rooted_at, relative, content, root_identity)
+        real_create(
+            rooted_at,
+            relative,
+            content,
+            root_identity,
+            parent_expected=parent_expected,
+        )
 
     monkeypatch.setattr(pipeline, "create_rooted_file_bytes", fail_document)
     prepared = prepare_write(

@@ -1601,10 +1601,24 @@ def test_append_only_file_creation_refuses_late_stub_and_original_occupants(
         relative: Path,
         content: bytes,
         root_identity,
+        *,
+        parent_expected=None,
     ) -> None:
         if root / relative == occupied_path:
-            real_create(root, relative, b"late occupant", root_identity)
-        real_create(root, relative, content, root_identity)
+            real_create(
+                root,
+                relative,
+                b"late occupant",
+                root_identity,
+                parent_expected=parent_expected,
+            )
+        real_create(
+            root,
+            relative,
+            content,
+            root_identity,
+            parent_expected=parent_expected,
+        )
 
     monkeypatch.setattr(
         write_pipeline,

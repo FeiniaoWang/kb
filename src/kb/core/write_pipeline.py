@@ -110,6 +110,7 @@ class PreparedWrite(BaseModel):
     _new_directories: list[Path] = PrivateAttr(default_factory=list)
     _new_indexes: dict[Path, bytes] = PrivateAttr(default_factory=dict)
     _refresh_index: Path = PrivateAttr()
+    _refresh_directory_identity: FileIdentity = PrivateAttr()
     _refresh_identity: FileIdentity = PrivateAttr()
     _refresh_content: bytes = PrivateAttr()
     _log_identity: FileIdentity | None = PrivateAttr(default=None)
@@ -708,6 +709,7 @@ def prepare_write(context: WriteContext, intent: WriteIntent) -> PreparedWrite:
     prepared._new_directories = new_directories
     prepared._new_indexes = new_indexes
     prepared._refresh_index = refresh_index
+    prepared._refresh_directory_identity = refresh_directory_identity
     prepared._refresh_identity = index_snapshot.identity
     prepared._refresh_content = refresh_content
     prepared._log_identity = log_identity
@@ -743,25 +745,19 @@ def apply_write(
     root_identity = prepared._root_identity
     intent = prepared._intent
     born_identities: dict[Path, FileIdentity] = {}
+    birth_parent_identities = {
+        prepared._refresh_index.parent: prepared._refresh_directory_identity,
+    }
     try:
         for directory in prepared._new_directories:
-            parent_expected = born_identities.get(directory.parent)
-            if not directory.parent.parts:
-                parent_expected = root_identity
+            parent_expected = birth_parent_identities[directory.parent]
             try:
-                if parent_expected is None:
-                    born_identity = create_rooted_directory(
-                        root,
-                        directory,
-                        root_identity,
-                    )
-                else:
-                    born_identity = create_rooted_directory(
-                        root,
-                        directory,
-                        root_identity,
-                        parent_expected=parent_expected,
-                    )
+                born_identity = create_rooted_directory(
+                    root,
+                    directory,
+                    root_identity,
+                    parent_expected=parent_expected,
+                )
             except OSError as error:
                 raise WriteFailure(
                     "write",
@@ -771,6 +767,7 @@ def apply_write(
                     error,
                 ) from error
             born_identities[directory] = born_identity
+            birth_parent_identities[directory] = born_identity
             index_relative = directory / "index.md"
             try:
                 create_rooted_file_bytes(
@@ -793,44 +790,30 @@ def apply_write(
             prepared._companion_relatives,
             strict=True,
         ):
-            parent_expected = born_identities.get(relative.parent)
+            parent_expected = birth_parent_identities[relative.parent]
             try:
-                if parent_expected is None:
-                    create_rooted_file_bytes(
-                        root,
-                        relative,
-                        companion.content,
-                        root_identity,
-                    )
-                else:
-                    create_rooted_file_bytes(
-                        root,
-                        relative,
-                        companion.content,
-                        root_identity,
-                        parent_expected=parent_expected,
-                    )
+                create_rooted_file_bytes(
+                    root,
+                    relative,
+                    companion.content,
+                    root_identity,
+                    parent_expected=parent_expected,
+                )
             except OSError as error:
                 raise WriteFailure(
                     "write", "create", "companion", relative, error
                 ) from error
-        birth_parent_expected = born_identities.get(prepared._birth_relative.parent)
+        birth_parent_expected = birth_parent_identities[
+            prepared._birth_relative.parent
+        ]
         try:
-            if birth_parent_expected is None:
-                create_rooted_file_bytes(
-                    root,
-                    prepared._birth_relative,
-                    intent.birth.content,
-                    root_identity,
-                )
-            else:
-                create_rooted_file_bytes(
-                    root,
-                    prepared._birth_relative,
-                    intent.birth.content,
-                    root_identity,
-                    parent_expected=birth_parent_expected,
-                )
+            create_rooted_file_bytes(
+                root,
+                prepared._birth_relative,
+                intent.birth.content,
+                root_identity,
+                parent_expected=birth_parent_expected,
+            )
         except OSError as error:
             raise WriteFailure(
                 "write",
