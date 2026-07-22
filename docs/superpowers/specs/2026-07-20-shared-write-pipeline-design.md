@@ -7,12 +7,13 @@
 ## Human-Approved Containment Amendment
 
 This amendment supersedes every path-based safe-I/O snippet below where the
-snippet conflicts with containment. Filesystem persistence is anchored to the
-KB root selected during preparation: the implementation captures that root's
-identity without retaining an open descriptor, reopens and verifies the root
-for each later operation, traverses every relative directory component with
-no-follow directory descriptors, and holds the verified parent descriptor
-through the final `mkdir`, create, inspect, read, overwrite, or append syscall.
+snippet conflicts with containment. Filesystem namespace resolution is
+anchored to the KB root selected during preparation: the implementation
+captures that root's identity without retaining an open descriptor, reopens
+and verifies the root for each later operation, traverses every relative
+directory component with no-follow directory descriptors, and holds the
+verified parent descriptor through the final `mkdir`, create, inspect, read,
+overwrite, or append syscall.
 Final components are also no-follow. A platform that cannot provide the
 required stdlib descriptor-relative and no-follow operations fails safely with
 an `OSError` before mutation instead of falling back to an unanchored path.
@@ -32,6 +33,27 @@ errors: `phase="write"`, `operation="create"`, the exact role (`companion` or
 and log failures retain their respective `mkdir`/`create`/`overwrite`/`append`
 operation and role attribution. The fixed partial-write order and no-rollback
 contract remain unchanged.
+
+### Descriptor/object containment scope
+
+Rooted operations acquire every descriptor by resolving from the captured KB
+root with no-follow rules and verify pathname identities before or after an
+operation where the portable interface permits. Once acquired, a descriptor
+binds an object, not its lexical pathname. Portable Darwin/Linux interfaces
+cannot prevent a non-cooperating namespace writer from renaming that already-
+open directory or file inode outside the lexical KB root before a mutation
+through the descriptor. Such post-open namespace movement is outside the
+containment threat model.
+
+Accordingly, the guarantee is descriptor/object containment: ordinary
+symlink/path traversal, pre-open replacement, and a replacement inode installed
+at an expected pathname are not followed or overwritten; later identity checks
+produce the established typed failure. Bytes already written through a bound
+descriptor before that failure remain on the bound object as documented
+no-rollback partial state, even if a non-cooperating actor moved that object
+outside the lexical root. No exclusive-writer or snapshot-isolation guarantee
+is claimed. Cooperating normal CLI execution and normal successful bytes remain
+unchanged.
 
 ### Root-bound context acquisition
 
@@ -112,9 +134,10 @@ descriptor-relative `open(..., O_DIRECTORY | O_NOFOLLOW)` followed by `fstat`
 is the binding point: its directory identity is held and becomes authoritative.
 A non-symlink real-directory substitution installed after `mkdirat` but before
 that first open may therefore be bound and published only when descriptor-
-relative enumeration shows it is empty at binding. The module promises root
-containment and an empty born-directory starting state, not authentication that
-the bound inode was created by this process.
+relative enumeration shows it is empty at binding. The module promises the
+descriptor/object containment defined above and an empty born-directory
+starting state, not authentication that the bound inode was created by this
+process.
 
 At the binding point, a symlink, non-directory, or non-empty directory fails.
 Emptiness is inspected through the held descriptor immediately after `fstat`
@@ -124,12 +147,12 @@ promise snapshot isolation. The bound directory is then published to the final
 name with a kernel atomic no-replace primitive
 (`renameatx_np(..., RENAME_EXCL)` on Darwin or
 `renameat2(..., RENAME_NOREPLACE)` on Linux), verifies that the final entry is
-the bound identity, and only then returns it. Every replacement after binding
-is rejected by identity checks before and after publication, during child
-writes, and during the final pre-log verification. All writes remain
-descriptor-relative beneath the captured root and verified immediate parent,
-so neither a pre-binding substitution nor a later race can redirect bytes
-outside the KB root. Ordinary rename is forbidden
+the bound identity, and only then returns it. A replacement inode installed at
+the expected pathname after binding is detected by identity checks before or
+after publication, during child writes, and during the final pre-log
+verification. Operations through an already-open descriptor still target the
+bound object if a non-cooperating actor renames that object elsewhere, as scoped
+above. Ordinary rename is forbidden
 because it may overwrite an empty late occupant. A platform without a reliable
 descriptor-relative atomic no-replace publication primitive fails safely; a
 failed publication preserves the late occupant. It never path-deletes the
@@ -150,10 +173,11 @@ leaves no staging pathname.
 During `apply_write()`, every returned born directory identity is retained as
 immutable local state and is required as the expected immediate-parent
 identity for its own `index.md`, the next child directory, and every companion
-or citable document born beneath it. A replacement installed after binding,
-whether before, during, or after publication, is therefore never trusted for a
-later pipeline write. Every born directory is identity-verified again before
-success is returned.
+or citable document born beneath it. A replacement inode installed at the old
+pathname after binding receives no pipeline bytes; a moved already-bound object
+may receive no-rollback partial bytes before the next pathname-identity check
+fails. Every born directory is identity-verified again before success is
+returned.
 
 Only identities cross individual rooted operations. Parent and staging
 descriptors remain operation-local and are closed before the next pipeline
@@ -225,9 +249,9 @@ metadata and produces byte-for-byte compatible successful output.
 
 Final born-directory identity verification occurs after every non-log write
 and immediately before the log create or append. It is the last fallible
-containment check before that final effect. A verification failure therefore
-leaves the log byte-identical; after a successful log write, receipt assembly
-and descriptor cleanup cannot report a new pipeline failure.
+pathname-identity check before that final effect. A verification failure
+therefore leaves the log byte-identical; after a successful log write, receipt
+assembly and descriptor cleanup cannot report a new pipeline failure.
 
 ## Goal
 

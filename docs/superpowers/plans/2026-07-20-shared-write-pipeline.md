@@ -11,15 +11,27 @@
 ## Human-Approved Containment Amendment
 
 This amendment supersedes the path-based safe-I/O code snippets in this plan.
-All persistence operations are rooted at the KB selected during preparation.
-Capture the root directory identity without keeping descriptors in
-`PreparedWrite`; for every operation, reopen and verify that root, traverse
-relative directory components using descriptor-relative no-follow opens, and
-keep the verified parent descriptor open through the final `mkdir`, exclusive
-create, inspect, read, identity-checked overwrite, or append. Refuse the
-operation with `OSError` before mutation on platforms lacking the necessary
-stdlib `dir_fd`/no-follow support. Close every descriptor on every path so an
+All namespace resolution begins at the KB selected during preparation. Capture
+the root directory identity without keeping descriptors in `PreparedWrite`;
+for every operation, reopen and verify that root, traverse relative directory
+components using descriptor-relative no-follow opens, and keep the verified
+parent descriptor open through the final `mkdir`, exclusive create, inspect,
+read, identity-checked overwrite, or append. Refuse the operation with
+`OSError` before mutation on platforms lacking the necessary stdlib
+`dir_fd`/no-follow support. Close every descriptor on every path so an
 abandoned preparation cannot leak handles.
+
+The containment guarantee is descriptor/object containment. Every descriptor
+is resolved from the captured root under no-follow rules, but once open it
+binds the filesystem object rather than its lexical pathname. Portable
+Darwin/Linux interfaces cannot stop a non-cooperating namespace writer from
+renaming that bound inode outside the lexical KB root between open and
+mutation. That post-open movement is outside the threat model; no exclusive-
+writer or snapshot-isolation guarantee is claimed. A later pathname-identity
+check returns the established typed failure, while bytes already written
+through the bound descriptor remain documented no-rollback partial state on
+the moved object. Ordinary symlink/path traversal, pre-open replacement, and a
+replacement installed at the old pathname retain their documented protections.
 
 Before returning from preparation, reject any explicit birth, companion, or
 mutation path that collides with an implicit born index, the affected existing
@@ -57,9 +69,11 @@ enumeration shows it is empty. A symlink, non-directory, or non-empty directory
 at binding fails before publication. Emptiness is checked through the held
 descriptor immediately after binding and again before publication; this
 narrows the concurrent-change window without promising snapshot isolation.
-Every replacement after binding is rejected before and after publication,
-during child writes, and before log/success. Root containment is mandatory,
-but creator-provenance authentication before first open is not promised.
+A replacement inode installed at an expected pathname after binding is
+detected before or after publication, during child writes, or before
+log/success. Operations already bound to an object follow that object under the
+threat-model scope above. Creator-provenance authentication before first open
+is not promised.
 
 The implementation atomically publishes the bound directory to the final name
 with a kernel no-replace primitive and verifies that the published entry
@@ -83,10 +97,11 @@ renames the staging entry away, leaving no staging pathname.
 requires the expected immediate-parent identity for every subsequent
 child-directory, born-index, companion, and document birth. It verifies every
 born directory identity again before success. A replacement directory
-installed after the first no-follow binding receives no pipeline bytes;
-failure is typed and prior completed effects remain without rollback. Parent
-and staging descriptors close within the one rooted directory-birth operation
-on every path.
+installed at the old pathname after the first no-follow binding receives no
+pipeline bytes. A moved already-bound directory may receive partial bytes
+before the next pathname-identity check returns a typed failure; prior completed
+effects remain without rollback. Parent and staging descriptors close within
+the one rooted directory-birth operation on every path.
 
 ## Command-Contract Reconciliation Amendment
 
@@ -149,8 +164,8 @@ path-acquiring convenience path. Full subdirectory `index.md` acquisition
 remains permitted because its body heading is required listing metadata.
 
 Final born-directory verification moves to immediately before the log create
-or append. It is the last fallible containment operation before the final log
-effect, so a verification failure leaves `log.md` byte-identical and no
+or append. It is the last fallible pathname-identity operation before the final
+log effect, so a verification failure leaves `log.md` byte-identical and no
 fallible pipeline operation follows a successful log write.
 
 ## Global Constraints
@@ -172,9 +187,11 @@ fallible pipeline operation follows a successful log write.
   no descriptor survives an individual rooted operation and no ordinary rename
   fallback may overwrite a late occupant. A real-directory substitution before
   that first open may become the bound identity only when descriptor-relative
-  enumeration observes it empty at binding. All writes remain beneath the
-  captured root. Failed staging is never path-deleted after a separate check and
-  remains identifiable partial state when present.
+  enumeration observes it empty at binding. Every descriptor is resolved from
+  the captured root; a non-cooperating post-open rename of its bound object is
+  outside the containment threat model and may carry documented partial bytes
+  outside the lexical root. Failed staging is never path-deleted after a
+  separate check and remains identifiable partial state when present.
 - Every existing mutation target, existing affected index, and existing `log.md` is inspected before the write boundary and updated using the captured `FileIdentity`.
 - The fixed application order is: missing directories and born indexes root-to-leaf; companions in declared order; citable document; mutations in declared order; nearest pre-existing affected index; log last.
 - Binary ingest represents the byte-identical original as a companion, so the original is created before the Markdown stub.
@@ -2370,6 +2387,23 @@ descriptor on supported Darwin/Linux systems.
 
 ---
 
+### Task 13: Define Descriptor/Object Containment Under Post-Open Rename
+
+**Decision:** The user accepts the portable POSIX limitation: a
+non-cooperating actor that renames an already-open inode outside the lexical KB
+root is outside the containment threat model. No lock, exclusive-writer model,
+or public interface is added.
+
+- [x] Scope the design and plan to descriptor/object containment and document
+      post-open movement as possible no-rollback partial state.
+- [ ] Pin the exact post-open parent-rename interval with a typed-failure,
+      replacement-stability, moved-object partial-bytes, and unchanged-log
+      regression.
+- [ ] Verify focused, command, architecture, exact AC, full-suite, diff, and
+      status gates.
+
+---
+
 ## Implementation Completion Checklist
 
 - [x] `slug()` is defined only in `src/kb/core/naming.py` and both commands import it.
@@ -2393,9 +2427,10 @@ descriptor on supported Darwin/Linux systems.
 - [x] Task 11 iterative traversal, prefix-only projected child acquisition,
       and pre-log final verification are complete.
 - [x] Task 12 first-open born-directory binding correction is implemented and
-      verified; only an empty real directory may be accepted at binding, all
-      post-binding swaps are rejected, and no write can escape the captured
-      root.
+      verified; only an empty real directory may be accepted at binding and
+      pathname replacements are detected at the available identity checks.
+- [ ] Task 13 descriptor/object containment scope and the accepted post-open
+      namespace-movement limitation are documented and regression-tested.
 - [ ] Revalidate the downstream CLI/core input-seam plan after this branch is
       integrated. Its source paths exist, but its separate prepared models
       still contain stale `missing_directories` assumptions and are explicitly
