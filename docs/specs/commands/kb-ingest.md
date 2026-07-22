@@ -66,7 +66,7 @@ Examples:
 
 The run is **pre-flight, then write**: steps 1–10 complete before the first byte is written, so any failure among them leaves the KB byte-for-byte untouched. A typed I/O failure during context acquisition or preparation is also pre-flight and leaves the KB untouched. The shared preparation stage formats and strict UTF-8 encodes the complete log row before any mutation; a log encoding failure is therefore a typed pre-flight `E_INGEST_IO`, never a raw `UnicodeEncodeError`. Only an OS error inside the write phase (steps 11–14) can leave partial state (documented in E12, not rolled back — same stance as kb init E2).
 
-**Pre-flight:**
+**Core preparation:**
 
 1. Resolve the KB root (00-shared §1: `--kb`, else upward discovery). No root → `E_NO_KB`, exit 2. Load `kb-config.json` (`E_CONFIG_INVALID` / `E_SCHEMA_UNSUPPORTED`, exit 2).
 2. Scan (00-shared §5). If `KB.malformed` is non-empty → `E_INGEST_MALFORMED`, exit 2, naming the malformed paths and directing to `kb validate` — the id-allocation guard of 00-shared §6.
@@ -85,10 +85,14 @@ The run is **pre-flight, then write**: steps 1–10 complete before the first by
    an unrelated failure does not allow invalid destination syntax or a surface
    error to bypass their established position in the algorithm.
 3. Validate the surface: `SOURCE` present iff `--from file`, `--about` present iff `--class feedback` (violations → `E_INGEST_USAGE`, exit 2); `--dest`, when given, is interpreted as a POSIX path regardless of host platform. It must contain no backslash, must not be absolute or use a Windows drive or UNC spelling, and must contain no `.` or `..` segments (a trailing `/` is stripped) → else `E_INGEST_DEST_INVALID`, exit 2. Before invoking any external adapter, inspect every existing component from the class directory through the joined target without following it: any symlink, junction, non-directory component, or component-inspection error → the same exact destination error. This rejection applies even when a link resolves to a directory inside the class directory. The target must additionally be equal to or beneath the class directory. The **target directory** is the class directory joined with the validated `--dest` parts. All of these checks are pre-flight, precede external acquisition, and write nothing.
+**CLI-adapter acquisition:**
+
 4. Acquire the input as **bytes** through the adapter registry (§4.1):
    - `file` — read `SOURCE`; missing, unreadable, or not a regular file → `E_INGEST_SOURCE_NOT_FOUND`, exit 2. Default origin: the absolute resolved `SOURCE` path. Source filename: the `SOURCE` basename.
    - `stdin` — read to EOF. On a TTY this reads interactively until Ctrl-D (documented, not an error). Default origin: `stdin`. No source filename.
    - `clipboard` — run the platform tool and capture its stdout: macOS `pbpaste`; Linux `wl-paste`, else `xclip -selection clipboard -o` (first found on `PATH`); Windows `powershell -NoProfile -Command Get-Clipboard`. No tool found, or the tool exits non-zero → `E_INGEST_CLIPBOARD`, exit 2. Default origin: `clipboard`. No source filename.
+**Core execution (steps 5–15):**
+
 5. Classify: strict UTF-8 decode. Decodes → **text**. Fails to decode: `--from file` → the **non-text** path (§5.2); `--from stdin|clipboard` → `E_INGEST_NOT_TEXT`, exit 1.
 6. Text normalization: CRLF and lone CR become LF; the body ends with exactly one trailing newline; every other byte is verbatim. If the decoded text is empty or whitespace-only → `E_INGEST_EMPTY`, exit 1.
 7. Resolve `--about` (feedback only) per 00-shared §4 (id first, then path). It must resolve to a document that carries an `id`; the canonical id is what gets stored. Unresolvable, or the target has no id (e.g. an `index.md`) → `E_INGEST_ABOUT_UNRESOLVED`, exit 1.
@@ -113,19 +117,25 @@ There is **no de-duplication**: re-ingesting identical content yields a new docu
 
 ### 4.1 Adapter registry (internal contract)
 
-Adapters live in `core/ingest.py` and register in a small table so later adapters (Slack, mail, ticketing — Phase 4) are additive:
+Concrete adapters live at the CLI seam and register in a private table so later adapters (Slack, mail, ticketing — Phase 4) are additive. Binding a source selection performs no I/O. Core preparation runs first; only then does the bound adapter acquire bytes:
 
 ```python
-class AdapterPayload(BaseModel):
-    data: bytes                    # raw input, undecoded
-    default_origin: str            # used when --origin is absent
-    source_filename: str | None    # basename for slug/title derivation, when the adapter has one
+class IngestSourceShape(BaseModel):
+    source_kind: Literal["file", "stdin", "clipboard"]
+    locator_present: bool
 
-Adapter = Callable[[str | None], AdapterPayload]   # receives SOURCE (None for stdin/clipboard)
-ADAPTERS: dict[str, Adapter]                       # "file" | "stdin" | "clipboard" | ...
+class AdapterPayload(BaseModel):
+    source_kind: Literal["file", "stdin", "clipboard"]
+    data: bytes
+    default_origin: str
+    source_filename: str | None = None
+
+class BoundIngestSource(NamedTuple):
+    shape: IngestSourceShape
+    acquire: Callable[[], AdapterPayload]
 ```
 
-Adapters only acquire bytes and provenance; text detection, normalization, naming, and filing are uniform and live outside the adapters. `AdapterPayload` is ingest-internal — it is **not** a 00-shared §7 core model.
+`IngestSourceShape` contains no source path and lets core validate the command surface after root/config/scan checks but before acquisition. Adapters only acquire bytes and provenance. Strict decoding, classification, normalization, naming, allocation, and filing remain uniform core behavior. The payload is self-describing; core execution rejects a payload whose `source_kind` differs from the prepared source shape.
 
 ## 5. Filesystem effects
 

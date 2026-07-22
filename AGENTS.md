@@ -22,14 +22,14 @@ The top-level layout is fixed — do not restructure:
 kb/                       (this repo; package name `kb`, console script `kb`)
 ├── pyproject.toml        entry point: kb = "kb.cli.app:app"
 ├── src/kb/
-│   ├── core/             pure logic: scan, query, graph, validate, ids, ingest, models, …
-│   └── cli/              Typer app + renderers; thin layer over core
+│   ├── core/             deterministic KB application logic: scan, query, graph, validate, ids, ingest, models, …
+│   └── cli/              Typer commands, renderers, and process-environment input adapters
 └── tests/                pytest; fixtures build throwaway KBs in tmp_path
 ```
 
 The internal file/folder structure **within** `src/kb/core/` and `src/kb/cli/` is **not fixed** — organize modules however makes the most sense as the implementation grows (split, merge, or rename files freely).
 
-Layering rule: `core/` is pure logic — no Typer, no printing, no `sys.exit`. `cli/` only parses arguments, calls core, renders output, and maps results to exit codes. This layering boundary is normative; the module breakdown inside each layer is a developer decision.
+Layering rule: `core/` is delivery-independent application logic. It may read and write the discovered KB filesystem, but it contains no Typer, printing, process exit, process-global standard-stream access, or process-launching calls. Concrete acquisition of user-supplied external files, stdin, and clipboard contents belongs to adapters in `cli/`; those adapters pass explicit bytes and provenance metadata through core-owned Pydantic models. Typer callbacks parse arguments, orchestrate prepare → acquire → execute, render output, and map failures to exit codes. This layering rule is normative; the module breakdown inside each layer is a developer decision.
 
 ## Invariants (never violate)
 
