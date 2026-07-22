@@ -1,7 +1,7 @@
 # Spec: `kb create`
 
-**Implementation context:** this file + [00-shared.md](00-shared.md).
-**Traceability:** PRD CLI-13, FM0/FM1 (synthetic frontmatter emission), DG1 (≥1 parent at birth), LS1 (`draft`/`current` at creation), LS2 (`timestamp` = `last_human_touch` at the creation instant), LS4 (append-only log). Invoked by the `kb-author` skill (AUT-6, AUT-7). DG5 (session-record parentage) is deliberately **not** enforced here — it stays a `kb validate` check, the single authoritative enforcement point.
+**Implementation context:** [PRD](../../prd.md) + [00-shared.md](00-shared.md) + this file. Precedence: PRD > this command spec > shared contract.
+**Traceability:** PRD CLI-13, FM0/FM1 (synthetic frontmatter emission), DG1 (≥1 parent at birth), LS1 (`draft`/`current` at creation), LS2 (`timestamp` = `last_human_touch` at the creation instant), LS4 (append-only log), LS5 (only birth-by-replacement sets `superseded`). Invoked by the `kb-author` skill (AUT-6, AUT-7). DG5 (session-record parentage) is deliberately **not** enforced here — it stays a `kb validate` check, the single authoritative enforcement point.
 
 ## 1. Purpose
 
@@ -19,14 +19,14 @@ kb create --type T --title TITLE --description DESC
 
 | Param | Kind | Type | Default | Meaning |
 |---|---|---|---|---|
-| `--type` | required option | text | — | Synthetic document type. Reserved types (`index`, `log`, `raw-source`, `chat`, `feedback`, `conventions`, `kb-config`, `health`) are rejected (`E_CREATE_TYPE_RESERVED`). A type absent from `kb-config.json` `types` is allowed with a stderr warning — the vocabulary is open (INIT-2, AUT-1) |
+| `--type` | required option | text | — | Synthetic document type. Reserved types (`index`, `log`, `raw-source`, `chat`, `feedback`, `charter`, `conventions`, `kb-config`, `health`) are rejected (`E_CREATE_TYPE_RESERVED`). When config `types` is non-empty, an absent type is allowed with a stderr warning; an empty list is unconstrained (CLI-6 vocabulary semantics) |
 | `--title` | required option | text | — | Frontmatter `title`; also drives the target filename (slugified) |
 | `--description` | required option | text | — | Frontmatter `description` (FM1a: at most two sentences; longer warns, never blocks) |
 | `--derived-from` | repeatable option | `REF` | — | A parent document (DG1). Resolved per 00-shared §4; must resolve to a document carrying an id; the canonical id is stored. Argument order is preserved; duplicates are dropped keeping the first occurrence |
 | `--supersedes` | option | `REF` | — | The document this one replaces. Must resolve to a **synthetic** document with `status` `draft` or `current`; it is flipped to `superseded` in the same write. Implicitly appended to `derived_from` when not explicitly listed, and satisfies the ≥1-parent rule by itself |
-| `--status` | option | `draft\|current` | `draft` | Lifecycle status at birth (LS1). `superseded`/`retired` are lifecycle transitions, not creation values |
+| `--status` | option | `draft\|current` | `current` | Lifecycle status at birth (LS1: accepted at creation). The human explicitly chooses `draft` when open questions remain; `superseded`/`retired` are lifecycle transitions, not creation values |
 | `--tag` | repeatable option | text | — | Frontmatter `tags` entry. Argument order preserved, duplicates dropped keeping the first occurrence; a tag absent from the `kb-config.json` `tags` vocabulary warns on stderr (FM1b enforcement stays with `kb validate`) |
-| `--instructions` | option | text | — | Optional `instructions` frontmatter field: standing guidance for the document's consumers |
+| `--instructions` | option | text | — | Optional `instructions` frontmatter field: maintenance directives for this document, including preservation rules and automatic-consolidation rules (PRD §6.6) |
 | `--body-file` | option | file path or `-` | — | Body source: a file, or `-` for stdin. Omitted → empty body (a legitimate `draft` stub). Normalized like ingest: LF line endings, exactly one trailing newline |
 | `--dest` | option | relative path | `synthetic/` | Subdirectory **relative to `synthetic/`** (`--dest specs` → `synthetic/specs/`). Created (with parents) if missing, each new directory with its `index.md`. Must not be absolute or contain `.`/`..` segments |
 | `--actor` | option | text | `kb-cli` | Actor recorded in the log entry (00-shared §8) |
@@ -50,9 +50,9 @@ kb create --type T --title TITLE --description DESC
 | `--description` | One-to-two-sentence summary, shown in index.md listings. |
 | `--derived-from` | Parent document (id or KB-relative path); repeatable. At least one parent is required. |
 | `--supersedes` | Document this one replaces; marked superseded in the same write and counted as a parent. |
-| `--status` | Lifecycle status at birth: draft or current. [default: draft] |
+| `--status` | Lifecycle status at birth: draft or current. [default: current] |
 | `--tag` | Tag for the tags frontmatter list; repeatable (a tag missing from the vocabulary warns). |
-| `--instructions` | Standing guidance for the document's consumers, stored in the instructions field. |
+| `--instructions` | Maintenance directives for this document, stored in the instructions field. |
 | `--body-file` | File to read the body from, or - for stdin. [default: empty body] |
 | `--dest` | Subdirectory under synthetic/ (e.g. specs → synthetic/specs/). Created with its index.md if missing. |
 | `--actor` | Actor recorded in the log entry. [default: kb-cli] |
@@ -63,7 +63,7 @@ kb create --type T --title TITLE --description DESC
 
 ```
 Examples:
-  kb create --type spec --title "Retry Policy" --description "Retry rules." --derived-from CHAT-000027 --body-file draft.md    Draft from a body file
+  kb create --type spec --title "Retry Policy" --description "Retry rules." --derived-from CHAT-000027 --status draft --body-file draft.md    Draft from a body file
   kb create --type outcome --title "Q3 Outcomes" --description "Q3 results." --derived-from CHAT-000012 --derived-from RAW-000004 --status current    Accepted at creation
   kb create --type spec --title "Retry Policy" --description "Retry rules." --supersedes KB-000031 --derived-from CHAT-000040 --body-file -    Replace KB-000031, body from stdin
   kb create --type note --title "Cache Sizing" --description "Sizing note." --derived-from RAW-000004 --dest notes    File under synthetic/notes/
@@ -71,37 +71,62 @@ Examples:
 
 ## 4. Behavior (normative algorithm)
 
-The run is **pre-flight, then write**: steps 1–11 complete before the first byte is written, so any failure among them leaves the KB byte-for-byte untouched. A typed I/O failure during context acquisition or preparation is also pre-flight and leaves the KB untouched. The shared preparation stage formats and strict UTF-8 encodes the complete log row before any mutation; a log encoding failure is therefore a typed pre-flight `E_CREATE_IO`, never a raw `UnicodeEncodeError`. Only an OS error inside the write phase (steps 12–15) can leave partial state (documented in E14, not rolled back — same stance as kb ingest E12).
+The run is **pre-flight, then write**: steps 1–12 complete before the first byte is written, so any failure among them leaves the KB byte-for-byte untouched. A typed I/O failure during context acquisition or preparation is also pre-flight and leaves the KB untouched. The shared preparation stage formats and strict UTF-8 encodes the complete log row before any mutation; a log encoding failure is therefore a typed pre-flight `E_CREATE_IO`, never a raw `UnicodeEncodeError`. Only an OS error inside the write phase (steps 13–16) can leave partial state (documented in E14, not rolled back — same stance as kb ingest E12).
 
-**Pre-flight:**
+**Core preparation:**
 
 1. Resolve the KB root (00-shared §1: `--kb`, else upward discovery). No root → `E_NO_KB`, exit 2. Load `kb-config.json` (`E_CONFIG_INVALID` / `E_SCHEMA_UNSUPPORTED`, exit 2).
 2. Scan (00-shared §5). If `KB.malformed` is non-empty → `E_CREATE_MALFORMED`, exit 2, naming the malformed paths and directing to `kb validate` — the id-allocation guard of 00-shared §6. An unsafe Markdown path encountered before a requested `--supersedes` reference can resolve is classified as a supersession-target failure only when the unsafe path is proven to be that exact target. A path reference can provide that proof by matching the unsafe root-relative path; an id reference requires a safely parsed matching document/path. If exact provenance is unavailable — including an unresolved id plus an unrelated unsafe Markdown path — the failure is generic `E_CREATE_IO`, exit 2, never `E_CREATE_SUPERSEDES_INVALID`.
 3. Validate the surface: `--dest`, when given, must be a relative path containing no `.` or `..` segments (a trailing `/` is stripped) → else `E_CREATE_DEST_INVALID`, exit 2. The **target directory** is `synthetic/` joined with `--dest`. Missing required options, a bad `--status` value, and unknown options are Typer-rendered usage errors (exit 2); `kb create` has no flag pairings beyond what Typer enforces natively, so it defines no usage error code of its own.
-4. Check `--type` (matched verbatim, case-sensitively): a reserved type (`index`, `log`, `raw-source`, `chat`, `feedback`, `conventions`, `kb-config`, `health`) → `E_CREATE_TYPE_RESERVED`, exit 2. A type absent from the config `types` list proceeds with one stderr warning naming the type. Each `--tag` absent from the config `tags` list proceeds with one stderr warning naming the tag. A `--description` of more than two sentences proceeds with one stderr warning (heuristic: a sentence ends at `.`, `!`, or `?` followed by whitespace or end-of-string; matches `kb validate`'s severity — warn, never block).
-5. Read the body, if `--body-file` was given: a file path → read it (missing, unreadable, or not a regular file → `E_CREATE_BODY_NOT_FOUND`, exit 2); `-` → read stdin to EOF (on a TTY this reads interactively until Ctrl-D — documented, not an error). The bytes must decode as strict UTF-8 → else `E_CREATE_BODY_NOT_TEXT`, exit 1. Normalize: CRLF and lone CR become LF; the body ends with exactly one trailing newline. Empty or whitespace-only input — like an omitted `--body-file` — yields the **empty body**: the document ends immediately after the closing `---` line. Unlike ingest, an empty body is legal: a `draft` stub the author fills later.
-6. Resolve each `--derived-from` per 00-shared §4 (id first, then path). Each must resolve to a document that carries an `id` (numeric or reserved slug); the canonical id is what gets stored. Unresolvable, or the target has no id (e.g. an `index.md`) → `E_CREATE_PARENT_UNRESOLVED`, exit 1. The stored list preserves argument order; duplicates are dropped keeping the first occurrence.
-7. Resolve `--supersedes`, if given, the same way (unresolvable or no id → `E_CREATE_SUPERSEDES_UNRESOLVED`, exit 1). The target must be a **synthetic** document (`DocClass SYNTHETIC`) whose frontmatter `status` is literally `draft` or `current` → else `E_CREATE_SUPERSEDES_INVALID`, exit 1 (superseding an already-`superseded`/`retired` document almost always means the wrong target — supersede its live successor instead). Append the target's id to `derived_from` if not already present: the new version derives from the one it replaces.
-8. If `derived_from` is empty (no `--derived-from` and no `--supersedes`) → `E_CREATE_NO_PARENTS`, exit 2 (DG1).
-9. Allocate the id: prefix = `id_prefixes["synthetic"]` (default `KB`), number = `next_id` over the scan (00-shared §6).
-10. Compute the filename: slug(`--title`) + `.md`, with ingest's slug(): NFKD-normalize, drop non-ASCII, lowercase, collapse every run of characters outside `[a-z0-9]` into a single `-`, trim leading/trailing `-`; an empty result falls back to the lowercased id. **Collision:** treat the candidate path as occupied when it already exists in the target directory **or** when it is the universally reserved CLI-maintained `<target>/index.md`, whether that index is present, would be born with a new target directory, or is missing from a damaged existing target directory; append `-<lowercased id>` to the stem (`retry-policy.md` → `retry-policy-kb-000042.md`, `index.md` → `index-kb-000042.md`). This reservation keeps document birth distinct from directory maintenance. If an existing target directory is missing its required index, the suffixed document name is selected and preparation then returns typed `E_CREATE_IO` without mutation; no raw pipeline `ValueError` escapes. Nothing existing, reserved, or implicit is ever overwritten.
-11. Construct and validate the `SyntheticFrontmatter` (00-shared §7): `id`, `type`, `title`, `description`, `status`, `derived_from`, `timestamp`, `last_human_touch`, plus `tags` / `supersedes` / `instructions` when supplied. `timestamp` = `last_human_touch` = the invocation instant as ISO-8601 UTC with seconds precision (`YYYY-MM-DDTHH:MM:SSZ`) — creation is a human-confirmed act, so the two coincide at birth (LS2). When superseding, prepare the target's edit in memory: its `status` value becomes `superseded` and its `timestamp` and `last_human_touch` values become the same instant; **every other byte of the file is preserved** — key order, unknown keys, YAML styles, body. (A conforming target carries all three keys — `status` was just checked; a nonconforming target missing `timestamp` or `last_human_touch` gets the missing key(s) appended at the end of its frontmatter block, in that order.) Construct the shared write intent; shared preparation formats and strict UTF-8 encodes the exact `created` log row before the write phase and retains those bytes privately.
+4. Check `--type` (matched verbatim, case-sensitively): a reserved type (`index`, `log`, `raw-source`, `chat`, `feedback`, `charter`, `conventions`, `kb-config`, `health`) → `E_CREATE_TYPE_RESERVED`, exit 2. When config `types` is non-empty, a type absent from it proceeds with one stderr warning naming the type; an empty `types` list is unconstrained and emits no warning. Each `--tag` absent from the config `tags` list proceeds with one stderr warning naming the tag (an empty `tags` list means none are declared). A `--description` of more than two sentences proceeds with one stderr warning (heuristic: a sentence ends at `.`, `!`, or `?` followed by whitespace or end-of-string; matches `kb validate`'s severity — warn, never block).
+5. Resolve each `--derived-from` per 00-shared §4 (id first, then path). Each must resolve to a document that carries an `id` (numeric or reserved slug); the canonical id is what gets stored. Unresolvable, or the target has no id (e.g. an `index.md` or `log.md`) → `E_CREATE_PARENT_UNRESOLVED`, exit 1. The stored list preserves argument order; duplicates are dropped keeping the first occurrence.
+6. Resolve `--supersedes`, if given, the same way (unresolvable or no id → `E_CREATE_SUPERSEDES_UNRESOLVED`, exit 1). The target must be a **synthetic** document (`DocClass SYNTHETIC`) whose frontmatter `status` is literally `draft` or `current` → else `E_CREATE_SUPERSEDES_INVALID`, exit 1 (superseding an already-`superseded`/`retired` document almost always means the wrong target — supersede its live successor instead). Append the target's id to `derived_from` if not already present: the new document derives from the one it replaces. This atomic status flip is the write surface's single documented coupling: only `kb create --supersedes` ever sets `status: superseded` (LS5); `kb revise` never does.
+7. If `derived_from` is empty (no `--derived-from` and no `--supersedes`) → `E_CREATE_NO_PARENTS`, exit 2 (DG1).
+
+**CLI-adapter acquisition:**
+
+8. Acquire body bytes through the CLI adapter contract (§4.1). Omitted `--body-file` produces `None`; a file path must name a readable regular file or fails `E_CREATE_BODY_NOT_FOUND`, exit 2; `-` reads stdin to EOF (on a TTY this reads interactively until Ctrl-D—documented, not an error). The adapter performs no decoding or normalization and never writes either path.
+
+**Core execution:**
+
+9. For supplied bytes, strict UTF-8 decode or fail `E_CREATE_BODY_NOT_TEXT`, exit 1. Normalize CRLF and lone CR to LF and end non-empty content with exactly one trailing newline. Empty or whitespace-only input—like omitted body bytes—yields the **empty body**: the document ends immediately after the closing `---` line. Unlike ingest, an empty body is mechanically legal; a human who intends a stub explicitly selects `--status draft`.
+10. Allocate the id: prefix = `id_prefixes["synthetic"]` (default `KB`), number = `next_id` over the scan (00-shared §6).
+11. Compute the filename: slug(`--title`) + `.md`, with ingest's slug(): NFKD-normalize, drop non-ASCII, lowercase, collapse every run of characters outside `[a-z0-9]` into a single `-`, trim leading/trailing `-`; an empty result falls back to the lowercased id. **Collision:** treat the candidate path as occupied when it already exists in the target directory **or** when it is the universally reserved CLI-maintained `<target>/index.md`, whether that index is present, would be born with a new target directory, or is missing from a damaged existing target directory; append `-<lowercased id>` to the stem (`retry-policy.md` → `retry-policy-kb-000042.md`, `index.md` → `index-kb-000042.md`). This reservation keeps document birth distinct from directory maintenance. If an existing target directory is missing its required index, the suffixed document name is selected and preparation then returns typed `E_CREATE_IO` without mutation; no raw pipeline `ValueError` escapes. Nothing existing, reserved, or implicit is ever overwritten.
+12. Construct and validate the `SyntheticFrontmatter` (00-shared §7): `id`, `type`, `title`, `description`, `status`, `derived_from`, `timestamp`, `last_human_touch`, plus `tags` / `supersedes` / `instructions` when supplied. `timestamp` = `last_human_touch` = the invocation instant as ISO-8601 UTC with seconds precision (`YYYY-MM-DDTHH:MM:SSZ`) — creation is a human-confirmed act, so the two coincide at birth (LS2). When superseding, prepare the target's edit in memory: its `status` value becomes `superseded` and its `timestamp` and `last_human_touch` values become the same instant; **every other byte of the file is preserved** — key order, unknown keys, YAML styles, body. (A conforming target carries all three keys — `status` was just checked; a nonconforming target missing `timestamp` or `last_human_touch` gets the missing key(s) appended at the end of its frontmatter block, in that order.) Construct the shared write intent; shared preparation formats and strict UTF-8 encodes the exact `created` log row before the write phase and retains those bytes privately.
 
 **Write phase:**
 
-12. Create missing directories along the target path. Each newly created directory gets its `index.md` in the same operation (directory invariant, 00-shared) — born current per the §5.3 template, already listing its child.
-13. Write the new document: the frontmatter block in the pinned key order (§5.1), then `---`, then the body with **no inserted heading or blank line** (nothing at all when the body is empty). Then rewrite the superseded document, if any, per step 11.
-14. Regenerate `index.md` listing bodies (grammar: kb-init §5.2): the target directory's (unless it was just created — then it is already current) and, when step 12 created directories, the **nearest pre-existing ancestor's** (its `## Subdirectories` gains the new child). The superseded document's directory index is **not** regenerated for the status flip — its listing line (id, title, description) is unaffected. No other `index.md` is touched; global freshness is `kb index`'s job.
-15. Append the log entry (00-shared §8) using only the exact bytes produced during step 11: action `created`, actor `--actor` (default `kb-cli`), ids = the new id, followed by the superseded id when `--supersedes` was used (`KB-000042,KB-000031`), note = `<document relpath>`, with ` supersedes <old id>` appended when superseding. The write phase performs no log text formatting or encoding. A missing `log.md` is first recreated with the kb-init §5.3 scaffold (frontmatter + header comment + heading, no `initialized` line) and then appended.
-16. Report per §6, exit 0.
+13. Create missing directories along the target path. Each newly created directory gets its `index.md` in the same operation (directory invariant, 00-shared) — born current per the §5.3 template, already listing its child.
+14. Write the new document: the frontmatter block in the pinned key order (§5.1), then `---`, then the body with **no inserted heading or blank line** (nothing at all when the body is empty). Then rewrite the superseded document, if any, per step 12.
+15. Regenerate `index.md` listing bodies (grammar: kb-init §5.2): the target directory's (unless it was just created — then it is already current) and, when step 13 created directories, the **nearest pre-existing ancestor's** (its `## Subdirectories` gains the new child). The superseded document's directory index is **not** regenerated for the status flip — its listing line (id, title, description) is unaffected. No other `index.md` is touched; global freshness is `kb index`'s job.
+16. Append the log entry (00-shared §8) using only the exact bytes produced during step 12: action `created`, actor `--actor` (default `kb-cli`), ids = the new id, followed by the superseded id when `--supersedes` was used (`KB-000042,KB-000031`), note = `<document relpath>`, with ` supersedes <old id>` appended when superseding. The write phase performs no log text formatting or encoding. A missing `log.md` is first recreated with the kb-init §5.3 scaffold (frontmatter + header comment + heading, no `initialized` line) and then appended.
+17. Report per §6, exit 0.
 
 There is **no de-duplication or content validation**: creating a second document with the same title yields a new document with a new id and a collision-suffixed filename; whether the content is any good is the human's and the skill's concern. Full schema enforcement across the KB (including DG5) is `kb validate`'s job. No step runs `git` or inspects Git state.
+
+### 4.1 Body adapter (internal contract)
+
+Concrete body acquisition lives at the CLI seam (00-shared §5.1). Binding the
+selection performs no I/O. After core preparation succeeds, the callback
+acquires optional bytes and passes them explicitly to core execution:
+
+```python
+class BoundCreateBody:
+    @property
+    def source_kind(self) -> Literal["none", "file", "stdin"]: ...
+
+    def acquire(self) -> bytes | None: ...
+```
+
+The core never opens the external file or reads process-global stdin. Strict
+UTF-8 decoding, normalization, validation, allocation, and persistence remain
+core behavior.
 
 ## 5. Filesystem effects
 
 ### 5.1 The created document (pinned key order)
 
-`kb create --type spec --title "Webhook Retry Policy" --description "Defines retry and backoff behavior for outbound webhooks." --derived-from CHAT-000027 --body-file draft.md` into a KB whose only chat record is `CHAT-000027` writes `synthetic/webhook-retry-policy.md`:
+`kb create --type spec --title "Webhook Retry Policy" --description "Defines retry and backoff behavior for outbound webhooks." --derived-from CHAT-000027 --status draft --body-file draft.md` into a KB whose only chat record is `CHAT-000027` writes `synthetic/webhook-retry-policy.md`:
 
 ```markdown
 ---
@@ -256,12 +281,12 @@ created KB-000042 as synthetic/webhook-retry-policy-kb-000042.md
 | E12 | `--supersedes` unresolvable, or resolves to a document without an id | `E_CREATE_SUPERSEDES_UNRESOLVED` naming the ref | 1 |
 | E13 | `--supersedes` target not synthetic, or its `status` not `draft`/`current` (already `superseded`, `retired`, or missing) | `E_CREATE_SUPERSEDES_INVALID` naming the target and its status | 1 |
 | E14 | OS error during context acquisition, preparation (including log formatting/UTF-8 encoding), or the write phase | `E_CREATE_IO` with the OS message; pre-flight failures leave the KB untouched, while write-phase failures may leave completed earlier effects (documented, not rolled back) | 2 |
-| E15 | `--type` unreserved but absent from config `types` | one stderr warning naming the type; document written | 0 |
+| E15 | Config `types` is non-empty and `--type` is unreserved but absent from it | one stderr warning naming the type; document written. An empty `types` list is unconstrained and emits no warning | 0 |
 | E16 | A `--tag` absent from the config `tags` vocabulary | one stderr warning naming the tag; tags written as given | 0 |
 | E17 | `--description` longer than two sentences (§4 step 4 heuristic) | one stderr warning; never blocks | 0 |
-| E18 | Body empty or whitespace-only (or `--body-file` omitted) | empty body — a legitimate draft stub | 0 |
+| E18 | Body empty or whitespace-only (or `--body-file` omitted) | empty body; mechanically legal. Use `--status draft` when it is an incomplete stub | 0 |
 | E19 | Filename collision in the target directory, including the universally reserved candidate `<target>/index.md` whether present, implicit, or missing from a damaged existing directory | stem suffixed `-<lowercased id>`; no existing or reserved index path is overwritten (a missing required index still fails preparation as E14) | 0 when the destination is otherwise valid |
-| E20 | `log.md` missing at step 15 | recreated with the kb-init §5.3 scaffold (no `initialized` line), then appended | 0 |
+| E20 | `log.md` missing at step 16 | recreated with the kb-init §5.3 scaffold (no `initialized` line), then appended | 0 |
 | E21 | `--body-file -` on a TTY | reads interactively until EOF (Ctrl-D); not an error | — |
 
 Every pre-flight failure (E1–E13) leaves the KB byte-for-byte untouched (§4).
@@ -270,22 +295,22 @@ Every pre-flight failure (E1–E13) leaves the KB byte-for-byte untouched (§4).
 
 One pytest test per item (00-shared §10), named `test_ac<NN>_<slug>`. Each is independently testable with an unambiguous pass condition; `timestamp`/`last_human_touch` and log timestamps are pattern-matched (and cross-checked for equality where stated), everything else asserted exactly. Every §4 step and §7 row maps to at least one AC except E21 (interactive TTY stdin), which is not exercisable through `CliRunner` and stays documented behavior only.
 
-**Coverage map:** happy path & pinned content AC1–AC9 (§4, §5.1, §5.4, §5.5, §6) · id allocation & guard AC10–AC12 (§4 steps 2/9, E4) · parents AC13–AC18 (§4 steps 6/8, E10, E11) · supersession AC19–AC27 (§4 steps 7/11/13/14, §5.2, E12, E13) · type, tags & description warnings AC28–AC31 (§4 step 4, E7, E15–E17) · titles, slugs & collisions AC32–AC34 (§4 step 10, E19) · `--dest` & index effects AC35–AC38 (§4 steps 3/12/14, §5.3, §5.4, E6) · body input AC39–AC40 (§4 step 5, E8, E9; empty-body cases live in AC4) · usage & environment errors AC41–AC44 (E1–E3, E5) · atomicity, I/O & log AC45–AC48 (§4 pre-flight, steps 12–15, E14, E20) · output, help & Git-agnosticism AC49–AC52 (§3, §6, 00-shared).
+**Coverage map:** happy path & pinned content AC1–AC9 (§4, §5.1, §5.4, §5.5, §6) · id allocation & guard AC10–AC12 (§4 steps 2/10, E4) · parents AC13–AC18 (§4 steps 5/7, E10, E11) · supersession AC19–AC27 (§4 steps 6/12/14/15, §5.2, E12, E13) · type, tags & description warnings AC28–AC31 (§4 step 4, E7, E15–E17) · titles, slugs & collisions AC32–AC34 (§4 step 11, E19) · `--dest` & index effects AC35–AC38 (§4 steps 3/13/15, §5.3, §5.4, E6) · body input AC39–AC40 (§4 steps 8–9, §4.1, E8, E9; empty-body cases live in AC4) · usage & environment errors AC41–AC44 (E1–E3, E5) · atomicity, I/O & log AC45–AC48 (§4 pre-flight, steps 13–16, E14, E20) · output, help & Git-agnosticism AC49–AC52 (§3, §6, 00-shared).
 
 | # | Given / When / Then |
 |---|---|
-| AC1 | Given a KB containing one chat record `CHAT-000001`, when `kb create --type spec --title "Webhook Retry Policy" --description "Defines retry and backoff behavior for outbound webhooks." --derived-from CHAT-000001` runs, then exit 0 and `synthetic/webhook-retry-policy.md` exists with frontmatter containing exactly the keys `id`, `type`, `title`, `description`, `status`, `derived_from`, `timestamp`, `last_human_touch` in that order, with `id == KB-000001`, `type == spec`, `status == draft` (the default), `derived_from == [CHAT-000001]` as a block sequence — and the only changes anywhere under the KB root are that document, `synthetic/index.md`, and one appended `log.md` line. |
+| AC1 | Given a KB containing one chat record `CHAT-000001`, when `kb create --type spec --title "Webhook Retry Policy" --description "Defines retry and backoff behavior for outbound webhooks." --derived-from CHAT-000001` runs, then exit 0 and `synthetic/webhook-retry-policy.md` exists with frontmatter containing exactly the keys `id`, `type`, `title`, `description`, `status`, `derived_from`, `timestamp`, `last_human_touch` in that order, with `id == KB-000001`, `type == spec`, `status == current` (the LS1 default), `derived_from == [CHAT-000001]` as a block sequence — and the only changes anywhere under the KB root are that document, `synthetic/index.md`, and one appended `log.md` line. |
 | AC2 | Given AC1's run, then `timestamp` and `last_human_touch` are byte-identical to each other and parse as `YYYY-MM-DDTHH:MM:SSZ`. |
 | AC3 | Given a `--body-file` with CRLF and lone-CR line endings, no trailing newline, and tricky content (a leading `---` line, Unicode, trailing spaces), when the document is created, then the body — everything after the closing `---` of the frontmatter block — contains only LF line endings, ends with exactly one newline, all other bytes verbatim, with no inserted heading or blank line. |
-| AC4 | Given case (a) no `--body-file` and case (b) a `--body-file` containing only whitespace, when the document is created, then exit 0 and the file ends immediately after the closing `---` line (empty body, E18). |
+| AC4 | Given `--status draft` and case (a) no `--body-file` or case (b) a `--body-file` containing only whitespace, when the document is created, then exit 0 and the file ends immediately after the closing `---` line (empty draft body, E18). |
 | AC5 | Given body text piped to `--body-file -`, then the document body is that text (normalized per AC3). |
 | AC6 | Given AC1's run, then `synthetic/index.md` gained exactly the line `* [KB-000001][Webhook Retry Policy](webhook-retry-policy.md) - Defines retry and backoff behavior for outbound webhooks.` under `## Files` (the description tail present), its frontmatter `description` is unchanged, and no other `index.md` in the KB changed. |
 | AC7 | Given AC1's run, then `log.md` gained exactly one line matching `- <timestamp> | created | kb-cli | KB-000001 | synthetic/webhook-retry-policy.md` with `<timestamp>` parsing as ISO-8601 UTC. |
 | AC8 | Given AC1's run, then stdout is exactly: `created  synthetic/webhook-retry-policy.md`, `updated  synthetic/index.md` (alphabetical), then `created KB-000001 as synthetic/webhook-retry-policy.md`, with no `log.md` line. |
-| AC9 | Given `--status current`, then the frontmatter reads `status: current` (LS1: acceptance at creation). |
+| AC9 | Given `--status draft`, then the frontmatter reads `status: draft`, overriding LS1's `current` default because the human chose to leave open questions pending. |
 | AC10 | Given a KB whose synthetic documents carry ids `KB-000001` and `KB-000005` (a gap), when a document is created, then the new id is `KB-000006` — max+1, gaps never refilled. |
 | AC11 | Given case (a) a `kb-config.json` with `id_prefixes.synthetic == "SYN"`, then creation allocates `SYN-000001`; case (b) a `kb-config.json` whose `id_prefixes` key is absent entirely, then the documented default applies and creation allocates `KB-000001` (00-shared §7 `Config` defaults). |
-| AC12 | Given a KB containing a `*.md` file whose frontmatter does not parse, when any `kb create` runs, then exit 2 with `E_CREATE_MALFORMED` naming that path, and nothing is written (no file, no index change, no log line). |
+| AC12 | Given a KB containing a `*.md` file that is in `KB.malformed` because case (a) its frontmatter does not parse or case (b) `type` is absent/empty/non-string, when any `kb create` runs, then exit 2 with `E_CREATE_MALFORMED` naming that path, and nothing is written (no file, no index change, no log line). |
 | AC13 | Given `--derived-from RAW-000002 --derived-from CHAT-000001 --derived-from KB-000001`, then `derived_from` is emitted as a block sequence in exactly that argument order. |
 | AC14 | Given `--derived-from CHAT-000001 --derived-from RAW-000002 --derived-from CHAT-000001` (a duplicate), then `derived_from == [CHAT-000001, RAW-000002]` — first occurrence kept, order preserved. |
 | AC15 | Given case (a) `--derived-from raw/chats/planning.md` where that document carries id `CHAT-000001`, then `derived_from` stores `CHAT-000001` (canonical id, not the path); case (b) `--derived-from governance/conventions.md`, then it stores the reserved slug id `GOVERNANCE-CONVENTIONS`. |
@@ -301,8 +326,8 @@ One pytest test per item (00-shared §10), named `test_ac<NN>_<slug>`. Each is i
 | AC25 | Given `--supersedes RAW-000001` (a raw document), then exit 1 with `E_CREATE_SUPERSEDES_INVALID` and nothing written. |
 | AC26 | Given a synthetic target whose `status` is case (a) `superseded`, case (b) `retired`, and case (c) absent, then exit 1 with `E_CREATE_SUPERSEDES_INVALID` and nothing written. |
 | AC27 | Given a superseded target in `synthetic/archive/` and a new document created in `synthetic/` (no `--dest`), then the target's file appears under `updated` but `synthetic/archive/index.md` is byte-identical afterwards — the status flip does not regenerate the target's directory index. |
-| AC28 | Given `--type index` (case a), `--type chat` (case b), and `--type health` (case c), then exit 2 with `E_CREATE_TYPE_RESERVED` naming the type, nothing written. |
-| AC29 | Given case (a) `--type retro` where `retro` is absent from config `types`, then exit 0, the document is written with `type: retro`, and stderr contains one warning naming `retro`; case (b) `--type spec` where `spec` is declared, then no type warning on stderr. |
+| AC28 | Given `--type index` (case a), `--type chat` (case b), `--type charter` (case c), and `--type health` (case d), then exit 2 with `E_CREATE_TYPE_RESERVED` naming the type, nothing written. |
+| AC29 | Given case (a) non-empty config `types: [spec]` and `--type retro`, then exit 0, the document is written with `type: retro`, and stderr contains one warning naming `retro`; case (b) `--type spec` where `spec` is declared, then no type warning; case (c) config `types: []` and `--type retro`, then no type warning because the vocabulary is unconstrained. |
 | AC30 | Given case (a) `--tag api --tag internal` where only `api` is in the config `tags` vocabulary, then exit 0, `tags == [api, internal]` (argument order), and stderr contains one warning naming `internal` only; case (b) all tags declared, then no tag warning. |
 | AC31 | Given case (a) a three-sentence `--description`, then exit 0, the description is written verbatim, and stderr contains one length warning; case (b) a two-sentence description, then no length warning. |
 | AC32 | Given `--title "Résumé Über 2026!"`, then the document filename is `resume-uber-2026.md` (NFKD → ASCII fold, lowercase, hyphen runs collapsed, trimmed) and frontmatter `title` is the verbatim `Résumé Über 2026!`. |
@@ -332,7 +357,7 @@ One pytest test per item (00-shared §10), named `test_ac<NN>_<slug>`. Each is i
 - **Judgment about content**: what to write, which parents are right, `draft` vs `current` — the human's and the `kb-author` skill's job (AUT-1…AUT-5); this command records their decisions mechanically.
 - **DG5 (session-record parentage) enforcement** — `kb validate` is the single authoritative enforcement point. The recommended flow ingests the session record first (`kb ingest --class chat`), then supplies its id among `--derived-from`.
 - **DG3 coverage-note updates to parent documents** (AUT-6 "updates parents' coverage notes where applicable") — the `kb-author` skill's job; `kb create` never modifies parents (only the `--supersedes` target, and only its three lifecycle values).
-- **In-place revision** of an existing synthetic document — editorial body/frontmatter edits, adding a parent after creation, status changes short of supersession — deferred (OQ6); v1 expresses semantic revision as supersession via `--supersedes`.
+- **Revision** of an existing synthetic document — editorial body/frontmatter changes, adding a parent or associative link, explicit status transitions short of supersession, and `pending_upstream` management — belongs exclusively to `kb revise` (CLI-14). Supersession here is reserved for genuine replacement or rescoping.
 - **Transitive supersession propagation** to the superseded document's descendants (CS3) — skill judgment, driven through query commands.
 - **Full FM1/FM1b schema and vocabulary enforcement** across the KB (including tag vocabulary and the `--description` length as an error) — `kb validate`'s job; this command only warns at the moment of creation.
 - De-duplication of same-titled or similar documents — collision-suffixed filenames, never merged.

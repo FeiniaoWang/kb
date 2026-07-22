@@ -1,11 +1,11 @@
 # Spec: `kb ingest`
 
-**Implementation context:** this file + [00-shared.md](00-shared.md).
+**Implementation context:** [PRD](../../prd.md) + [00-shared.md](00-shared.md) + this file. Precedence: PRD > this command spec > shared contract.
 **Traceability:** PRD CLI-8, ING-1 (the deterministic normalize-and-file portion), ING-6 (feedback intake mechanics), FM0/FM1 (raw reduced schema), LS4 (append-only evidence, log entry). The overlap survey, conflict resolution, and propagation (ING-2…ING-5) belong to the `kb-ingest` skill, not this command.
 
 ## 1. Purpose
 
-Normalize incoming material into the knowledge base as immutable raw evidence: read from a file, stdin, or the clipboard, and file exactly one Markdown document into `raw/sources/`, `raw/chats/`, or `raw/feedback/` with the next sequential id and the reduced raw frontmatter. The body is copied **verbatim** — ingest normalizes and files; it never synthesizes (CLI-8). A non-text original is copied unchanged alongside a generated Markdown stub, which becomes the citable form. Ingest and `kb create` are the two v1 commands that allocate ids — the raw and synthetic write paths.
+Normalize incoming material into the knowledge base as immutable raw evidence: read from a file, stdin, or the clipboard, and file exactly one Markdown document into `raw/sources/`, `raw/chats/`, or `raw/feedback/` with the next sequential id and the reduced raw frontmatter. Text content is preserved with only the specified line-ending and trailing-newline normalization — ingest files evidence; it never synthesizes (CLI-8). A non-text original is copied byte-identically alongside a generated Markdown stub, which becomes the citable form. Ingest and `kb create` are the two v1 commands that allocate ids — the raw and synthetic birth paths.
 
 ## 2. CLI surface
 
@@ -34,7 +34,7 @@ kb ingest --class source|chat|feedback --from file|stdin|clipboard [SOURCE]
 
 > Ingest material into the knowledge base as immutable raw evidence.
 >
-> Reads from a file, stdin, or the clipboard and files one normalized Markdown document into raw/sources/, raw/chats/, or raw/feedback/, with the next sequential id and the reduced raw frontmatter. The body is copied verbatim — ingest normalizes and files, it never synthesizes. A non-text file is copied unchanged alongside a generated Markdown stub, which becomes the citable form. Feedback requires --about: the document the feedback concerns. Updates the affected index.md listings and appends an ingested entry to log.md. Does not touch Git.
+> Reads from a file, stdin, or the clipboard and files one normalized Markdown document into raw/sources/, raw/chats/, or raw/feedback/, with the next sequential id and the reduced raw frontmatter. Text is preserved with mechanical newline normalization only — ingest files evidence, it never synthesizes. A non-text file is copied byte-identically alongside a generated Markdown stub, which becomes the citable form. Feedback requires --about: the document the feedback concerns. Updates the affected index.md listings and appends an ingested entry to log.md. Does not touch Git.
 
 **Option help strings:**
 
@@ -313,7 +313,7 @@ One pytest test per item (00-shared §10), named `test_ac<NN>_<slug>`. Each is i
 | AC8 | Given a KB containing a synthetic document `KB-000007`, when `kb ingest --class feedback --from stdin --about KB-000007` runs with piped text, then the document lands in `raw/feedback/` with `type: feedback`, `id == FEED-000001`, and `about: KB-000007` as the last frontmatter key. |
 | AC9 | Given a KB whose raw sources carry ids `RAW-000001` and `RAW-000005` (a gap), when a source is ingested, then the new id is `RAW-000006` — max+1, gaps never refilled. |
 | AC10 | Given case (a) a `kb-config.json` with `id_prefixes.source == "SRC"`, then a source ingest allocates `SRC-000001`; case (b) a `kb-config.json` whose `id_prefixes` key is absent entirely, then the documented default applies and a source ingest allocates `RAW-000001` (00-shared §7 `Config` defaults). |
-| AC11 | Given a KB containing a `*.md` file whose frontmatter does not parse, when any `kb ingest` runs, then exit 2 with `E_INGEST_MALFORMED` naming that path, and nothing is written (no file, no index change, no log line). |
+| AC11 | Given a KB containing a `*.md` file that is in `KB.malformed` because case (a) its frontmatter does not parse or case (b) `type` is absent/empty/non-string, when any `kb ingest` runs, then exit 2 with `E_INGEST_MALFORMED` naming that path, and nothing is written (no file, no index change, no log line). |
 | AC12 | Given case (a) `--from file --origin https://example.com/post`, then the document's frontmatter reads exactly `origin: https://example.com/post` (the URL overrides the file-path default), YAML-parsing the document returns that identical string, and the log note ends `from https://example.com/post`; case (b) `--from stdin --origin "meeting recording"`, then `origin` is `meeting recording` (a label overriding `stdin`). |
 | AC13 | Given `--title "Meeting Notes!"`, then the document is `meeting-notes.md` (slugified) and frontmatter `title` is the verbatim `Meeting Notes!`. |
 | AC14 | Given a source file named `q3_planning-notes.md` and no `--title`, then the filename is `q3-planning-notes.md` and the title is `q3 planning notes` (stem with `-`/`_` → spaces, no case change). |

@@ -1,8 +1,8 @@
 # `kb` CLI — Shared Foundations (normative)
 
 **Status:** Living reference. Every command spec in this directory assumes this document.
-**Implementation context rule:** to implement or validate any `kb` command, an agent reads exactly two files — this one and the command's own spec (`kb-<command>.md`).
-**Sources:** [PRD §7.1](../../prd.md), [master design 2026-07-13](../../superpowers/specs/2026-07-13-kb-cli-design.md). Where this document is more specific, this document wins.
+**Implementation context rule:** to implement or validate any `kb` command, read the [PRD](../../prd.md), this shared contract, and the command's own spec (`kb-<command>.md`).
+**Sources and precedence:** [PRD](../../prd.md) > command spec > this shared contract > [master design 2026-07-13](../../superpowers/specs/2026-07-13-kb-cli-design.md). A lower-precedence document may add detail, but never override a higher-precedence requirement.
 
 **Git-agnostic (applies to every command).** No `kb` command runs `git` or inspects Git state; the CLI only reads and writes files. The KB is stored in Git (NFR-1/NFR-7), but initializing, staging, committing, and branching the repository are the user's or a skill's responsibility.
 
@@ -34,7 +34,7 @@ The file is a JSON object. Minimum content written by `kb init`:
 
 `schema` is the KB layout schema version — a **reserved, tooling-owned** key, not hand-edited by stewards. Commands MUST refuse (exit 2, `E_SCHEMA_UNSUPPORTED`) a schema newer than they know. The file carries no comment/annotation keys; unknown keys are ignored by `load_config`. Field-by-field documentation for `kb-config.json` lives in the governance document `governance/kb-config.md` (id `GOVERNANCE-KB-CONFIG`), not inside the data file.
 
-`link_types` is the associative link-type vocabulary (PRD §6.9): the typed, non-provenance relationships synthetic documents may declare under the `links:` frontmatter key. `kb init` seeds the PRD's default vocabulary (`references`, `contradicts`, `constrains`); an **empty** list means no link types are declared, so every use flags in `kb validate` (same semantics as `tags`, opposite of `types`).
+`link_types` is the associative link-type vocabulary (PRD §6.9): the typed, non-provenance relationships synthetic documents may declare under the `links:` frontmatter key. `kb init` seeds the PRD's default vocabulary (`references`, `contradicts`, `constrains`); when the key is absent (an older config), `load_config` defaults it to `[]`. An **empty** list means no link types are declared, so every use flags in `kb validate` (same semantics as `tags`, opposite of `types`).
 
 ## 2. Exit codes
 
@@ -47,7 +47,7 @@ The file is a JSON object. Minimum content written by `kb init`:
 ## 3. Output conventions
 
 - Default output is compact plain text for humans and agents.
-- Commands returning document sets support `--output paths|frontmatter|full` (default `frontmatter`). `paths` prints one KB-root-relative path per line.
+- Selection and graph commands returning document sets support `--output paths|frontmatter|full` (default `frontmatter`). `paths` prints one KB-root-relative path per line. `kb show` is the ref-retrieval exception defined by CLI-3a: body by default, with `--output frontmatter|full|path` and `--field` projections.
 - Every command supports `--json`. Success envelope: `{"ok": true, ...}`. Error envelope: `{"error": {"code": "E_...", "message": "..."}}`. JSON schemas are stable within a major version; fields are added, never renamed or removed.
 - Error codes are SCREAMING_SNAKE with `E_` prefix, unique across the CLI, defined in each command's spec.
 - Human-readable errors and warnings go to stderr; payload output goes to stdout.
@@ -72,37 +72,42 @@ Write commands that take a single `REF` positional (`kb revise`) resolve it by t
 
 ### 4.2 Pipelines
 
-- Commands accepting `REF...` (`show`, `filter`, `frontmatter`, `resolve`, `validate`) read newline-separated refs from stdin when stdin is piped and no refs were passed as arguments.
-- A command that receives a candidate set this way operates within that set instead of the whole KB.
-- `--output paths` is the producing end of a pipeline. Example: `kb search "user feedback" --output paths | kb filter --class raw`.
+- Commands accepting positional `REF...` (`show`, `validate`) read newline-separated refs from stdin when stdin is piped and no refs were passed as arguments. `kb filter` has no positional refs, but accepts the same newline-separated stdin as an optional candidate set. The retired `frontmatter` and `resolve` command surfaces are `kb show` projections (`--output frontmatter|path`), not separate pipeline consumers.
+- A command that receives a candidate set from stdin operates within that set instead of the whole KB.
+- `--output paths` is the producing end of a pipeline. Example: `kb search "user feedback" --output paths | kb filter --type feedback`.
 
 ## 5. The scan
 
-- One scan per invocation builds the in-memory `KB`: every `*.md` file in the KB tree (recursively from the root) is parsed for frontmatter. `log.md` is **operational** (CLI-appended, never a document); it carries `type: log` for OKF conformance but is excluded from the document set. `index.md` files **are** documents (`DocClass INDEX`), one per directory, included. `kb-config.json` is configuration (not `*.md`); it is loaded separately by `load_config` and never appears in the document set.
+- One scan per invocation builds the in-memory `KB`: every `*.md` file in the KB tree (recursively from the root) is parsed for frontmatter and, when classifiable, represented as a `Document`. `log.md` is the root operational document (`DocClass OPERATIONAL`): it carries `type: log`, is path-addressed (`Document.id` is `None` regardless of incidental extension keys), and is CLI-appended. `index.md` files are documents (`DocClass INDEX`), one per directory, and are also path-addressed. `kb-config.json` is configuration (not `*.md`); it is loaded separately by `load_config` and never appears in the document set.
 - **`type` is mandatory and authoritative (OKF).** Every `*.md` file in the KB MUST carry a `type` frontmatter field; `kb validate` enforces this on **every** markdown file, including `log.md`. A file missing `type` is malformed (§ malformed-file handling below). `type` is the single source of truth for classification — `DocClass` and `RawClass` are **derived from `type`, never from path**:
     - `type: index` → `INDEX`
     - `type: raw-source | chat | feedback` → `RAW` (`RawClass` `SOURCE | CHAT | FEEDBACK`)
     - reserved governance types `charter | conventions | kb-config | health` → `GOVERNANCE`
-    - `type: log` → operational (not a `DocClass`; excluded from the document set)
+    - `type: log` → `OPERATIONAL`
     - any other `type` → `SYNTHETIC` (the open project vocabulary in `kb-config.json`)
-- **Location must agree with `type`.** A document's directory is expected to match its `type`, and `kb validate` flags any mismatch (it never silently reclassifies): `index` → file named `index.md`; `raw-source|chat|feedback` → under `raw/sources|chats|feedback/`; governance types → under `governance/`; synthetic types → under `synthetic/`. `type` wins; a misplaced file is a validation error to be fixed (e.g. via `kb mv`), not a reclassification.
-- Bodies are loaded lazily — only by commands that need them (`search`, `mv`, `show`).
+- **Location must agree with `type`.** A document's directory is expected to match its `type`, and `kb validate` flags any mismatch (it never silently reclassifies): `index` → file named `index.md`; `raw-source|chat|feedback` → under `raw/sources|chats|feedback/`; governance types → under `governance/`; `log` → the root `log.md`; synthetic types → under `synthetic/`. `type` wins; a misplaced file is a validation error to be fixed (e.g. via `kb mv`), not a reclassification.
+- Bodies are loaded lazily — only by commands and write paths that need them (`search`, `mv`, `show`, `revise`, and `create --supersedes` when preserving the replaced document).
 - Frontmatter parsing preserves key order and unknown keys (FM2). Unknown keys are never an error.
-- A file that is **unclassifiable** — its frontmatter fails to parse, or it parses but has no `type` (so no `DocClass` can be derived) — never crashes a query command: it goes to `KB.malformed`, is excluded from results, emits one stderr warning, and is fully reported by `kb validate` (missing `type` is an FM0 error).
+- A file that is **unclassifiable**—its frontmatter fails to parse, or it parses but `type` is absent, empty, or not a string (so no `DocClass` can be derived)—never crashes a query command: it goes to `KB.malformed`, is excluded from results, emits one stderr warning, and is fully reported by `kb validate` (invalid universal `type` is an FM0 error).
 - No stored index. Ids live in the files; the id→path map is rebuilt by each scan.
-- **CLI-only access discipline.** The CLI is the sole KB data interface for skills: document content is read through `kb show` (and `search` snippets), never by opening KB files directly. This keeps the NFR-8 access-control hooks in the query layer effective. Skills carry the corresponding mandate (PRD §5.2). Symmetrically, documents are **created** through the CLI — `kb ingest` for raw, `kb create` for synthetic — so id allocation and the frontmatter schema stay CLI-authoritative; skills supply content and metadata as arguments rather than hand-writing document files.
+- **CLI-only access discipline.** The CLI is the sole KB data interface for skills and AI agents: document content is read through `kb show` (and `search` snippets), never by opening KB files directly. This keeps the NFR-8 access-control hooks in the query layer effective. Symmetrically, every agent mutation goes through its owning CLI surface—`init`, `ingest`, `create`, `revise`, `mv`, `index`, or `log`—rather than direct file edits. This keeps id allocation, schema enforcement, immutable raw evidence, index maintenance, and logging CLI-authoritative. Humans retain PRD §5.2's explicit ability to edit human-controlled governance documents directly; index documents and `log.md` remain CLI-owned.
 
-### 5.1 Allocating-write persistence ownership
+### 5.1 Write persistence and input-acquisition ownership
 
-`core/create.py` and `core/ingest.py` own command policy and construct typed
-write intents, but all KB filesystem persistence is owned by the shared
-`core/write_pipeline.py` seam. The command modules MUST NOT mutate KB paths
-directly through `Path`, built-in file handles, `os`, `shutil`, housekeeping,
-indexing, safe-I/O, or private write-pipeline primitives. Until the separate
-CLI/core input-seam work is implemented, they MAY continue to acquire external
-body/source input directly with provably read-only file operations and the
-documented clipboard subprocess; that temporary acquisition allowance does
-not permit writes to either the KB or the external input.
+Core command modules own deterministic policy and construct typed write intents,
+but all KB filesystem persistence for allocating and revising writes is owned by
+the shared `core/write_pipeline.py` seam. Command core modules MUST NOT mutate KB
+paths directly through `Path`, built-in file handles, `os`, `shutil`,
+housekeeping, indexing, safe-I/O, or private write-pipeline primitives.
+
+Concrete acquisition of user-supplied external files, stdin, and clipboard
+contents belongs to adapters in `cli/`, not `core/`. The create-body adapter
+passes explicit optional bytes; ingest adapters pass explicit bytes and
+provenance metadata through core-owned Pydantic models; the revise-body adapter
+passes explicit optional bytes. Core preparation validates and normalizes those
+values but never reads process-global stdin, invokes clipboard tools, or opens a
+user-supplied external path. Typer callbacks orchestrate prepare → acquire →
+execute and map adapter/core failures to the command's stable error envelope.
 
 The shared pipeline's preparation stage formats and strict UTF-8 encodes the
 complete `log.md` row exactly once, before any KB mutation. A formatting or
@@ -114,11 +119,11 @@ bytes and never formats or encodes a log row after mutation has begun.
 
 ## 6. Id grammar and allocation
 
-- Id pattern: `<PREFIX>-<NNNNNN>` — an uppercase prefix, a hyphen, a zero-padded integer of at least 6 digits (`KB-000042`, `RAW-000113`; numbers above 999999 keep growing — `KB-1000001` is legal).
+- Id pattern: `<PREFIX>-<NNNNNN>` — a prefix of one or more uppercase ASCII letters, a hyphen, and a canonical six-digit zero-padded integer (`KB-000042`, `RAW-000113`). Values above `999999` grow naturally without a leading zero (`KB-1000000` is legal); longer zero-padded spellings such as `KB-0000042` are not.
 - Default prefixes: `KB` (synthetic), `RAW` (raw sources), `CHAT` (session records), `FEED` (feedback). Projects may override in `kb-config.json`.
-- **Reserved governance ids.** System governance documents carry fixed, well-known **slug ids** of the form `GOVERNANCE-<SLUG>` (e.g. `GOVERNANCE-CONVENTIONS`, `GOVERNANCE-KB-CONFIG`) instead of the numeric scheme, so agents can address them by a stable known id. These ids are assigned by `kb init` (not allocated), never change, and the `GOVERNANCE` prefix is reserved — `next_id` never allocates in it. They are matched by an alternate id form (`<PREFIX>-<UPPER-SLUG>`) and resolve through the scan like any id; only the numeric `<PREFIX>-<NNNNNN>` form participates in allocation.
+- **Reserved governance ids.** System governance documents carry fixed, well-known **slug ids** of the form `GOVERNANCE-<SLUG>` (`GOVERNANCE-CHARTER`, `GOVERNANCE-CONVENTIONS`, `GOVERNANCE-KB-CONFIG`) instead of the numeric scheme, so agents can address them by a stable known id. These ids are assigned by `kb init` (not allocated), never change, and the `GOVERNANCE` prefix is reserved — `next_id` never allocates in it. They are matched by an alternate id form (`<PREFIX>-<UPPER-SLUG>`) and resolve through the scan like any id; only the numeric `<PREFIX>-<NNNNNN>` form participates in allocation.
 - Allocation: next id for a prefix = max existing number for that prefix + 1, computed over the in-memory `KB` built by the scan (no extra I/O — the scan already parses every document's frontmatter). Monotonic: gaps are never refilled (nothing is deleted, LS4). First id of a prefix is `<PREFIX>-000001`.
-- **Malformed-file guard.** A document whose frontmatter fails to parse has an invisible id. Commands that allocate ids MUST refuse to run while `KB.malformed` is non-empty (exit 2), directing the user to `kb validate` — otherwise an invisible id could be reallocated as a duplicate.
+- **Malformed-file guard.** Any entry in `KB.malformed` may hide an id, including a file whose frontmatter fails to parse or whose absent/empty/non-string `type` prevents classification. Commands that allocate ids MUST refuse to run while `KB.malformed` is non-empty (exit 2), directing the user to `kb validate`—otherwise an invisible id could be reallocated as a duplicate.
 - Merge collisions (two branches allocating the same id) are detected by `kb validate` as duplicate-id errors; repair is manual.
 
 ## 7. Core data models
@@ -129,19 +134,20 @@ Pinned so that independently implemented commands land on the same names. **Grow
 
 | Model | Module | Fields / contract | Introduced by |
 |---|---|---|---|
-| `DocClass` | `core/model.py` | enum: `RAW`, `SYNTHETIC`, `GOVERNANCE`, `INDEX`; **derived from the authoritative `type`** (§5), not from path | kb-init |
+| `DocClass` | `core/model.py` | enum: `RAW`, `SYNTHETIC`, `GOVERNANCE`, `INDEX`, `OPERATIONAL`; **derived from the authoritative `type`** (§5), not from path | kb-init |
 | `RawClass` | `core/model.py` | enum: `SOURCE`, `CHAT`, `FEEDBACK`; **derived from `type`** (`raw-source`→`SOURCE`, `chat`→`CHAT`, `feedback`→`FEEDBACK`); the matching subdirectory (`raw/sources|chats|feedback/`) is required and checked by `kb validate` | kb-init |
 | `DocId` | `core/ids.py` | `prefix: str`, `number: int`; models the **numeric** id form only; `parse(s)`, `format()` (zero-pad to 6), ordering by (prefix, number); `next_id(kb, prefix) -> DocId`. Reserved slug ids (`GOVERNANCE-CONVENTIONS`, …) are literal id strings, not `DocId`s | kb-init (grammar), kb-ingest (raw allocation), kb-create (synthetic allocation) |
 | `Frontmatter` | `core/model.py` | ordered mapping preserving unknown keys; round-trips YAML without reordering | kb-init |
 | `RawFrontmatter` | `core/model.py` | `id`, `type` (raw-source\|chat\|feedback), `ingested_at` (ISO-8601 UTC), `origin: str`, `title: str` (always written by `kb ingest`; not part of FM1's mandatory set), `about: str \| None` (feedback only). Enforced across the KB by `kb validate` (kb-validate §4.1, §7.1) | kb-ingest |
-| `SyntheticFrontmatter` | `core/model.py` | `id`, `type`, `title`, `description`, `status` (draft\|current\|superseded\|retired), `derived_from: list`, `timestamp`, `last_human_touch`; optional `tags`, `supersedes`, `instructions`, `links: dict[str, list[str]] \| None = None`, `pending_upstream: list[str] \| None = None`. **Constructed and emitted by kb-create** in exactly this key order (kb-create §5.1; optional keys last, only when present; `derived_from`/`tags` as block sequences); enforced across the KB by `kb validate` (kb-validate §4.1, §7.1) | kb-create (emission), kb-validate (enforcement) |
-| `GovernanceFrontmatter` | `core/model.py` | `id` (reserved slug, e.g. `GOVERNANCE-CONVENTIONS`), `type`, `title`, `description`; the two system files scaffolded by `kb init`. Enforced across the KB by `kb validate` (kb-validate §4.1, §7.1) | kb-init |
+| `SyntheticFrontmatter` | `core/model.py` | `id`, `type`, `title`, `description`, `status` (draft\|current\|superseded\|retired), `derived_from: list`, `timestamp`, `last_human_touch`; optional `tags`, `supersedes`, `instructions`, `links: dict[str, list[str]] \| None = None`, `pending_upstream: list[str] \| None = None`. `kb create` emits the birth fields in the pinned order from kb-create §5.1; `kb revise` may subsequently add or change `links` and `pending_upstream` while preserving untouched keys; `kb validate` enforces the complete model | kb-create (birth fields), kb-revise (revision fields), kb-validate (enforcement) |
+| `GovernanceFrontmatter` | `core/model.py` | `id` (reserved slug, e.g. `GOVERNANCE-CHARTER`), `type`, `title`, `description`; the three system files scaffolded by `kb init`. Enforced across the KB by `kb validate` (kb-validate §4.1, §7.1) | kb-init |
 | `IndexFrontmatter` | `core/model.py` | `type: index`, `description`; optional `title`; **no `id`** (index docs are path-addressed). One per directory (`DocClass INDEX`). CLI-maintained and read-only for humans/agents: the body is a generated child listing (`kb index` regenerates it). Enforced across the KB by `kb validate` (kb-validate §4.1, §7.1) | kb-init |
-| `Document` | `core/model.py` | `id: str \| None` (the literal frontmatter id; numeric ids parse via `DocId`), `path` (KB-root-relative), `doc_class: DocClass`, `frontmatter: Frontmatter`, `body` (lazy property) | kb-ingest |
+| `OperationalFrontmatter` | `core/model.py` | `type: log`; remaining keys are not schema-checked. Used by the root path-addressed operational document `log.md` (`DocClass OPERATIONAL`), whose body is CLI-appended in the §8 format | kb-init |
+| `Document` | `core/model.py` | `id: str \| None` (the literal frontmatter id for id-bearing raw, synthetic, and governance classes; `None` for index and operational documents; numeric ids parse via `DocId`), `path` (KB-root-relative), `doc_class: DocClass`, `frontmatter: Frontmatter`, `body` (lazy property) | kb-ingest |
 | `KB` | `core/scan.py` | `root: Path`, `documents: list[Document]`, `by_id: dict[str, Document]`, `malformed: list[(path, error)]`; built by `scan(root)` | kb-ingest |
 | `Config` | `core/model.py` | `schema: int`, `types: list[str]`, `tags: list[str]`, `link_types: list[str]`, `id_prefixes: dict[str, str]`, `propagation_auto_safe: list[str]`; parsed by `load_config(root)` as a JSON object from `kb-config.json` at the KB root (stdlib `json`); unknown keys ignored; every field has the documented default when the key is absent; unparseable file → `E_CONFIG_INVALID` | kb-init |
 | `LogEntry` | `core/housekeeping.py` | `at` (ISO-8601 UTC), `action`, `actor`, `doc_ids: list[str]`, `note`; line format §8 | kb-init |
-| `Finding` | `core/validate.py` | `code: str` (stable finding code, kb-validate §7.1 — a separate namespace from `E_*` command errors), `severity` (`error`\|`warning`), `path` (KB-root-relative; always present — malformed, index, and log files have no id), `id: str \| None` (the literal frontmatter id when present as a string), `message: str`. Findings sort by (path, code, occurrence); produced only by `kb validate` | kb-validate |
+| `Finding` | `core/validate.py` | `code: str` (stable finding code, kb-validate §7.1 — a separate namespace from `E_*` command errors), `severity` (`error`\|`warning`), `path` (KB-root-relative; always present), `id: str \| None` (the class-bearing literal id for synthetic, raw, and governance documents; `None` for malformed, index, and operational files), `message: str`. Findings sort by (path, code, occurrence); produced only by `kb validate` | kb-validate |
 
 ## 8. `log.md` line format
 
