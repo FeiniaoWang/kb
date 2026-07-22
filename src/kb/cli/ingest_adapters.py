@@ -105,7 +105,7 @@ def _clipboard_adapter(source: str | None) -> AdapterPayload:
     )
 
 
-ADAPTERS: dict[SourceKind, Adapter] = {
+_ADAPTERS: dict[SourceKind, Adapter] = {
     "file": _file_adapter,
     "stdin": _stdin_adapter,
     "clipboard": _clipboard_adapter,
@@ -125,7 +125,7 @@ class BoundIngestSource:
         )
 
     def acquire(self) -> AdapterPayload:
-        return ADAPTERS[self._source_kind](self._source)
+        return _ADAPTERS[self._source_kind](self._source)
 
 
 def bind_ingest_source(

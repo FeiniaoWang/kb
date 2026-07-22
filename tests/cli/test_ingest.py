@@ -567,11 +567,11 @@ def test_ac22_non_utf8_stdin_and_clipboard_are_findings(
     )
     assert stdin.exit_code == 1 and "E_INGEST_NOT_TEXT" in stdin.stderr
     monkeypatch.setattr(
-        "kb.cli.ingest_adapters.ADAPTERS",
+        "kb.cli.ingest_adapters._ADAPTERS",
         {
             **__import__(
-                "kb.cli.ingest_adapters", fromlist=["ADAPTERS"]
-            ).ADAPTERS,
+                "kb.cli.ingest_adapters", fromlist=["_ADAPTERS"]
+            )._ADAPTERS,
             "clipboard": lambda _: __import__(
                 "kb.core.ingest", fromlist=["AdapterPayload"]
             ).AdapterPayload(
@@ -911,7 +911,7 @@ def test_ac32_unsafe_or_escaping_dest_is_rejected_without_writes(
         acquired.append(value)
         raise AssertionError("destination validation must precede acquisition")
 
-    monkeypatch.setitem(ingest_adapters.ADAPTERS, "file", forbidden_adapter)
+    monkeypatch.setitem(ingest_adapters._ADAPTERS, "file", forbidden_adapter)
     invalid_values = [
         "/abs",
         "../escape",
@@ -1100,7 +1100,7 @@ def test_md_named_destination_link_found_by_context_is_exact_destination_error(
         acquired.append(value)
         raise AssertionError("context destination failure must precede acquisition")
 
-    monkeypatch.setitem(ingest_adapters.ADAPTERS, "file", forbidden_adapter)
+    monkeypatch.setitem(ingest_adapters._ADAPTERS, "file", forbidden_adapter)
     arguments = ["--dest", destination]
     if json_output:
         arguments.append("--json")
@@ -1184,7 +1184,7 @@ def test_requested_destination_directory_race_keeps_exact_invalid_envelope(
         raise AssertionError("context failure must precede adapter acquisition")
 
     monkeypatch.setattr(safeio.os, "open", replace_listed_destination)
-    monkeypatch.setitem(ingest_adapters.ADAPTERS, "file", forbidden_adapter)
+    monkeypatch.setitem(ingest_adapters._ADAPTERS, "file", forbidden_adapter)
     arguments = ["--dest", "raced.md/child"]
     if json_output:
         arguments.append("--json")
@@ -1252,7 +1252,7 @@ def test_unrelated_md_link_context_failure_stays_generic_and_keeps_precedence(
         acquired.append(value)
         raise AssertionError("context failure must precede acquisition")
 
-    monkeypatch.setitem(ingest_adapters.ADAPTERS, "file", forbidden_adapter)
+    monkeypatch.setitem(ingest_adapters._ADAPTERS, "file", forbidden_adapter)
     command = [*arguments]
     if "--class" not in command:
         command = ["--class", "source", "--from", "file", *command]
@@ -1299,7 +1299,7 @@ def test_destination_metadata_error_is_exact_before_adapter(
         acquired.append(value)
         raise AssertionError("destination metadata failure must precede acquisition")
 
-    monkeypatch.setitem(ingest_adapters.ADAPTERS, "file", forbidden_adapter)
+    monkeypatch.setitem(ingest_adapters._ADAPTERS, "file", forbidden_adapter)
     arguments = ["--dest", "inaccessible/child"]
     if json_output:
         arguments.append("--json")
@@ -1361,7 +1361,7 @@ def test_missing_required_class_root_is_invalid_before_adapter(
         acquired.append(value)
         raise AssertionError("missing class root must precede acquisition")
 
-    monkeypatch.setitem(ingest_adapters.ADAPTERS, "file", forbidden_adapter)
+    monkeypatch.setitem(ingest_adapters._ADAPTERS, "file", forbidden_adapter)
     arguments = [
         "--class",
         raw_class,
@@ -1722,7 +1722,7 @@ def test_surrogate_escaped_source_origin_is_stable_ingest_io_without_mutation(
             source_filename=escaped_name,
         )
 
-    monkeypatch.setitem(ingest_adapters.ADAPTERS, "file", surrogate_payload)
+    monkeypatch.setitem(ingest_adapters._ADAPTERS, "file", surrogate_payload)
     arguments = ["--title", "Evidence"]
     if json_output:
         arguments.append("--json")

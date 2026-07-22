@@ -10,12 +10,30 @@ from kb.core.ingest import IngestFailure
 
 
 def test_bind_is_inert_and_reports_only_source_shape(monkeypatch) -> None:
-    monkeypatch.setattr(Path, "read_bytes", lambda self: (_ for _ in ()).throw(
-        AssertionError("bind must not read a file")
-    ))
-    bound = adapters.bind_ingest_source("file", "/missing/source.md")
-    assert bound.shape.source_kind == "file"
-    assert bound.shape.locator_present is True
+    def explode(*args, **kwargs):
+        raise AssertionError("binding and shape inspection must perform no acquisition")
+
+    monkeypatch.setattr(Path, "stat", explode)
+    monkeypatch.setattr(Path, "resolve", explode)
+    monkeypatch.setattr(Path, "read_bytes", explode)
+    monkeypatch.setattr(adapters, "_stdin_stream", explode)
+    monkeypatch.setattr(adapters.platform, "system", explode)
+    monkeypatch.setattr(adapters.shutil, "which", explode)
+    monkeypatch.setattr(adapters.subprocess, "run", explode)
+
+    for source_kind, source, locator_present in [
+        ("file", "/missing/source.md", True),
+        ("stdin", None, False),
+        ("clipboard", None, False),
+    ]:
+        bound = adapters.bind_ingest_source(source_kind, source)
+        assert bound.shape.source_kind == source_kind
+        assert bound.shape.locator_present is locator_present
+
+
+def test_adapter_registry_uses_private_module_convention() -> None:
+    assert hasattr(adapters, "_ADAPTERS")
+    assert not hasattr(adapters, "ADAPTERS")
 
 
 def test_file_adapter_preserves_bytes_and_metadata(tmp_path: Path) -> None:

@@ -17,6 +17,14 @@ def request(root: Path) -> IngestRequest:
     return IngestRequest(raw_class=RawClass.CHAT, kb_root=root)
 
 
+def snapshot(root: Path) -> dict[str, bytes]:
+    return {
+        path.relative_to(root).as_posix(): path.read_bytes()
+        for path in sorted(root.rglob("*"))
+        if path.is_file()
+    }
+
+
 def test_prepare_then_execute_accepts_explicit_payload(initialized_kb: Path) -> None:
     prepared = prepare_ingest(
         request(initialized_kb),
@@ -66,6 +74,7 @@ def test_prepare_validates_source_shape_before_acquisition(
 def test_execute_rejects_payload_for_another_prepared_source(
     initialized_kb: Path,
 ) -> None:
+    before = snapshot(initialized_kb)
     prepared = prepare_ingest(
         request(initialized_kb),
         IngestSourceShape(source_kind="stdin", locator_present=False),
@@ -79,3 +88,4 @@ def test_execute_rejects_payload_for_another_prepared_source(
                 default_origin="clipboard",
             ),
         )
+    assert snapshot(initialized_kb) == before
