@@ -613,6 +613,16 @@ def test_ac28_reserved_synthetic_types_are_rejected_verbatim(
     assert snapshot(initialized_kb) == before
 
 
+def test_create_rejects_charter_type(initialized_kb, invoke_create) -> None:
+    result = invoke_create(
+        initialized_kb,
+        "--type", "charter", "--title", "T", "--description", "D.",
+        "--derived-from", "CHAT-000001",
+    )
+    assert result.exit_code == 2
+    assert "E_CREATE_TYPE_RESERVED" in result.output + str(result.stderr)
+
+
 def test_ac29_unknown_type_warns_once_and_declared_type_does_not(
     initialized_kb, invoke_create
 ) -> None:

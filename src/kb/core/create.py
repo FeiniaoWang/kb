@@ -38,6 +38,7 @@ RESERVED_TYPES = {
     "chat",
     "feedback",
     "conventions",
+    "charter",
     "kb-config",
     "health",
 }
