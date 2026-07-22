@@ -488,6 +488,86 @@ class _ArchitectureScanner(ast.NodeVisitor):
         else_flow = self._visit_branch(node.orelse, before) if node.orelse else before
         self.current_frame.flow = self._merge_flows([body_flow, else_flow])
 
+    def _visit_try_body(
+        self,
+        statements: list[ast.stmt],
+        starting_flow: dict[str, set[str]],
+    ) -> tuple[dict[str, set[str]], dict[str, set[str]]]:
+        frame = self.current_frame
+        original = frame.flow
+        frame.flow = {
+            name: set(targets)
+            for name, targets in starting_flow.items()
+        }
+        possible_handler_inputs = [starting_flow]
+        for statement in statements:
+            self.visit(statement)
+            possible_handler_inputs.append(
+                {
+                    name: set(targets)
+                    for name, targets in frame.flow.items()
+                }
+            )
+        result = {
+            name: set(targets)
+            for name, targets in frame.flow.items()
+        }
+        frame.flow = original
+        return result, self._merge_flows(possible_handler_inputs)
+
+    def _visit_exception_handler(
+        self,
+        handler: ast.ExceptHandler,
+        starting_flow: dict[str, set[str]],
+    ) -> dict[str, set[str]]:
+        frame = self.current_frame
+        original = frame.flow
+        frame.flow = {
+            name: set(targets)
+            for name, targets in starting_flow.items()
+        }
+        if handler.type is not None:
+            self.visit(handler.type)
+        if handler.name is not None:
+            self._bind(handler.name, set())
+        for statement in handler.body:
+            self.visit(statement)
+        if handler.name is not None:
+            self._bind(handler.name, set())
+        result = {
+            name: set(targets)
+            for name, targets in frame.flow.items()
+        }
+        frame.flow = original
+        return result
+
+    def _visit_try(self, node: ast.Try | ast.TryStar) -> None:
+        before = {
+            name: set(targets)
+            for name, targets in self.current_frame.flow.items()
+        }
+        body_flow, handler_input = self._visit_try_body(node.body, before)
+        normal_flow = (
+            self._visit_branch(node.orelse, body_flow)
+            if node.orelse
+            else body_flow
+        )
+        handler_flows = [
+            self._visit_exception_handler(handler, handler_input)
+            for handler in node.handlers
+        ]
+        self.current_frame.flow = self._merge_flows(
+            [normal_flow, *handler_flows]
+        )
+        for statement in node.finalbody:
+            self.visit(statement)
+
+    def visit_Try(self, node: ast.Try) -> None:
+        self._visit_try(node)
+
+    def visit_TryStar(self, node: ast.TryStar) -> None:
+        self._visit_try(node)
+
     def visit_Raise(self, node: ast.Raise) -> None:
         if node.exc is not None:
             raised = node.exc.func if isinstance(node.exc, ast.Call) else node.exc
@@ -634,6 +714,33 @@ def test_scanner_merges_possible_conditional_bindings() -> None:
     assert violations(Path("src/kb/core/example.py"), source) == [
         "forbidden process launch: os.system"
     ]
+
+
+@pytest.mark.parametrize("except_clause", ["except Exception:", "except* Exception:"])
+def test_scanner_merges_possible_exception_bindings(except_clause: str) -> None:
+    source = (
+        "try:\n"
+        "    import os as dependency\n"
+        f"{except_clause}\n"
+        "    import pathlib as dependency\n"
+        "dependency.system('x')\n"
+    )
+    assert violations(Path("src/kb/core/example.py"), source) == [
+        "forbidden process launch: os.system"
+    ]
+
+
+def test_scanner_applies_finally_after_exception_flow_merge() -> None:
+    source = (
+        "try:\n"
+        "    import os as dependency\n"
+        "except Exception:\n"
+        "    import pathlib as dependency\n"
+        "finally:\n"
+        "    import pathlib as dependency\n"
+        "dependency.system('not a process launch')\n"
+    )
+    assert violations(Path("src/kb/core/example.py"), source) == []
 
 
 def test_class_namespace_does_not_shadow_module_global_in_method() -> None:
