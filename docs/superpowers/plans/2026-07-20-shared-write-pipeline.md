@@ -2396,10 +2396,10 @@ or public interface is added.
 
 - [x] Scope the design and plan to descriptor/object containment and document
       post-open movement as possible no-rollback partial state.
-- [ ] Pin the exact post-open parent-rename interval with a typed-failure,
+- [x] Pin the exact post-open parent-rename interval with a typed-failure,
       replacement-stability, moved-object partial-bytes, and unchanged-log
       regression.
-- [ ] Verify focused, command, architecture, exact AC, full-suite, diff, and
+- [x] Verify focused, command, architecture, exact AC, full-suite, diff, and
       status gates.
 
 ---
@@ -2429,7 +2429,7 @@ or public interface is added.
 - [x] Task 12 first-open born-directory binding correction is implemented and
       verified; only an empty real directory may be accepted at binding and
       pathname replacements are detected at the available identity checks.
-- [ ] Task 13 descriptor/object containment scope and the accepted post-open
+- [x] Task 13 descriptor/object containment scope and the accepted post-open
       namespace-movement limitation are documented and regression-tested.
 - [ ] Revalidate the downstream CLI/core input-seam plan after this branch is
       integrated. Its source paths exist, but its separate prepared models
