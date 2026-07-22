@@ -80,9 +80,10 @@ renames the staging entry away, leaving no staging pathname.
 requires the expected immediate-parent identity for every subsequent
 child-directory, born-index, companion, and document birth. It verifies every
 born directory identity again before success. A replacement directory
-receives no pipeline bytes; failure is typed and prior completed effects remain
-without rollback. Parent and staging descriptors close within the one rooted
-directory-birth operation on every path.
+installed after the first no-follow binding receives no pipeline bytes;
+failure is typed and prior completed effects remain without rollback. Parent
+and staging descriptors close within the one rooted directory-birth operation
+on every path.
 
 ## Command-Contract Reconciliation Amendment
 
