@@ -600,34 +600,24 @@ def create_rooted_directory(
                 "could not allocate a private directory staging name",
                 relative,
             )
-        created_status = os.stat(
-            staging_name,
-            dir_fd=parent_descriptor,
-            follow_symlinks=False,
-        )
-        created_identity = _identity(created_status)
         descriptor: int | None = None
         # A failure after staging creation intentionally leaves the randomized
         # path in place. No generic path-based deletion can remain bound to
         # this identity if another process replaces the directory.
         try:
-            if not stat.S_ISDIR(created_status.st_mode):
-                raise OSError(
-                    errno.ENOTDIR,
-                    "created staging path is not a directory",
-                    relative,
-                )
             descriptor = os.open(
                 staging_name,
                 _directory_flags(),
                 dir_fd=parent_descriptor,
             )
             status = os.fstat(descriptor)
-            if (
-                not stat.S_ISDIR(status.st_mode)
-                or _identity(status) != created_identity
-            ):
-                raise _stale_error(relative)
+            if not stat.S_ISDIR(status.st_mode):
+                raise OSError(
+                    errno.ENOTDIR,
+                    "bound staging path is not a directory",
+                    relative,
+                )
+            bound_identity = _identity(status)
             _publish_directory_exclusive(
                 parent_descriptor,
                 staging_name,
@@ -640,10 +630,10 @@ def create_rooted_directory(
             )
             if (
                 not stat.S_ISDIR(published_status.st_mode)
-                or _identity(published_status) != created_identity
+                or _identity(published_status) != bound_identity
             ):
                 raise _stale_error(relative)
-            return created_identity
+            return bound_identity
         finally:
             if descriptor is not None:
                 os.close(descriptor)

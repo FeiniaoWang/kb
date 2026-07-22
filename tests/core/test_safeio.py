@@ -411,7 +411,7 @@ def test_rooted_directory_birth_fails_before_staging_without_exclusive_publish(
     assert list(root.iterdir()) == []
 
 
-def test_rooted_directory_birth_rejects_staging_replacement_before_open(
+def test_rooted_directory_birth_binds_real_staging_replacement_at_first_open(
     tmp_path,
     monkeypatch,
 ) -> None:
@@ -441,16 +441,163 @@ def test_rooted_directory_birth_rejects_staging_replacement_before_open(
 
     monkeypatch.setattr(safeio.os, "open", replace_staging_before_open)
 
-    with pytest.raises(OSError, match="identity changed"):
-        create_rooted_directory(root, Path("born"), root_identity)
+    bound_identity = create_rooted_directory(root, Path("born"), root_identity)
 
     assert injected
-    assert not (root / "born").exists()
+    published = (root / "born").stat()
+    assert bound_identity == safeio.FileIdentity(
+        device=published.st_dev,
+        inode=published.st_ino,
+    )
     private_entries = [
         path for path in root.iterdir() if path.name.startswith(".kb-born-")
     ]
-    assert len(private_entries) == 2
-    assert all(path.is_dir() and not any(path.iterdir()) for path in private_entries)
+    assert len(private_entries) == 1
+    assert private_entries[0].name.endswith("-created")
+    assert private_entries[0].is_dir()
+    assert not any(private_entries[0].iterdir())
     assert replacement_descriptor is not None
     with pytest.raises(OSError):
         os.fstat(replacement_descriptor)
+
+
+def test_rooted_directory_birth_opens_before_inspecting_staging_path(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    root = tmp_path / "kb"
+    root.mkdir()
+    root_identity = inspect_root(root)
+    real_mkdir = safeio.os.mkdir
+    real_stat = safeio.os.stat
+    replacement_identity = None
+
+    def replace_staging_before_mkdir_returns(path, mode=0o777, *, dir_fd=None):
+        nonlocal replacement_identity
+        real_mkdir(path, mode, dir_fd=dir_fd)
+        if isinstance(path, str) and path.startswith(".kb-born-"):
+            os.rename(
+                path,
+                f"{path}-created",
+                src_dir_fd=dir_fd,
+                dst_dir_fd=dir_fd,
+            )
+            real_mkdir(path, mode, dir_fd=dir_fd)
+            status = real_stat(path, dir_fd=dir_fd, follow_symlinks=False)
+            replacement_identity = safeio.FileIdentity(
+                device=status.st_dev,
+                inode=status.st_ino,
+            )
+
+    def reject_pre_open_staging_stat(path, *, dir_fd=None, follow_symlinks=True):
+        if isinstance(path, str) and path.startswith(".kb-born-"):
+            raise AssertionError("staging path was inspected before first open")
+        return real_stat(path, dir_fd=dir_fd, follow_symlinks=follow_symlinks)
+
+    monkeypatch.setattr(safeio.os, "mkdir", replace_staging_before_mkdir_returns)
+    monkeypatch.setattr(safeio.os, "stat", reject_pre_open_staging_stat)
+
+    bound_identity = create_rooted_directory(root, Path("born"), root_identity)
+
+    assert bound_identity == replacement_identity
+    assert (root / "born").is_dir()
+    retained = [
+        path for path in root.iterdir() if path.name.endswith("-created")
+    ]
+    assert len(retained) == 1
+    assert retained[0].is_dir()
+
+
+def test_rooted_directory_birth_rejects_prebinding_staging_symlink(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    root = tmp_path / "kb"
+    outside = tmp_path / "outside"
+    root.mkdir()
+    outside.mkdir()
+    marker = outside / "marker"
+    marker.write_bytes(b"outside")
+    root_identity = inspect_root(root)
+    real_mkdir = safeio.os.mkdir
+
+    def replace_staging_with_symlink(path, mode=0o777, *, dir_fd=None):
+        real_mkdir(path, mode, dir_fd=dir_fd)
+        if isinstance(path, str) and path.startswith(".kb-born-"):
+            os.rename(
+                path,
+                f"{path}-created",
+                src_dir_fd=dir_fd,
+                dst_dir_fd=dir_fd,
+            )
+            os.symlink(
+                outside,
+                path,
+                target_is_directory=True,
+                dir_fd=dir_fd,
+            )
+
+    monkeypatch.setattr(safeio.os, "mkdir", replace_staging_with_symlink)
+
+    with pytest.raises(OSError):
+        create_rooted_directory(root, Path("born"), root_identity)
+
+    assert not (root / "born").exists()
+    assert marker.read_bytes() == b"outside"
+    assert sorted(path.name for path in outside.iterdir()) == ["marker"]
+    staging_entries = [
+        path for path in root.iterdir() if path.name.startswith(".kb-born-")
+    ]
+    assert len(staging_entries) == 2
+    assert sum(path.is_symlink() for path in staging_entries) == 1
+    assert sum(path.name.endswith("-created") for path in staging_entries) == 1
+
+
+def test_rooted_directory_birth_rejects_real_swap_after_binding(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    root = tmp_path / "kb"
+    root.mkdir()
+    root_identity = inspect_root(root)
+    real_publish = safeio._publish_directory_exclusive
+    replacement_identity = None
+
+    def replace_bound_staging_before_publish(parent_descriptor, staging, final):
+        nonlocal replacement_identity
+        os.rename(
+            staging,
+            f"{staging}-bound",
+            src_dir_fd=parent_descriptor,
+            dst_dir_fd=parent_descriptor,
+        )
+        os.mkdir(staging, dir_fd=parent_descriptor)
+        status = os.stat(
+            staging,
+            dir_fd=parent_descriptor,
+            follow_symlinks=False,
+        )
+        replacement_identity = safeio.FileIdentity(
+            device=status.st_dev,
+            inode=status.st_ino,
+        )
+        real_publish(parent_descriptor, staging, final)
+
+    monkeypatch.setattr(
+        safeio,
+        "_publish_directory_exclusive",
+        replace_bound_staging_before_publish,
+    )
+
+    with pytest.raises(OSError, match="identity changed"):
+        create_rooted_directory(root, Path("born"), root_identity)
+
+    published = (root / "born").stat()
+    assert replacement_identity == safeio.FileIdentity(
+        device=published.st_dev,
+        inode=published.st_ino,
+    )
+    retained = [path for path in root.iterdir() if path.name.endswith("-bound")]
+    assert len(retained) == 1
+    assert retained[0].is_dir()
+    assert not any(retained[0].iterdir())

@@ -1349,7 +1349,7 @@ def test_replaced_just_born_directory_receives_no_index_or_document_bytes(
     assert original.is_dir()
 
 
-def test_directory_replacement_before_identity_binding_is_typed_and_untouched(
+def test_directory_replacement_at_first_open_is_bound_for_pipeline_writes(
     tmp_path,
     monkeypatch,
 ) -> None:
@@ -1361,7 +1361,7 @@ def test_directory_replacement_before_identity_binding_is_typed_and_untouched(
     born = parent / "a"
     real_open = safeio.os.open
     injected = False
-    late_identity = None
+    retained_name: str | None = None
 
     def install_replacement_before_identity_binding(
         path,
@@ -1370,25 +1370,23 @@ def test_directory_replacement_before_identity_binding_is_typed_and_untouched(
         *,
         dir_fd=None,
     ):
-        nonlocal injected, late_identity
+        nonlocal injected, retained_name
         is_parent = (
             dir_fd is not None
             and os.fstat(dir_fd).st_dev == parent_status.st_dev
             and os.fstat(dir_fd).st_ino == parent_status.st_ino
         )
         is_staging = isinstance(path, str) and path.startswith(".kb-born-")
-        if not injected and is_parent and (path == "a" or is_staging):
+        if not injected and is_parent and is_staging:
             injected = True
-            if path == "a":
-                os.rename(
-                    "a",
-                    "a-created",
-                    src_dir_fd=dir_fd,
-                    dst_dir_fd=dir_fd,
-                )
-            os.mkdir("a", dir_fd=dir_fd)
-            status = os.stat("a", dir_fd=dir_fd, follow_symlinks=False)
-            late_identity = (status.st_dev, status.st_ino)
+            retained_name = f"{path}-created"
+            os.rename(
+                path,
+                retained_name,
+                src_dir_fd=dir_fd,
+                dst_dir_fd=dir_fd,
+            )
+            os.mkdir(path, dir_fd=dir_fd)
         return real_open(path, flags, mode, dir_fd=dir_fd)
 
     prepared = prepare_write(
@@ -1407,23 +1405,72 @@ def test_directory_replacement_before_identity_binding_is_typed_and_untouched(
         install_replacement_before_identity_binding,
     )
 
+    receipt = apply_write(prepared)
+
+    assert injected
+    assert receipt.created == ["synthetic/a/index.md", "synthetic/a/planned.md"]
+    assert (born / "index.md").is_file()
+    assert (born / "planned.md").read_bytes() == document_bytes()
+    assert retained_name is not None
+    retained = parent / retained_name
+    assert retained.is_dir()
+    assert not any(retained.iterdir())
+
+
+def test_prebinding_staging_symlink_cannot_redirect_pipeline_writes(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    import kb.core.safeio as safeio
+
+    root = initialized(tmp_path)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    marker = outside / "marker"
+    marker.write_bytes(b"outside")
+    index_before = (root / "synthetic/index.md").read_bytes()
+    log_before = (root / "log.md").read_bytes()
+    real_mkdir = safeio.os.mkdir
+
+    def replace_staging_with_outside_symlink(path, mode=0o777, *, dir_fd=None):
+        real_mkdir(path, mode, dir_fd=dir_fd)
+        if isinstance(path, str) and path.startswith(".kb-born-"):
+            os.rename(
+                path,
+                f"{path}-created",
+                src_dir_fd=dir_fd,
+                dst_dir_fd=dir_fd,
+            )
+            os.symlink(
+                outside,
+                path,
+                target_is_directory=True,
+                dir_fd=dir_fd,
+            )
+
+    prepared = prepare_write(
+        load_write_context(root),
+        WriteIntent(
+            birth=DocumentBirth(
+                path=Path("synthetic/a/planned.md"),
+                content=document_bytes(),
+            ),
+            log_entry=log_entry(),
+        ),
+    )
+    monkeypatch.setattr(safeio.os, "mkdir", replace_staging_with_outside_symlink)
+
     with pytest.raises(WriteFailure) as raised:
         apply_write(prepared)
 
-    assert injected
-    assert raised.value.phase == "write"
     assert raised.value.operation == "mkdir"
     assert raised.value.role == "directory"
     assert raised.value.path == Path("synthetic/a")
-    status = born.stat()
-    assert (status.st_dev, status.st_ino) == late_identity
-    assert list(born.iterdir()) == []
-    private_entries = [
-        path for path in parent.iterdir() if path.name.startswith(".kb-born-")
-    ]
-    assert len(private_entries) == 1
-    assert private_entries[0].is_dir()
-    assert list(private_entries[0].iterdir()) == []
+    assert not (root / "synthetic/a").exists()
+    assert sorted(path.name for path in outside.iterdir()) == ["marker"]
+    assert marker.read_bytes() == b"outside"
+    assert (root / "synthetic/index.md").read_bytes() == index_before
+    assert (root / "log.md").read_bytes() == log_before
 
 
 def test_nested_child_birth_requires_captured_born_parent_identity(
