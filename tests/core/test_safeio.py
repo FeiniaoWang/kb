@@ -826,3 +826,37 @@ def test_tree_acquisition_failure_preserves_exact_path_and_prior_files(
     assert [(entry.path, entry.content) for entry in raised.value.acquired] == [
         (Path("a.md"), b"a prefix")
     ]
+
+
+def test_tree_listing_lstat_failure_preserves_child_path_and_prior_files(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    root = tmp_path / "root"
+    nested = root / "nested"
+    nested.mkdir(parents=True)
+    (root / "a.md").write_bytes(b"a prefix")
+    (nested / "failing.md").write_bytes(b"failing prefix")
+    real_stat = safeio.os.stat
+    injected = False
+
+    def fail_listed_child(path, *, dir_fd=None, follow_symlinks=True):
+        nonlocal injected
+        if path == "failing.md" and dir_fd is not None and not injected:
+            injected = True
+            raise FileNotFoundError(errno.ENOENT, "listed entry vanished", path)
+        return real_stat(path, dir_fd=dir_fd, follow_symlinks=follow_symlinks)
+
+    monkeypatch.setattr(safeio.os, "stat", fail_listed_child)
+
+    with safeio.rooted_reader(root) as reader:
+        with pytest.raises(safeio._RootedTreeAcquisitionError) as raised:
+            reader.acquire_tree_files(suffix=".md", acquire=lambda stream: stream.read())
+
+    assert injected
+    assert raised.value.path == Path("nested/failing.md")
+    assert raised.value.cause.errno == errno.ENOENT
+    assert raised.value.cause.filename == "failing.md"
+    assert [(entry.path, entry.content) for entry in raised.value.acquired] == [
+        (Path("a.md"), b"a prefix")
+    ]

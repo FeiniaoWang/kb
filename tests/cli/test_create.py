@@ -1763,6 +1763,53 @@ def test_supersession_path_race_keeps_exact_invalid_envelope_and_no_cli_writes(
 
 
 @pytest.mark.parametrize("json_output", [False, True], ids=["text", "json"])
+def test_supersession_target_lstat_failure_keeps_exact_invalid_envelope(
+    json_output,
+    initialized_kb,
+    invoke_create,
+    monkeypatch,
+) -> None:
+    import kb.core.safeio as safeio
+
+    add_chat(initialized_kb)
+    add_synthetic(initialized_kb)
+    before = snapshot(initialized_kb)
+    real_stat = safeio.os.stat
+    injected = False
+
+    def fail_listed_target(path, *, dir_fd=None, follow_symlinks=True):
+        nonlocal injected
+        if path == "old.md" and dir_fd is not None and not injected:
+            injected = True
+            raise FileNotFoundError(errno.ENOENT, "listed entry vanished", path)
+        return real_stat(path, dir_fd=dir_fd, follow_symlinks=follow_symlinks)
+
+    monkeypatch.setattr(safeio.os, "stat", fail_listed_target)
+    arguments = [
+        "--type", "spec",
+        "--title", "Replacement",
+        "--description", "Replacement.",
+        "--supersedes", "synthetic/old.md",
+    ]
+    if json_output:
+        arguments.append("--json")
+
+    result = invoke_create(initialized_kb, *arguments)
+
+    assert injected
+    assert result.exit_code == 1
+    assert isinstance(result.exception, SystemExit)
+    if json_output:
+        error = json.loads(result.stdout)["error"]
+        assert error["code"] == "E_CREATE_SUPERSEDES_INVALID"
+        assert result.stderr == ""
+    else:
+        assert "E_CREATE_SUPERSEDES_INVALID" in result.stderr
+        assert result.stdout == ""
+    assert snapshot(initialized_kb) == before
+
+
+@pytest.mark.parametrize("json_output", [False, True], ids=["text", "json"])
 def test_unknown_supersedes_id_with_unrelated_unsafe_markdown_is_generic_io(
     json_output, tmp_path, initialized_kb, invoke_create
 ) -> None:

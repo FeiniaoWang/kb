@@ -105,6 +105,19 @@ class _RootedTreeAcquisitionError(OSError):
         self.acquired = acquired
 
 
+class _RootedDirectoryEntryError(OSError):
+    """A listed child could not be inspected at its exact relative path."""
+
+    def __init__(self, cause: OSError, path: Path) -> None:
+        super().__init__(
+            cause.errno or errno.EIO,
+            cause.strerror or str(cause),
+            path,
+        )
+        self.cause = cause
+        self.path = path
+
+
 def _identity(status: os.stat_result) -> FileIdentity:
     return FileIdentity(device=status.st_dev, inode=status.st_ino)
 
@@ -241,11 +254,18 @@ def _list_open_directory(
         raise _stale_error(relative)
     entries: list[RootedEntry] = []
     for name in sorted(os.listdir(descriptor)):
-        child_status = os.stat(
-            name,
-            dir_fd=descriptor,
-            follow_symlinks=False,
-        )
+        child_relative = relative / name
+        try:
+            child_status = os.stat(
+                name,
+                dir_fd=descriptor,
+                follow_symlinks=False,
+            )
+        except OSError as error:
+            raise _RootedDirectoryEntryError(
+                error,
+                child_relative,
+            ) from error
         if stat.S_ISDIR(child_status.st_mode):
             kind: Literal["directory", "file", "symlink", "other"] = "directory"
         elif stat.S_ISREG(child_status.st_mode):
@@ -503,8 +523,12 @@ class _RootedReader:
             failure_path = Path()
             self.verify_root()
             return tuple(acquired)
-        except _RootedTreeAcquisitionError:
-            raise
+        except _RootedDirectoryEntryError as error:
+            raise _RootedTreeAcquisitionError(
+                error.cause,
+                error.path,
+                tuple(acquired),
+            ) from error
         except OSError as error:
             raise _RootedTreeAcquisitionError(
                 error,
