@@ -461,6 +461,75 @@ def test_rooted_directory_birth_binds_real_staging_replacement_at_first_open(
         os.fstat(replacement_descriptor)
 
 
+def test_rooted_directory_birth_rejects_nonempty_replacement_at_first_open(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    root = tmp_path / "kb"
+    outside = tmp_path / "outside"
+    root.mkdir()
+    outside.mkdir()
+    marker = outside / "marker"
+    marker.write_bytes(b"outside")
+    root_identity = inspect_root(root)
+    real_open = safeio.os.open
+    injected = False
+    replacement_name: str | None = None
+
+    def install_nonempty_replacement(path, flags, mode=0o777, *, dir_fd=None):
+        nonlocal injected, replacement_name
+        is_staging = isinstance(path, str) and path.startswith(".kb-born-")
+        if is_staging and not injected:
+            injected = True
+            replacement_name = path
+            os.rename(
+                path,
+                f"{path}-created",
+                src_dir_fd=dir_fd,
+                dst_dir_fd=dir_fd,
+            )
+            os.mkdir(path, dir_fd=dir_fd)
+            replacement_descriptor = real_open(
+                path,
+                os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                dir_fd=dir_fd,
+            )
+            try:
+                os.mkdir("nested", dir_fd=replacement_descriptor)
+                rogue_descriptor = real_open(
+                    "rogue.md",
+                    os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                    0o666,
+                    dir_fd=replacement_descriptor,
+                )
+                try:
+                    os.write(rogue_descriptor, b"rogue markdown\n")
+                finally:
+                    os.close(rogue_descriptor)
+            finally:
+                os.close(replacement_descriptor)
+        return real_open(path, flags, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr(safeio.os, "open", install_nonempty_replacement)
+
+    with pytest.raises(OSError) as raised:
+        create_rooted_directory(root, Path("born"), root_identity)
+
+    assert raised.value.errno == errno.ENOTEMPTY
+    assert injected
+    assert not (root / "born").exists()
+    assert replacement_name is not None
+    replacement = root / replacement_name
+    assert replacement.joinpath("rogue.md").read_bytes() == b"rogue markdown\n"
+    assert replacement.joinpath("nested").is_dir()
+    assert marker.read_bytes() == b"outside"
+    assert sorted(path.name for path in outside.iterdir()) == ["marker"]
+    staging_entries = [
+        path for path in root.iterdir() if path.name.startswith(".kb-born-")
+    ]
+    assert len(staging_entries) == 2
+
+
 def test_rooted_directory_birth_opens_before_inspecting_staging_path(
     tmp_path,
     monkeypatch,
@@ -662,3 +731,58 @@ def test_rooted_directory_birth_rejects_swap_before_publication(
     ]
     assert len(staging_entries) == 2
     assert all(path.is_dir() and not any(path.iterdir()) for path in staging_entries)
+
+
+def test_rooted_directory_birth_rechecks_emptiness_before_publication(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    root = tmp_path / "kb"
+    root.mkdir()
+    root_identity = inspect_root(root)
+    real_stat = safeio.os.stat
+    injected = False
+    staging_name: str | None = None
+
+    def add_entry_at_prepublication_identity_check(
+        path,
+        *,
+        dir_fd=None,
+        follow_symlinks=True,
+    ):
+        nonlocal injected, staging_name
+        is_staging = isinstance(path, str) and path.startswith(".kb-born-")
+        if is_staging and not injected:
+            injected = True
+            staging_name = path
+            descriptor = os.open(
+                path,
+                os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                dir_fd=dir_fd,
+            )
+            try:
+                late_descriptor = os.open(
+                    "late.md",
+                    os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                    0o666,
+                    dir_fd=descriptor,
+                )
+                os.close(late_descriptor)
+            finally:
+                os.close(descriptor)
+        return real_stat(path, dir_fd=dir_fd, follow_symlinks=follow_symlinks)
+
+    monkeypatch.setattr(
+        safeio.os,
+        "stat",
+        add_entry_at_prepublication_identity_check,
+    )
+
+    with pytest.raises(OSError) as raised:
+        create_rooted_directory(root, Path("born"), root_identity)
+
+    assert raised.value.errno == errno.ENOTEMPTY
+    assert injected
+    assert not (root / "born").exists()
+    assert staging_name is not None
+    assert (root / staging_name / "late.md").is_file()

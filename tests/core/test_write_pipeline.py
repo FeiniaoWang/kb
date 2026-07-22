@@ -1417,6 +1417,85 @@ def test_directory_replacement_at_first_open_is_bound_for_pipeline_writes(
     assert not any(retained.iterdir())
 
 
+def test_nonempty_replacement_at_first_open_fails_pipeline_before_publication(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    import kb.core.safeio as safeio
+
+    root = initialized(tmp_path)
+    index_before = (root / "synthetic/index.md").read_bytes()
+    log_before = (root / "log.md").read_bytes()
+    real_open = safeio.os.open
+    injected = False
+    replacement_name: str | None = None
+
+    def install_nonempty_replacement(path, flags, mode=0o777, *, dir_fd=None):
+        nonlocal injected, replacement_name
+        is_staging = isinstance(path, str) and path.startswith(".kb-born-")
+        if is_staging and not injected:
+            injected = True
+            replacement_name = path
+            os.rename(
+                path,
+                f"{path}-created",
+                src_dir_fd=dir_fd,
+                dst_dir_fd=dir_fd,
+            )
+            os.mkdir(path, dir_fd=dir_fd)
+            replacement_descriptor = real_open(
+                path,
+                os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                dir_fd=dir_fd,
+            )
+            try:
+                os.mkdir("nested", dir_fd=replacement_descriptor)
+                rogue_descriptor = real_open(
+                    "rogue.md",
+                    os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                    0o666,
+                    dir_fd=replacement_descriptor,
+                )
+                try:
+                    os.write(rogue_descriptor, b"rogue markdown\n")
+                finally:
+                    os.close(rogue_descriptor)
+            finally:
+                os.close(replacement_descriptor)
+        return real_open(path, flags, mode, dir_fd=dir_fd)
+
+    prepared = prepare_write(
+        load_write_context(root),
+        WriteIntent(
+            birth=DocumentBirth(
+                path=Path("synthetic/a/planned.md"),
+                content=document_bytes(),
+            ),
+            log_entry=log_entry(),
+        ),
+    )
+    monkeypatch.setattr(safeio.os, "open", install_nonempty_replacement)
+
+    with pytest.raises(WriteFailure) as raised:
+        apply_write(prepared)
+
+    assert injected
+    assert raised.value.phase == "write"
+    assert raised.value.operation == "mkdir"
+    assert raised.value.role == "directory"
+    assert raised.value.path == Path("synthetic/a")
+    assert raised.value.cause.errno == errno.ENOTEMPTY
+    assert not (root / "synthetic/a").exists()
+    assert not (root / "synthetic/a/index.md").exists()
+    assert not (root / "synthetic/a/planned.md").exists()
+    assert (root / "synthetic/index.md").read_bytes() == index_before
+    assert (root / "log.md").read_bytes() == log_before
+    assert replacement_name is not None
+    retained = root / "synthetic" / replacement_name
+    assert retained.joinpath("rogue.md").read_bytes() == b"rogue markdown\n"
+    assert retained.joinpath("nested").is_dir()
+
+
 def test_prebinding_staging_symlink_cannot_redirect_pipeline_writes(
     tmp_path,
     monkeypatch,

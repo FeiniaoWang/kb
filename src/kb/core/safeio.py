@@ -161,6 +161,15 @@ def _directory_flags() -> int:
     return os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
 
 
+def _require_empty_bound_directory(descriptor: int, relative: Path) -> None:
+    if os.listdir(descriptor):
+        raise OSError(
+            errno.ENOTEMPTY,
+            "bound staging directory is not empty",
+            relative,
+        )
+
+
 def inspect_root(root: Path) -> FileIdentity:
     _require_rooted_support()
     descriptor = os.open(root, _directory_flags())
@@ -618,6 +627,7 @@ def create_rooted_directory(
                     relative,
                 )
             bound_identity = _identity(status)
+            _require_empty_bound_directory(descriptor, relative)
             staging_status = os.stat(
                 staging_name,
                 dir_fd=parent_descriptor,
@@ -628,6 +638,7 @@ def create_rooted_directory(
                 or _identity(staging_status) != bound_identity
             ):
                 raise _stale_error(relative)
+            _require_empty_bound_directory(descriptor, relative)
             _publish_directory_exclusive(
                 parent_descriptor,
                 staging_name,
