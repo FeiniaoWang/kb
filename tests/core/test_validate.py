@@ -232,17 +232,22 @@ def test_ac78_undeclared_link_type_warns(tmp_path) -> None:
     make_doc(
         root,
         "synthetic/note.md",
-        _valid_synthetic_values(links={"blocks": ["CHAT-000001"]}),
+        _valid_synthetic_values(
+            links={
+                "references": ["CHAT-000001"],
+                "custom": ["CHAT-000001"],
+            }
+        ),
     )
 
     findings = validate(ValidateRequest(kb_root=root)).findings
+    link_type_findings = [
+        finding for finding in findings if finding.code == "LINKTYPE_UNDECLARED"
+    ]
 
-    assert any(
-        finding.code == "LINKTYPE_UNDECLARED"
-        and finding.severity == "warning"
-        and "link type 'blocks'" in finding.message
-        for finding in findings
-    )
+    assert len(link_type_findings) == 1
+    assert link_type_findings[0].severity == "warning"
+    assert "link type 'custom'" in link_type_findings[0].message
 
 
 def test_ac78_empty_link_type_vocabulary_declares_nothing(tmp_path) -> None:
@@ -252,49 +257,89 @@ def test_ac78_empty_link_type_vocabulary_declares_nothing(tmp_path) -> None:
     make_doc(
         root,
         "synthetic/note.md",
-        _valid_synthetic_values(links={"references": ["CHAT-000001"]}),
+        _valid_synthetic_values(
+            links={
+                "references": ["CHAT-000001"],
+                "custom": ["CHAT-000001"],
+            }
+        ),
     )
 
     findings = validate(ValidateRequest(kb_root=root)).findings
+    link_type_findings = [
+        finding for finding in findings if finding.code == "LINKTYPE_UNDECLARED"
+    ]
 
-    assert any(finding.code == "LINKTYPE_UNDECLARED" for finding in findings)
+    assert len(link_type_findings) == 2
+    assert [finding.severity for finding in link_type_findings] == [
+        "warning",
+        "warning",
+    ]
+    assert [finding.message.split("'")[1] for finding in link_type_findings] == [
+        "references",
+        "custom",
+    ]
 
 
-def test_ac79_unresolvable_associative_link_target_is_an_error(tmp_path) -> None:
+def test_ac79_link_and_pending_resolution_cover_all_document_classes(
+    tmp_path,
+) -> None:
     root = make_kb(tmp_path / "kb")
     _set_link_types(root, ["references"])
     make_doc(root, "raw/chats/session.md", _chat_values())
     make_doc(
         root,
-        "synthetic/note.md",
-        _valid_synthetic_values(links={"references": ["KB-999999"]}),
+        "raw/sources/source.md",
+        {
+            "id": "RAW-000001",
+            "type": "raw-source",
+            "ingested_at": "2026-07-16T08:00:00Z",
+            "origin": "file",
+        },
     )
-
-    findings = validate(ValidateRequest(kb_root=root)).findings
-
-    assert any(
-        finding.code == "LINK_UNRESOLVED"
-        and "links reference 'KB-999999'" in finding.message
-        for finding in findings
+    make_doc(
+        root,
+        "governance/conventions.md",
+        {
+            "id": "GOVERNANCE-CONVENTIONS",
+            "type": "conventions",
+            "title": "Project Conventions",
+            "description": "Standing conventions.",
+        },
     )
-
-
-def test_ac79_unresolvable_pending_marker_is_an_error(tmp_path) -> None:
-    root = make_kb(tmp_path / "kb")
-    make_doc(root, "raw/chats/session.md", _chat_values())
+    make_doc(
+        root,
+        "synthetic/target.md",
+        _valid_synthetic_values(id="KB-000002"),
+    )
     make_doc(
         root,
         "synthetic/note.md",
-        _valid_synthetic_values(pending_upstream=["KB-999999"]),
+        _valid_synthetic_values(
+            links={
+                "references": [
+                    "RAW-000001",
+                    "GOVERNANCE-CONVENTIONS",
+                    "KB-000002",
+                    "KB-999999",
+                ]
+            },
+            pending_upstream=["CHAT-000001", "KB-888888"],
+        ),
     )
 
     findings = validate(ValidateRequest(kb_root=root)).findings
-
-    assert any(
-        finding.code == "LINK_UNRESOLVED"
-        and "pending_upstream reference 'KB-999999'" in finding.message
+    unresolved = [
+        finding
         for finding in findings
-    )
+        if finding.code == "LINK_UNRESOLVED"
+        and finding.path == "synthetic/note.md"
+    ]
+
+    assert [finding.message for finding in unresolved] == [
+        "links reference 'KB-999999' does not resolve to a document id",
+        "pending_upstream reference 'KB-888888' does not resolve to a document id",
+    ]
     assert "PU_NOT_PARENT" not in [finding.code for finding in findings]
 
 
@@ -366,11 +411,21 @@ def test_ac80_pending_marker_that_is_a_parent_is_clean(tmp_path) -> None:
 def test_ac81_associative_link_cycles_are_legal(tmp_path) -> None:
     root = make_kb(tmp_path / "kb")
     _set_link_types(root, ["references"])
-    make_doc(root, "raw/chats/session.md", _chat_values())
+    make_doc(
+        root,
+        "raw/sources/source.md",
+        {
+            "id": "RAW-000001",
+            "type": "raw-source",
+            "ingested_at": "2026-07-16T08:00:00Z",
+            "origin": "file",
+        },
+    )
     make_doc(
         root,
         "synthetic/first.md",
         _valid_synthetic_values(
+            derived_from=[],
             links={"references": ["KB-000002"]},
         ),
     )
@@ -379,13 +434,20 @@ def test_ac81_associative_link_cycles_are_legal(tmp_path) -> None:
         "synthetic/second.md",
         _valid_synthetic_values(
             id="KB-000002",
+            derived_from=["RAW-000001"],
             links={"references": ["KB-000001"]},
         ),
     )
 
     findings = validate(ValidateRequest(kb_root=root)).findings
+    codes_by_path = {
+        path: [finding.code for finding in findings if finding.path == path]
+        for path in ("synthetic/first.md", "synthetic/second.md")
+    }
 
     assert "DG2_CYCLE" not in [finding.code for finding in findings]
+    assert codes_by_path["synthetic/first.md"] == ["DG1_NO_PARENTS"]
+    assert codes_by_path["synthetic/second.md"] == ["DG5_NO_SESSION_PARENT"]
 
 
 def test_ac75_charter_document_is_valid_under_governance(tmp_path) -> None:
