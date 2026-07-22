@@ -27,11 +27,17 @@ binds the filesystem object rather than its lexical pathname. Portable
 Darwin/Linux interfaces cannot stop a non-cooperating namespace writer from
 renaming that bound inode outside the lexical KB root between open and
 mutation. That post-open movement is outside the threat model; no exclusive-
-writer or snapshot-isolation guarantee is claimed. A later pathname-identity
-check returns the established typed failure, while bytes already written
-through the bound descriptor remain documented no-rollback partial state on
-the moved object. Ordinary symlink/path traversal, pre-open replacement, and a
-replacement installed at the old pathname retain their documented protections.
+writer or snapshot-isolation guarantee is claimed. If a later pathname-identity
+check observes the movement or a replacement at an expected pathname, it
+returns the established typed failure; not every post-open movement is
+necessarily observed, including movement during the final log effect after the
+last available born-directory check. Bytes already written through the bound
+descriptor remain documented no-rollback partial state on the moved object.
+Ordinary symlink/path traversal and pre-open replacement of paths with an
+established expected identity retain their documented protections. The
+high-entropy born staging path is the explicit exception: before its first open
+it has no expected identity and may bind a substituted real directory only when
+that directory is observed empty.
 
 Before returning from preparation, reject any explicit birth, companion, or
 mutation path that collides with an implicit born index, the affected existing
@@ -69,11 +75,11 @@ enumeration shows it is empty. A symlink, non-directory, or non-empty directory
 at binding fails before publication. Emptiness is checked through the held
 descriptor immediately after binding and again before publication; this
 narrows the concurrent-change window without promising snapshot isolation.
-A replacement inode installed at an expected pathname after binding is
-detected before or after publication, during child writes, or before
-log/success. Operations already bound to an object follow that object under the
-threat-model scope above. Creator-provenance authentication before first open
-is not promised.
+A replacement inode present at an expected pathname when an available identity
+check runs is detected before or after publication, during child writes, or
+before the log effect. Operations already bound to an object follow that object
+under the threat-model scope above. Creator-provenance authentication before
+first open is not promised.
 
 The implementation atomically publishes the bound directory to the final name
 with a kernel no-replace primitive and verifies that the published entry
@@ -99,9 +105,10 @@ child-directory, born-index, companion, and document birth. It verifies every
 born directory identity again before success. A replacement directory
 installed at the old pathname after the first no-follow binding receives no
 pipeline bytes. A moved already-bound directory may receive partial bytes
-before the next pathname-identity check returns a typed failure; prior completed
-effects remain without rollback. Parent and staging descriptors close within
-the one rooted directory-birth operation on every path.
+as no-rollback partial state. If a subsequent pathname-identity check observes
+the movement, it returns a typed failure; no such later observation is promised
+for movement during the final log effect. Parent and staging descriptors close
+within the one rooted directory-birth operation on every path.
 
 ## Command-Contract Reconciliation Amendment
 

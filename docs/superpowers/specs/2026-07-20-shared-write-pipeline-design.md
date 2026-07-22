@@ -46,14 +46,19 @@ through the descriptor. Such post-open namespace movement is outside the
 containment threat model.
 
 Accordingly, the guarantee is descriptor/object containment: ordinary
-symlink/path traversal, pre-open replacement, and a replacement inode installed
-at an expected pathname are not followed or overwritten; later identity checks
-produce the established typed failure. Bytes already written through a bound
-descriptor before that failure remain on the bound object as documented
-no-rollback partial state, even if a non-cooperating actor moved that object
-outside the lexical root. No exclusive-writer or snapshot-isolation guarantee
-is claimed. Cooperating normal CLI execution and normal successful bytes remain
-unchanged.
+symlink/path traversal and pre-open replacement of a path with an established
+expected identity are not followed or overwritten. The documented exception is
+the high-entropy born-directory staging path, which has no expected identity
+before first open and may bind a substituted real directory only when it is
+observed empty. If a later pathname-identity check observes post-open movement
+or a replacement inode at an expected pathname, it produces the established
+typed failure. The interface does not guarantee that every post-open movement
+is observed, including movement during the final log effect after the last
+available born-directory check. Bytes already written through a bound
+descriptor remain on the bound object as documented no-rollback partial state,
+even if a non-cooperating actor moved that object outside the lexical root. No
+exclusive-writer or snapshot-isolation guarantee is claimed. Cooperating normal
+CLI execution and normal successful bytes remain unchanged.
 
 ### Root-bound context acquisition
 
@@ -147,9 +152,9 @@ promise snapshot isolation. The bound directory is then published to the final
 name with a kernel atomic no-replace primitive
 (`renameatx_np(..., RENAME_EXCL)` on Darwin or
 `renameat2(..., RENAME_NOREPLACE)` on Linux), verifies that the final entry is
-the bound identity, and only then returns it. A replacement inode installed at
-the expected pathname after binding is detected by identity checks before or
-after publication, during child writes, and during the final pre-log
+the bound identity, and only then returns it. A replacement inode present at
+the expected pathname when an available identity check runs is detected before
+or after publication, during child writes, or during the final pre-log
 verification. Operations through an already-open descriptor still target the
 bound object if a non-cooperating actor renames that object elsewhere, as scoped
 above. Ordinary rename is forbidden
@@ -175,9 +180,10 @@ immutable local state and is required as the expected immediate-parent
 identity for its own `index.md`, the next child directory, and every companion
 or citable document born beneath it. A replacement inode installed at the old
 pathname after binding receives no pipeline bytes; a moved already-bound object
-may receive no-rollback partial bytes before the next pathname-identity check
-fails. Every born directory is identity-verified again before success is
-returned.
+may receive no-rollback partial bytes. If a subsequent pathname-identity check
+observes the movement, it fails with the typed write error; such a later check
+is not guaranteed for movement during the final log effect. Every born
+directory is identity-verified again before that log effect begins.
 
 Only identities cross individual rooted operations. Parent and staging
 descriptors remain operation-local and are closed before the next pipeline
