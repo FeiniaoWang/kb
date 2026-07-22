@@ -175,6 +175,28 @@ or append. It is the last fallible pathname-identity operation before the final
 log effect, so a verification failure leaves `log.md` byte-identical and no
 fallible pipeline operation follows a successful log write.
 
+## Final Typed-Preflight and Acquisition-Provenance Amendment
+
+If rooted Markdown tree acquisition fails after listing—during a no-follow
+directory/file open, identity inspection, or frontmatter-prefix read—a private
+safe-I/O carrier preserves the exact root-relative failing path, the original
+`OSError`, and all prefixes safely acquired before failure. The pipeline builds
+the read-only partial `snapshot_kb` from only those prefixes and keeps the
+public staged interface unchanged.
+
+Create path-reference supersession classification and ingest requested
+destination/component classification compare the exact failing path directly.
+Create id references may use the partial snapshot to prove id-to-path
+provenance. Context/surface/destination/adapter order is unchanged, adapters
+are not invoked after a context failure, and the KB remains byte-identical.
+
+Born-current index formatting and strict UTF-8 encoding are preflight render
+work. Wrap expected `TypeError`/`ValueError` as `WriteFailure("preflight",
+"render", "index", exact_born_index_path, OSError(EINVAL, ...))` and
+`UnicodeEncodeError` with `EILSEQ`. Raw formatting/Unicode exceptions never
+cross the pipeline seam; create and ingest retain their stable generic I/O
+envelopes and no mutation occurs.
+
 ## Global Constraints
 
 - The root source of truth is `docs/prd.md`; command behavior remains governed by `docs/specs/commands/00-shared.md`, `docs/specs/commands/kb-create.md`, and `docs/specs/commands/kb-ingest.md` in that precedence order.
@@ -2411,6 +2433,23 @@ or public interface is added.
 
 ---
 
+### Task 14: Preserve Acquisition Provenance and Type Born-Index Failures
+
+**Scope:** Close the two final typed-error/provenance findings without changing
+the public staged interface, validation/acquisition order, or successful bytes.
+
+- [x] Pin exact relative-path and safely acquired partial-prefix provenance for
+      rooted tree acquisition failures, plus typed born-index render/encoding
+      failures, in the design and plan.
+- [ ] Preserve acquisition provenance through the internal safe-I/O seam and
+      exact create/ingest command classifications.
+- [ ] Wrap born-index formatting and UTF-8 encoding as exact typed preflight
+      index failures before mutation.
+- [ ] Verify focused, command, architecture, exact AC, full-suite, diff, and
+      status gates.
+
+---
+
 ## Implementation Completion Checklist
 
 - [x] `slug()` is defined only in `src/kb/core/naming.py` and both commands import it.
@@ -2438,6 +2477,8 @@ or public interface is added.
       pathname replacements are detected at the available identity checks.
 - [x] Task 13 descriptor/object containment scope and the accepted post-open
       namespace-movement limitation are documented and regression-tested.
+- [ ] Task 14 partial acquisition provenance and born-index typed preflight
+      envelopes are implemented and verified.
 - [ ] Revalidate the downstream CLI/core input-seam plan after this branch is
       integrated. Its source paths exist, but its separate prepared models
       still contain stale `missing_directories` assumptions and are explicitly

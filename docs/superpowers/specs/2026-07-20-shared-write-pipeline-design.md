@@ -259,6 +259,31 @@ pathname-identity check before that final effect. A verification failure
 therefore leaves the log byte-identical; after a successful log write, receipt
 assembly and descriptor cleanup cannot report a new pipeline failure.
 
+### Final typed-preflight and acquisition-provenance correction
+
+Rooted Markdown tree acquisition preserves provenance when a listed file or
+directory fails during its later no-follow open, inspection, or prefix read. A
+private safe-I/O carrier records the exact root-relative failing path, the
+original `OSError`, and every frontmatter prefix safely acquired before the
+failure. The write pipeline converts that carrier to `_MarkdownSnapshotError`
+and then `WriteFailure` without exposing a new public interface. Its
+`snapshot_kb` is built only from those safely acquired prefixes.
+
+Command classification uses the exact failing path directly for a create
+path-reference supersession or an ingest requested destination/component.
+Create id-reference classification may additionally resolve against the
+read-only partial snapshot. These mappings do not move context acquisition,
+surface validation, destination validation, or adapter invocation, and any
+failure remains pre-mutation.
+
+All born-current index formatting and strict UTF-8 encoding occurs inside the
+same typed preflight render envelope as the projected existing index. Expected
+`TypeError` or `ValueError` becomes `WriteFailure` with
+`phase="preflight"`, `operation="render"`, `role="index"`, the exact born
+`index.md` path, and an `EINVAL` `OSError`. `UnicodeEncodeError` becomes the
+same typed failure with `EILSEQ`. No raw formatting or Unicode exception
+crosses the pipeline seam, and the KB remains byte-identical.
+
 ## Goal
 
 Extract the duplicated create/ingest filesystem commit orchestration into one deep core module while preserving every observable `kb create` and `kb ingest` contract. The extraction also strengthens ingest's mutable index and log handling to match create's identity-checked safety without adding rollback or changing documented partial-write semantics.
@@ -502,6 +527,10 @@ Existing command destination validation remains the user-facing source of destin
 7. pre-render every born-current index and the affected existing index against the projected post-write tree; and
 8. format and strict UTF-8 encode the complete log row; and
 9. prepare exact sorted effect paths.
+
+Born-current index formatting and strict UTF-8 encoding are part of step 7 and
+are wrapped per the final typed-preflight correction above; failure identifies
+the exact born `index.md` and occurs before mutation.
 
 Log formatting or encoding failure is wrapped as `WriteFailure` with
 `phase="preflight"`, `operation="render"`, `role="log"`, `path=Path("log.md")`,
