@@ -2364,7 +2364,7 @@ descriptor on supported Darwin/Linux systems.
 - [x] Remove authoritative pre-open pathname `stat`; publish and verify only
       the identity acquired from the opened descriptor.
 - [x] Verify focused, command, architecture, AC, and full regressions.
-- [ ] **Final-review correction:** reject any directory observed non-empty
+- [x] **Final-review correction:** reject any directory observed non-empty
       through the held descriptor at first-open binding, before final-name
       publication or pipeline writes; re-run all release gates.
 
@@ -2392,7 +2392,7 @@ descriptor on supported Darwin/Linux systems.
 - [x] Full repository tests and `git diff --check` pass through Task 10.
 - [x] Task 11 iterative traversal, prefix-only projected child acquisition,
       and pre-log final verification are complete.
-- [ ] Task 12 first-open born-directory binding correction is implemented and
+- [x] Task 12 first-open born-directory binding correction is implemented and
       verified; only an empty real directory may be accepted at binding, all
       post-binding swaps are rejected, and no write can escape the captured
       root.
