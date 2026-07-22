@@ -1,5 +1,5 @@
 from pathlib import Path
-from typing import Annotated, Literal
+from typing import Annotated
 
 import typer
 
@@ -9,7 +9,15 @@ from kb.cli.render import (
     render_ingest_json,
     render_ingest_text,
 )
-from kb.core.ingest import IngestFailure, IngestRequest, ingest
+from kb.cli.ingest_adapters import bind_ingest_source
+from kb.core.ingest import (
+    IngestFailure,
+    IngestRequest,
+    IngestResult,
+    SourceKind,
+    execute_ingest,
+    prepare_ingest,
+)
 from kb.core.model import RawClass
 
 INGEST_DESCRIPTION = """Ingest material into the knowledge base as immutable raw evidence.
@@ -24,6 +32,17 @@ INGEST_EXAMPLES = """Examples:
   kb ingest --class source --from file page.html --origin https://ex.com/post   Record the web page it came from"""
 
 
+def _run_ingest(
+    request: IngestRequest,
+    source_kind: SourceKind,
+    source: str | None,
+) -> IngestResult:
+    bound_source = bind_ingest_source(source_kind, source)
+    prepared = prepare_ingest(request, bound_source.shape)
+    payload = bound_source.acquire()
+    return execute_ingest(prepared, payload)
+
+
 def ingest_command(
     raw_class: Annotated[
         RawClass,
@@ -32,7 +51,7 @@ def ingest_command(
         ),
     ],
     source_kind: Annotated[
-        Literal["file", "stdin", "clipboard"],
+        SourceKind,
         typer.Option(
             "--from",
             help="Where to read the material from: file, stdin, or clipboard.",
@@ -95,19 +114,16 @@ def ingest_command(
     ] = False,
 ) -> None:
     try:
-        result = ingest(
-            IngestRequest(
-                raw_class=raw_class,
-                source_kind=source_kind,
-                source=source,
-                dest=dest,
-                about=about,
-                title=title,
-                origin=origin,
-                actor=actor,
-                kb_root=kb_root,
-            )
+        request = IngestRequest(
+            raw_class=raw_class,
+            dest=dest,
+            about=about,
+            title=title,
+            origin=origin,
+            actor=actor,
+            kb_root=kb_root,
         )
+        result = _run_ingest(request, source_kind, source)
     except IngestFailure as error:
         typer.echo(
             render_error_json(error) if json_output else render_error_text(error),

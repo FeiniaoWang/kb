@@ -1,21 +1,16 @@
 from __future__ import annotations
 
-import platform
 import re
-import shutil
 import stat
-import subprocess
-import sys
-from collections.abc import Callable
 from pathlib import Path, PurePosixPath
 from typing import Literal
 
 import yaml
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, PrivateAttr
 
 from kb.core.housekeeping import LogEntry, utc_now
 from kb.core.ids import next_id
-from kb.core.model import ConfigLoadError, RawClass, RawFrontmatter
+from kb.core.model import Config, ConfigLoadError, RawClass, RawFrontmatter
 from kb.core.naming import slug
 from kb.core.scan import KB, RootDiscoveryError, resolve_ref
 from kb.core.write_pipeline import (
@@ -40,20 +35,23 @@ CLASS_TYPE = {
     RawClass.FEEDBACK: "feedback",
 }
 
+SourceKind = Literal["file", "stdin", "clipboard"]
+
+
+class IngestSourceShape(BaseModel):
+    source_kind: SourceKind
+    locator_present: bool
+
 
 class AdapterPayload(BaseModel):
+    source_kind: SourceKind
     data: bytes
     default_origin: str
-    source_filename: str | None
-
-
-Adapter = Callable[[str | None], AdapterPayload]
+    source_filename: str | None = None
 
 
 class IngestRequest(BaseModel):
     raw_class: RawClass
-    source_kind: Literal["file", "stdin", "clipboard"]
-    source: str | None = None
     dest: str | None = None
     about: str | None = None
     title: str | None = None
@@ -70,6 +68,17 @@ class IngestResult(BaseModel):
     updated: list[str] = Field(default_factory=list)
 
 
+class PreparedIngest(BaseModel):
+    request: IngestRequest
+    source_shape: IngestSourceShape
+    root: Path
+    config: Config
+    kb: KB
+    target_dir: Path
+    missing_directories: list[Path]
+    _context = PrivateAttr()
+
+
 class IngestFailure(Exception):
     def __init__(self, code: str, message: str, exit_code: Literal[1, 2]) -> None:
         super().__init__(message)
@@ -78,93 +87,8 @@ class IngestFailure(Exception):
         self.exit_code = exit_code
 
 
-def _file_adapter(source: str | None) -> AdapterPayload:
-    if source is None:
-        raise IngestFailure("E_INGEST_USAGE", "SOURCE is required with --from file", 2)
-    path = Path(source).expanduser()
-    try:
-        resolved = path.resolve(strict=True)
-        if not resolved.is_file():
-            raise OSError("not a regular file")
-        data = resolved.read_bytes()
-    except OSError as error:
-        raise IngestFailure(
-            "E_INGEST_SOURCE_NOT_FOUND",
-            f"source file is unavailable: {source}: {error}",
-            2,
-        ) from error
-    return AdapterPayload(
-        data=data,
-        default_origin=str(resolved),
-        source_filename=resolved.name,
-    )
-
-
-def _stdin_adapter(source: str | None) -> AdapterPayload:
-    if source is not None:
-        raise IngestFailure(
-            "E_INGEST_USAGE", "SOURCE is forbidden with --from stdin", 2
-        )
-    stream = getattr(sys.stdin, "buffer", sys.stdin)
-    data = stream.read()
-    if isinstance(data, str):
-        data = data.encode("utf-8")
-    return AdapterPayload(data=data, default_origin="stdin", source_filename=None)
-
-
-def _clipboard_adapter(source: str | None) -> AdapterPayload:
-    if source is not None:
-        raise IngestFailure(
-            "E_INGEST_USAGE", "SOURCE is forbidden with --from clipboard", 2
-        )
-    system = platform.system()
-    candidates: list[list[str]]
-    if system == "Darwin":
-        candidates = [["pbpaste"]]
-    elif system == "Windows":
-        candidates = [["powershell", "-NoProfile", "-Command", "Get-Clipboard"]]
-    else:
-        candidates = [["wl-paste"], ["xclip", "-selection", "clipboard", "-o"]]
-    command = next(
-        (candidate for candidate in candidates if shutil.which(candidate[0])), None
-    )
-    if command is None:
-        raise IngestFailure(
-            "E_INGEST_CLIPBOARD", "no supported clipboard tool found on PATH", 2
-        )
-    try:
-        completed = subprocess.run(
-            command,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            check=False,
-        )
-    except OSError as error:
-        raise IngestFailure("E_INGEST_CLIPBOARD", str(error), 2) from error
-    if completed.returncode != 0:
-        message = completed.stderr.decode("utf-8", errors="replace").strip()
-        raise IngestFailure(
-            "E_INGEST_CLIPBOARD",
-            f"clipboard tool exited {completed.returncode}"
-            + (f": {message}" if message else ""),
-            2,
-        )
-    return AdapterPayload(
-        data=completed.stdout,
-        default_origin="clipboard",
-        source_filename=None,
-    )
-
-
-ADAPTERS: dict[str, Adapter] = {
-    "file": _file_adapter,
-    "stdin": _stdin_adapter,
-    "clipboard": _clipboard_adapter,
-}
-
-
-def _normalized_input(
-    payload: AdapterPayload, source_kind: str
+def _normalized_text(
+    payload: AdapterPayload, source_kind: SourceKind
 ) -> tuple[str | None, bytes | None]:
     try:
         decoded = payload.data.decode("utf-8")
@@ -182,13 +106,13 @@ def _normalized_input(
     )
 
 
-def _surface(request: IngestRequest) -> None:
-    if request.source_kind == "file" and request.source is None:
+def _surface(request: IngestRequest, source_shape: IngestSourceShape) -> None:
+    if source_shape.source_kind == "file" and not source_shape.locator_present:
         raise IngestFailure("E_INGEST_USAGE", "SOURCE is required with --from file", 2)
-    if request.source_kind != "file" and request.source is not None:
+    if source_shape.source_kind != "file" and source_shape.locator_present:
         raise IngestFailure(
             "E_INGEST_USAGE",
-            f"SOURCE is forbidden with --from {request.source_kind}",
+            f"SOURCE is forbidden with --from {source_shape.source_kind}",
             2,
         )
     if request.raw_class is RawClass.FEEDBACK and request.about is None:
@@ -275,6 +199,16 @@ def _target_directory(
     return class_dir, target_dir
 
 
+def _missing_directories(class_dir: Path, target_dir: Path) -> list[Path]:
+    missing: list[Path] = []
+    current = class_dir
+    for part in target_dir.relative_to(class_dir).parts:
+        current /= part
+        if missing or not current.exists():
+            missing.append(current)
+    return missing
+
+
 def _canonical_about(kb: KB, request: IngestRequest) -> str | None:
     if request.about is None:
         return None
@@ -335,7 +269,10 @@ def _non_text_original_path(
     return target_dir / filename
 
 
-def ingest(request: IngestRequest) -> IngestResult:
+def prepare_ingest(
+    request: IngestRequest,
+    source_shape: IngestSourceShape,
+) -> PreparedIngest:
     try:
         context = load_write_context(request.kb_root)
     except RootDiscoveryError as error:
@@ -356,13 +293,38 @@ def ingest(request: IngestRequest) -> IngestResult:
     root = context.root
     config = context.config
     kb = context.kb
-    _surface(request)
+    _surface(request, source_shape)
     destination_parts = _destination_parts(request.dest)
-    _, target_dir = _target_directory(
+    class_dir, target_dir = _target_directory(
         root, request.raw_class, destination_parts, request.dest
     )
-    payload = ADAPTERS[request.source_kind](request.source)
-    text_body, original_bytes = _normalized_input(payload, request.source_kind)
+    prepared = PreparedIngest(
+        request=request,
+        source_shape=source_shape,
+        root=root,
+        config=config,
+        kb=kb,
+        target_dir=target_dir,
+        missing_directories=_missing_directories(class_dir, target_dir),
+    )
+    prepared._context = context
+    return prepared
+
+
+def execute_ingest(
+    prepared: PreparedIngest,
+    payload: AdapterPayload,
+) -> IngestResult:
+    if payload.source_kind != prepared.source_shape.source_kind:
+        raise ValueError("payload source kind does not match prepared ingest")
+    request = prepared.request
+    root = prepared.root
+    config = prepared.config
+    kb = prepared.kb
+    target_dir = prepared.target_dir
+    missing_directories = prepared.missing_directories
+    body = _normalized_text(payload, payload.source_kind)
+    text_body, original_bytes = body
     about = _canonical_about(kb, request)
     doc_id = next_id(kb, config.id_prefixes[request.raw_class.value]).format()
     title = _derived_title(request, payload, doc_id)
@@ -450,7 +412,7 @@ def ingest(request: IngestRequest) -> IngestResult:
         ),
     )
     try:
-        prepared_write = prepare_write(context, intent)
+        prepared_write = prepare_write(prepared._context, intent)
         receipt = apply_write(prepared_write)
     except WriteFailure as error:
         raise IngestFailure("E_INGEST_IO", str(error.cause), 2) from error

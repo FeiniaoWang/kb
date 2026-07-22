@@ -522,7 +522,7 @@ def test_ac20_clipboard_adapter_reads_tool_stdout(
 ) -> None:
     clipboard_tool(tmp_path, "clipboard text")
     monkeypatch.setenv("PATH", str(tmp_path))
-    monkeypatch.setattr("kb.core.ingest.platform.system", lambda: "Darwin")
+    monkeypatch.setattr("kb.cli.ingest_adapters.platform.system", lambda: "Darwin")
     result = invoke_ingest(
         initialized_kb, "--class", "chat", "--from", "clipboard"
     )
@@ -537,7 +537,7 @@ def test_ac20_clipboard_adapter_reads_tool_stdout(
 def test_ac21_clipboard_missing_or_nonzero_is_environment_error(
     initialized_kb, tmp_path, invoke_ingest, monkeypatch
 ) -> None:
-    monkeypatch.setattr("kb.core.ingest.platform.system", lambda: "Darwin")
+    monkeypatch.setattr("kb.cli.ingest_adapters.platform.system", lambda: "Darwin")
     monkeypatch.setenv("PATH", "")
     before = snapshot(initialized_kb)
     missing = invoke_ingest(
@@ -567,13 +567,18 @@ def test_ac22_non_utf8_stdin_and_clipboard_are_findings(
     )
     assert stdin.exit_code == 1 and "E_INGEST_NOT_TEXT" in stdin.stderr
     monkeypatch.setattr(
-        "kb.core.ingest.ADAPTERS",
+        "kb.cli.ingest_adapters.ADAPTERS",
         {
-            **__import__("kb.core.ingest", fromlist=["ADAPTERS"]).ADAPTERS,
+            **__import__(
+                "kb.cli.ingest_adapters", fromlist=["ADAPTERS"]
+            ).ADAPTERS,
             "clipboard": lambda _: __import__(
                 "kb.core.ingest", fromlist=["AdapterPayload"]
             ).AdapterPayload(
-                data=b"\xff", default_origin="clipboard", source_filename=None
+                source_kind="clipboard",
+                data=b"\xff",
+                default_origin="clipboard",
+                source_filename=None,
             ),
         },
     )
@@ -898,7 +903,7 @@ def test_ac32_unsafe_or_escaping_dest_is_rejected_without_writes(
     source.write_text("doc", encoding="utf-8")
     source_before = source.read_bytes()
     before = snapshot(initialized_kb)
-    import kb.core.ingest as ingest_core
+    import kb.cli.ingest_adapters as ingest_adapters
 
     acquired: list[str | None] = []
 
@@ -906,7 +911,7 @@ def test_ac32_unsafe_or_escaping_dest_is_rejected_without_writes(
         acquired.append(value)
         raise AssertionError("destination validation must precede acquisition")
 
-    monkeypatch.setitem(ingest_core.ADAPTERS, "file", forbidden_adapter)
+    monkeypatch.setitem(ingest_adapters.ADAPTERS, "file", forbidden_adapter)
     invalid_values = [
         "/abs",
         "../escape",
@@ -1073,7 +1078,7 @@ def test_md_named_destination_link_found_by_context_is_exact_destination_error(
     invoke_ingest,
     monkeypatch,
 ) -> None:
-    import kb.core.ingest as ingest_core
+    import kb.cli.ingest_adapters as ingest_adapters
 
     source = tmp_path / "context-destination-source.md"
     source.write_text("source\n", encoding="utf-8")
@@ -1095,7 +1100,7 @@ def test_md_named_destination_link_found_by_context_is_exact_destination_error(
         acquired.append(value)
         raise AssertionError("context destination failure must precede acquisition")
 
-    monkeypatch.setitem(ingest_core.ADAPTERS, "file", forbidden_adapter)
+    monkeypatch.setitem(ingest_adapters.ADAPTERS, "file", forbidden_adapter)
     arguments = ["--dest", destination]
     if json_output:
         arguments.append("--json")
@@ -1133,7 +1138,7 @@ def test_requested_destination_directory_race_keeps_exact_invalid_envelope(
     invoke_ingest,
     monkeypatch,
 ) -> None:
-    import kb.core.ingest as ingest_core
+    import kb.cli.ingest_adapters as ingest_adapters
     import kb.core.safeio as safeio
 
     source = tmp_path / "race-source.md"
@@ -1179,7 +1184,7 @@ def test_requested_destination_directory_race_keeps_exact_invalid_envelope(
         raise AssertionError("context failure must precede adapter acquisition")
 
     monkeypatch.setattr(safeio.os, "open", replace_listed_destination)
-    monkeypatch.setitem(ingest_core.ADAPTERS, "file", forbidden_adapter)
+    monkeypatch.setitem(ingest_adapters.ADAPTERS, "file", forbidden_adapter)
     arguments = ["--dest", "raced.md/child"]
     if json_output:
         arguments.append("--json")
@@ -1229,7 +1234,7 @@ def test_unrelated_md_link_context_failure_stays_generic_and_keeps_precedence(
     invoke_ingest,
     monkeypatch,
 ) -> None:
-    import kb.core.ingest as ingest_core
+    import kb.cli.ingest_adapters as ingest_adapters
 
     source = tmp_path / "unrelated-context-source.md"
     source.write_text("source\n", encoding="utf-8")
@@ -1247,7 +1252,7 @@ def test_unrelated_md_link_context_failure_stays_generic_and_keeps_precedence(
         acquired.append(value)
         raise AssertionError("context failure must precede acquisition")
 
-    monkeypatch.setitem(ingest_core.ADAPTERS, "file", forbidden_adapter)
+    monkeypatch.setitem(ingest_adapters.ADAPTERS, "file", forbidden_adapter)
     command = [*arguments]
     if "--class" not in command:
         command = ["--class", "source", "--from", "file", *command]
@@ -1286,7 +1291,7 @@ def test_destination_metadata_error_is_exact_before_adapter(
         return real_lstat(path)
 
     monkeypatch.setattr(Path, "lstat", denied_lstat)
-    import kb.core.ingest as ingest_core
+    import kb.cli.ingest_adapters as ingest_adapters
 
     acquired: list[str | None] = []
 
@@ -1294,7 +1299,7 @@ def test_destination_metadata_error_is_exact_before_adapter(
         acquired.append(value)
         raise AssertionError("destination metadata failure must precede acquisition")
 
-    monkeypatch.setitem(ingest_core.ADAPTERS, "file", forbidden_adapter)
+    monkeypatch.setitem(ingest_adapters.ADAPTERS, "file", forbidden_adapter)
     arguments = ["--dest", "inaccessible/child"]
     if json_output:
         arguments.append("--json")
@@ -1348,7 +1353,7 @@ def test_missing_required_class_root_is_invalid_before_adapter(
     )
     shutil.rmtree(initialized_kb / class_relative)
     before = snapshot(initialized_kb)
-    import kb.core.ingest as ingest_core
+    import kb.cli.ingest_adapters as ingest_adapters
 
     acquired: list[str | None] = []
 
@@ -1356,7 +1361,7 @@ def test_missing_required_class_root_is_invalid_before_adapter(
         acquired.append(value)
         raise AssertionError("missing class root must precede acquisition")
 
-    monkeypatch.setitem(ingest_core.ADAPTERS, "file", forbidden_adapter)
+    monkeypatch.setitem(ingest_adapters.ADAPTERS, "file", forbidden_adapter)
     arguments = [
         "--class",
         raw_class,
@@ -1699,7 +1704,8 @@ def test_surrogate_escaped_source_origin_is_stable_ingest_io_without_mutation(
     invoke_ingest,
     monkeypatch,
 ) -> None:
-    import kb.core.ingest as ingest_core
+    import kb.cli.ingest_adapters as ingest_adapters
+    from kb.core.ingest import AdapterPayload
 
     source = tmp_path / "adapter-source.md"
     source.write_bytes(b"evidence\n")
@@ -1708,14 +1714,15 @@ def test_surrogate_escaped_source_origin_is_stable_ingest_io_without_mutation(
     escaped_name = "evidence-\udcff.md"
     escaped_origin = f"/external/{escaped_name}"
 
-    def surrogate_payload(_value: str | None) -> ingest_core.AdapterPayload:
-        return ingest_core.AdapterPayload(
+    def surrogate_payload(_value: str | None) -> AdapterPayload:
+        return AdapterPayload(
+            source_kind="file",
             data=source_before,
             default_origin=escaped_origin,
             source_filename=escaped_name,
         )
 
-    monkeypatch.setitem(ingest_core.ADAPTERS, "file", surrogate_payload)
+    monkeypatch.setitem(ingest_adapters.ADAPTERS, "file", surrogate_payload)
     arguments = ["--title", "Evidence"]
     if json_output:
         arguments.append("--json")
@@ -1897,7 +1904,7 @@ def test_ac50_file_ingest_never_invokes_git_or_creates_git_directory(
     def forbidden_subprocess(*args, **kwargs):
         raise AssertionError(f"unexpected subprocess invocation: {args!r}")
 
-    monkeypatch.setattr("kb.core.ingest.subprocess.run", forbidden_subprocess)
+    monkeypatch.setattr("kb.cli.ingest_adapters.subprocess.run", forbidden_subprocess)
     result = ingest_file(invoke_ingest, initialized_kb, source)
     assert result.exit_code == 0
     assert not (initialized_kb / ".git").exists()
@@ -1933,3 +1940,22 @@ def test_replaced_root_before_preparation_maps_to_ingest_io_without_writes(
     assert "E_INGEST_IO" in result.stderr
     assert not (original / "raw/sources/evidence.md").exists()
     assert not (replacement / "raw/sources/evidence.md").exists()
+
+
+def test_environment_failure_precedes_missing_external_source(
+    tmp_path: Path,
+    invoke_ingest,
+) -> None:
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    result = invoke_ingest(
+        outside,
+        "--class",
+        "source",
+        "--from",
+        "file",
+        str(tmp_path / "missing.md"),
+    )
+    assert result.exit_code == 2
+    assert "E_NO_KB" in result.output
+    assert "E_INGEST_SOURCE_NOT_FOUND" not in result.output
