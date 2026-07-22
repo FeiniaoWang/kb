@@ -1,6 +1,157 @@
 import kb.core.validate as validate_module
 
-from kb.core.validate import _canonical_numeric_id, _cycle_from, _reserved_slug_id
+from conftest import make_doc, make_kb
+from kb.core.validate import (
+    ValidateRequest,
+    _canonical_numeric_id,
+    _cycle_from,
+    _reserved_slug_id,
+    validate,
+)
+
+
+def _valid_synthetic_values(**overrides: object) -> dict[str, object]:
+    values: dict[str, object] = {
+        "id": "KB-000001",
+        "type": "spec",
+        "title": "Note",
+        "description": "A concise note.",
+        "status": "current",
+        "derived_from": ["CHAT-000001"],
+        "timestamp": "2026-07-16T10:00:00Z",
+        "last_human_touch": "2026-07-16T10:00:00Z",
+    }
+    values.update(overrides)
+    return values
+
+
+def _chat_values() -> dict[str, object]:
+    return {
+        "id": "CHAT-000001",
+        "type": "chat",
+        "ingested_at": "2026-07-16T09:00:00Z",
+        "origin": "stdin",
+        "title": "Session",
+    }
+
+
+def test_ac76_links_and_pending_upstream_are_legal_synthetic_keys(tmp_path) -> None:
+    root = make_kb(tmp_path / "kb")
+    make_doc(root, "raw/chats/session.md", _chat_values())
+    make_doc(
+        root,
+        "synthetic/note.md",
+        _valid_synthetic_values(
+            links={"references": ["CHAT-000001"]},
+            pending_upstream=["CHAT-000001"],
+        ),
+    )
+
+    findings = validate(ValidateRequest(kb_root=root)).findings
+
+    assert not any(
+        finding.code == "FM1_KEY_FORBIDDEN"
+        and finding.path == "synthetic/note.md"
+        for finding in findings
+    )
+
+
+def test_ac76_links_on_raw_document_are_forbidden(tmp_path) -> None:
+    root = make_kb(tmp_path / "kb")
+    make_doc(
+        root,
+        "raw/sources/source.md",
+        {
+            "id": "RAW-000001",
+            "type": "raw-source",
+            "ingested_at": "2026-07-16T08:00:00Z",
+            "origin": "file",
+            "links": {"references": []},
+        },
+    )
+
+    findings = validate(ValidateRequest(kb_root=root)).findings
+
+    assert any(
+        finding.code == "FM1_KEY_FORBIDDEN" and "links" in finding.message
+        for finding in findings
+    )
+
+
+def test_ac77_links_shape_must_be_mapping_of_string_lists(tmp_path) -> None:
+    root = make_kb(tmp_path / "kb")
+    make_doc(root, "raw/chats/session.md", _chat_values())
+    make_doc(
+        root,
+        "synthetic/note.md",
+        _valid_synthetic_values(links=["KB-000002"]),
+    )
+
+    findings = validate(ValidateRequest(kb_root=root)).findings
+
+    assert any(
+        finding.code == "FM1_FIELD_INVALID"
+        and "mapping of link type to a list of non-empty strings" in finding.message
+        for finding in findings
+    )
+
+
+def test_ac77_pending_upstream_shape_must_be_string_list(tmp_path) -> None:
+    root = make_kb(tmp_path / "kb")
+    make_doc(root, "raw/chats/session.md", _chat_values())
+    make_doc(
+        root,
+        "synthetic/note.md",
+        _valid_synthetic_values(pending_upstream="CHAT-000001"),
+    )
+
+    findings = validate(ValidateRequest(kb_root=root)).findings
+
+    assert any(
+        finding.code == "FM1_FIELD_INVALID"
+        and "list of non-empty strings" in finding.message
+        for finding in findings
+    )
+
+
+def test_ac75_charter_document_is_valid_under_governance(tmp_path) -> None:
+    root = make_kb(tmp_path / "kb")
+    make_doc(
+        root,
+        "governance/charter.md",
+        {
+            "id": "GOVERNANCE-CHARTER",
+            "type": "charter",
+            "title": "KB Charter",
+            "description": "The KB's purpose.",
+        },
+    )
+
+    findings = validate(ValidateRequest(kb_root=root)).findings
+
+    assert [finding for finding in findings if finding.path == "governance/charter.md"] == []
+
+
+def test_ac75_charter_type_outside_governance_flags_location(tmp_path) -> None:
+    root = make_kb(tmp_path / "kb")
+    make_doc(
+        root,
+        "synthetic/charter.md",
+        {
+            "id": "GOVERNANCE-CHARTER",
+            "type": "charter",
+            "title": "KB Charter",
+            "description": "The KB's purpose.",
+        },
+    )
+
+    findings = validate(ValidateRequest(kb_root=root)).findings
+
+    assert any(
+        finding.code == "LOC_TYPE_MISMATCH"
+        and finding.path == "synthetic/charter.md"
+        for finding in findings
+    )
 
 
 def test_canonical_numeric_id_has_exact_width_and_growth_rules() -> None:

@@ -33,6 +33,8 @@ RESERVED_KEYS = {
     "tags",
     "supersedes",
     "instructions",
+    "links",
+    "pending_upstream",
     "ingested_at",
     "origin",
     "about",
@@ -216,6 +218,8 @@ def _class_contract(type_name: str) -> tuple[str, tuple[str, ...], set[str]]:
             "tags",
             "supersedes",
             "instructions",
+            "links",
+            "pending_upstream",
         },
     )
 
@@ -301,6 +305,24 @@ def _invalid_reason(field: str, value: object) -> str | None:
             isinstance(item, str) and item.strip() for item in value
         )
         return None if valid else "must be a list of non-empty strings"
+    if field == "pending_upstream":
+        valid = isinstance(value, list) and all(
+            isinstance(item, str) and item.strip() for item in value
+        )
+        return None if valid else "must be a list of non-empty strings"
+    if field == "links":
+        valid = isinstance(value, dict) and all(
+            isinstance(link_type, str)
+            and link_type.strip()
+            and isinstance(targets, list)
+            and all(isinstance(item, str) and item.strip() for item in targets)
+            for link_type, targets in value.items()
+        )
+        return (
+            None
+            if valid
+            else "must be a mapping of link type to a list of non-empty strings"
+        )
     if field in TIMESTAMP_FIELDS:
         return (
             None
