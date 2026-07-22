@@ -26,9 +26,9 @@ Discover, analyze, and define what to build, for whom, and how to measure.
 
 A Product Requirements Document (PRD) aligns everyone on what's being built, for whom, why it matters, and how success will be measured.
 
-* Please use the `prd` skill to co-author PRDs with AI agents. The skill will ensure the important sections this SDLC requires are included.
-* A PRD is not static — PRD evolves as the team learns more about the problem space, user needs, and technical constraints.
-* For a complex system that evolves multiple teams, the PRD is often broken into a master PRD and multiple sub-PRDs, each focusing on a specific feature set or subsystem.
+* Use the `prd` skill to co-author PRDs with AI agents. The skill ensures the sections this SDLC requires are included.
+* A PRD is not static — it evolves as the team learns more about the problem space, user needs, and technical constraints.
+* For a complex system involving multiple teams, the PRD is broken into a master PRD and several sub-PRDs, each covering one feature set or subsystem.
 
 ##### Key Sections
 
@@ -41,8 +41,8 @@ These key sections are important for driving the later stages of the SDLC:
 
 A C4 Context Diagram provides a high-level, 10,000-foot view of how a software system fits into its surrounding environment. Like a satellite map, it shows exactly who uses the software (actors) and which external systems or third-party services it depends on, while omitting all low-level technical detail.
 
-* Please use the `c4-modeling` skill to co-author C4 diagrams with AI agents.
-* A C4 Context Diagram is always paired with a PRD. There can be a context diagram for the master PRD, and multiple context diagrams for sub-PRDs that zoom in on specific subsystems or feature sets.
+* Use the `c4-modeling` skill to co-author C4 diagrams with AI agents.
+* Every PRD is paired with a context diagram: one for the master PRD, plus one per sub-PRD that zooms in on its subsystem or feature set.
 
 ##### Key Purposes
 
@@ -68,7 +68,7 @@ A C4 Context Diagram provides a high-level, 10,000-foot view of how a software s
 #### UX Designer
 
 * Uses AI tools to prototype key user flows.
-* No visual design is required at this stage, the goal is to test out key screens and flows.
+* Skips visual design at this stage — the goal is to test key screens and flows, not to finalize the look.
 
 #### QA Engineer
 
@@ -84,58 +84,85 @@ Define the software solution to be built, including software architecture, UX de
 
 `Architecture Design` + `UX Design` + `Test Strategy & Plan`: together they form a comprehensive blueprint of the system to be built.
 
-#### Architecture design
+#### Architecture Design
 
-* An architecture design document
-* A C4 Container Diagram
+* An architecture design document.
+* A C4 Container Diagram.
 
-#### UX design
+#### UX Design
 
-* A complete UI/UX design document
-* A more complete prototype that covers all key user flows and optionally includes visual design.
+* A complete UI/UX design document.
+* A prototype covering all key user flows, optionally including visual design.
 
 #### Test Strategy & Plan
 
-* A test strategy document: defines how to setup AI agents for test automation based on the systems and infrastructure.
-* A test plan document: for each persona, how to run a testing agent that go through the user stories and where to save the AI generated feedbacks.
+* A **test strategy** document: how to set up AI agents for test automation, given the systems and infrastructure in play.
+* A **test plan** document: for each persona, how to run a testing agent through that persona's user stories, and where the agent's generated feedback is saved.
 
 ### Roles & Responsibilities
 
 #### Software Engineer
 
-* Use the `kb-author` skill to create architecture design and save it into the Knowledge Base.
-* Use the `c4-modeling` skill to create the C4 Container Diagram.
-* Validates and confirms inter-systems integration interfaces.
+* Uses the `kb-author` skill to write the architecture design and save it into the Knowledge Base.
+* Uses the `c4-modeling` skill to create the C4 Container Diagram.
+* Validates and confirms inter-system integration interfaces.
 * Builds POCs to prove technical feasibility.
+
+#### UX Designer
+
+* Owns the UI/UX design document and the key-flow prototype.
+
+#### QA Engineer
+
+* Owns the test strategy and test plan, working from the user stories and their acceptance criteria.
 
 ## Implementation
 
-The use of repo-aware assistants (such as Cursor, Windsurf, or GitHub Copilot Enterprise) allows developers to build entire feature sets directly from natural language prompts.
+### Goal
+
+Turn the design blueprint into working code.
+
+Repo-aware assistants (such as Claude Code, Cursor, or GitHub Copilot Enterprise) let developers build entire feature sets from natural language prompts, grounded in the PRD, architecture design, and acceptance criteria produced upstream.
 
 ## Testing
 
-Automated Test-Driven Development (TDD) policies are now standard. AI agents generate complex unit and regression test suites concurrently with the code itself, closing previous automation gaps.
+### Goal
+
+Verify the system against the acceptance criteria defined in the PRD.
+
+Test-Driven Development is the default policy: AI agents generate unit and regression suites alongside the code itself, closing the automation gaps that previously accumulated.
 
 ### Agentic QA
 
-It’s more than just an automation of a manual process, it actually represents a whole new paradigm. We can now deploy intelligent agents that understand applications and explore them autonomously. As a result, we get both speed and quality, not one or the other.
-This isn’t the future. Teams are doing it now. They are shipping faster, catching more bugs, and spending less time maintaining test infrastructure.
+Agentic QA is not merely automation of a manual process — it changes what QA can cover. Agents that understand the application explore it autonomously, so exploratory coverage no longer competes with delivery speed for the same hours.
+
+In practice, teams running this way ship faster, catch more bugs, and spend less time maintaining test infrastructure.
 
 ## Deploy
 
-Infrastructure-as-Code (IaC) is augmented by AI models that write, maintain, and validate deployment scripts based on real-time system metrics.
+### Goal
+
+Get verified changes into production safely and repeatably.
+
+Infrastructure-as-Code (IaC) remains the foundation; AI models write, maintain, and validate the deployment scripts, using real-time system metrics as input.
 
 ## Monitoring & Maintenance
 
-### Production Monitoring Becomes Proactive, Not Reactive
-AI agents continuously evaluate logs, metrics, and error patterns. They identify issues before users do.
-Examples include:
+### Goal
 
-memory leaks building up slowly
-API latency spikes
-suspicious traffic patterns
-recurring warnings that predict a crash
-Support teams finally work ahead of incidents instead of after them.
+Detect and resolve production issues before users report them.
 
+### Proactive Monitoring
 
-Log summarization and bug-localization tools turn raw server errors into readable narratives, allowing for rapid root-cause analysis.
+AI agents continuously evaluate logs, metrics, and error patterns to surface issues early. Typical signals include:
+
+* Memory leaks building up slowly.
+* API latency spikes.
+* Suspicious traffic patterns.
+* Recurring warnings that predict a crash.
+
+The result is that support teams work ahead of incidents rather than after them.
+
+### Faster Root-Cause Analysis
+
+Log summarization and bug-localization tools turn raw server errors into readable narratives, shortening the path from alert to root cause.
