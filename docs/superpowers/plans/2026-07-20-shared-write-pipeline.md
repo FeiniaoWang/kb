@@ -52,11 +52,14 @@ name beneath the verified parent. Because portable Darwin/Linux `mkdirat` does
 not atomically return a descriptor, that pathname has no trusted creator
 identity. The first descriptor-relative no-follow directory open and its
 `fstat` bind the authoritative `FileIdentity`; a real-directory substitution
-before that first open may be bound and published. A symlink or non-directory
-at binding fails. Every replacement after binding is rejected before and after
-publication, during child writes, and before log/success. Root containment is
-mandatory, but creator-provenance authentication before first open is not
-promised.
+before that first open may be bound and published only if descriptor-relative
+enumeration shows it is empty. A symlink, non-directory, or non-empty directory
+at binding fails before publication. Emptiness is checked through the held
+descriptor immediately after binding and again before publication; this
+narrows the concurrent-change window without promising snapshot isolation.
+Every replacement after binding is rejected before and after publication,
+during child writes, and before log/success. Root containment is mandatory,
+but creator-provenance authentication before first open is not promised.
 
 The implementation atomically publishes the bound directory to the final name
 with a kernel no-replace primitive and verifies that the published entry
@@ -168,9 +171,10 @@ fallible pipeline operation follows a successful log write.
   child/index/companion/document births below it, and verified before success;
   no descriptor survives an individual rooted operation and no ordinary rename
   fallback may overwrite a late occupant. A real-directory substitution before
-  that first open may become the bound identity, but all writes remain beneath
-  the captured root. Failed staging is never path-deleted after a separate check
-  and remains identifiable partial state when present.
+  that first open may become the bound identity only when descriptor-relative
+  enumeration observes it empty at binding. All writes remain beneath the
+  captured root. Failed staging is never path-deleted after a separate check and
+  remains identifiable partial state when present.
 - Every existing mutation target, existing affected index, and existing `log.md` is inspected before the write boundary and updated using the captured `FileIdentity`.
 - The fixed application order is: missing directories and born indexes root-to-leaf; companions in declared order; citable document; mutations in declared order; nearest pre-existing affected index; log last.
 - Binary ingest represents the byte-identical original as a companion, so the original is created before the Markdown stub.
@@ -2360,6 +2364,9 @@ descriptor on supported Darwin/Linux systems.
 - [x] Remove authoritative pre-open pathname `stat`; publish and verify only
       the identity acquired from the opened descriptor.
 - [x] Verify focused, command, architecture, AC, and full regressions.
+- [ ] **Final-review correction:** reject any directory observed non-empty
+      through the held descriptor at first-open binding, before final-name
+      publication or pipeline writes; re-run all release gates.
 
 ---
 
@@ -2385,8 +2392,9 @@ descriptor on supported Darwin/Linux systems.
 - [x] Full repository tests and `git diff --check` pass through Task 10.
 - [x] Task 11 iterative traversal, prefix-only projected child acquisition,
       and pre-log final verification are complete.
-- [x] Task 12 first-open born-directory binding is implemented and verified;
-      all post-binding swaps are rejected and no write can escape the captured
+- [ ] Task 12 first-open born-directory binding correction is implemented and
+      verified; only an empty real directory may be accepted at binding, all
+      post-binding swaps are rejected, and no write can escape the captured
       root.
 - [ ] Revalidate the downstream CLI/core input-seam plan after this branch is
       integrated. Its source paths exist, but its separate prepared models

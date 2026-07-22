@@ -111,12 +111,17 @@ pathname does not establish creator provenance. The first successful
 descriptor-relative `open(..., O_DIRECTORY | O_NOFOLLOW)` followed by `fstat`
 is the binding point: its directory identity is held and becomes authoritative.
 A non-symlink real-directory substitution installed after `mkdirat` but before
-that first open may therefore be bound and published. The module promises root
-containment, not authentication that the bound inode was created by this
-process.
+that first open may therefore be bound and published only when descriptor-
+relative enumeration shows it is empty at binding. The module promises root
+containment and an empty born-directory starting state, not authentication that
+the bound inode was created by this process.
 
-At the binding point, a symlink or non-directory fails. The bound directory is
-then published to the final name with a kernel atomic no-replace primitive
+At the binding point, a symlink, non-directory, or non-empty directory fails.
+Emptiness is inspected through the held descriptor immediately after `fstat`
+and again before publication; a pathname is never used to enumerate trusted
+contents. The second check narrows the concurrent-change window but does not
+promise snapshot isolation. The bound directory is then published to the final
+name with a kernel atomic no-replace primitive
 (`renameatx_np(..., RENAME_EXCL)` on Darwin or
 `renameat2(..., RENAME_NOREPLACE)` on Linux), verifies that the final entry is
 the bound identity, and only then returns it. Every replacement after binding
