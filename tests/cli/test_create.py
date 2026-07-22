@@ -73,6 +73,30 @@ def invoke_valid(invoke_create, root: Path, *extra: str, input=None):
     return invoke_create(root, *BASE_ARGS, *extra, input=input)
 
 
+def test_environment_failure_precedes_missing_external_body(
+    tmp_path: Path,
+    invoke_create,
+) -> None:
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    result = invoke_create(
+        outside,
+        "--type",
+        "spec",
+        "--title",
+        "Ordering",
+        "--description",
+        "Environment errors win.",
+        "--derived-from",
+        "CHAT-000001",
+        "--body-file",
+        str(tmp_path / "missing.md"),
+    )
+    assert result.exit_code == 2
+    assert "E_NO_KB" in result.output
+    assert "E_CREATE_BODY_NOT_FOUND" not in result.output
+
+
 def test_ac01_default_create_writes_pinned_frontmatter_and_only_expected_files(
     initialized_kb, invoke_create
 ) -> None:

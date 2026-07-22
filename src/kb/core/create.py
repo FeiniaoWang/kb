@@ -1,11 +1,10 @@
 from __future__ import annotations
 
 import re
-import sys
 from pathlib import Path, PurePosixPath
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, PrivateAttr
 
 from kb.core.frontmatter import render_synthetic_document, replace_frontmatter_scalars
 from kb.core.housekeeping import LogEntry, utc_now
@@ -54,7 +53,6 @@ class CreateRequest(BaseModel):
     status: CreateStatus = "draft"
     tags: list[str] = Field(default_factory=list)
     instructions: str | None = None
-    body_file: str | None = None
     dest: str | None = None
     actor: str = "kb-cli"
     kb_root: Path | None = None
@@ -67,6 +65,18 @@ class CreateResult(BaseModel):
     created: list[str] = Field(default_factory=list)
     updated: list[str] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
+
+
+class PreparedCreate(BaseModel):
+    request: CreateRequest
+    root: Path
+    config: Config
+    kb: KB
+    target_dir: Path
+    missing_directories: list[Path]
+    tags: list[str]
+    warnings: list[str]
+    _context = PrivateAttr()
 
 
 class CreateFailure(Exception):
@@ -146,27 +156,9 @@ def _warnings(config: Config, request: CreateRequest, tags: list[str]) -> list[s
     return warnings
 
 
-def _body(request: CreateRequest) -> str:
-    if request.body_file is None:
+def _body(data: bytes | None) -> str:
+    if data is None:
         return ""
-    if request.body_file == "-":
-        stream = getattr(sys.stdin, "buffer", sys.stdin)
-        data = stream.read()
-        if isinstance(data, str):
-            data = data.encode("utf-8")
-    else:
-        path = Path(request.body_file).expanduser()
-        try:
-            resolved = path.resolve(strict=True)
-            if not resolved.is_file():
-                raise OSError("not a regular file")
-            data = resolved.read_bytes()
-        except OSError as error:
-            raise CreateFailure(
-                "E_CREATE_BODY_NOT_FOUND",
-                f"body file is unavailable: {request.body_file}: {error}",
-                2,
-            ) from error
     try:
         decoded = data.decode("utf-8")
     except UnicodeDecodeError as error:
@@ -248,7 +240,7 @@ def _unsafe_path_is_supersedes_target(
     return Path(*candidate.parts) == error.path
 
 
-def create(request: CreateRequest) -> CreateResult:
+def prepare_create(request: CreateRequest) -> PreparedCreate:
     try:
         context = load_write_context(request.kb_root)
     except RootDiscoveryError as error:
@@ -274,10 +266,36 @@ def create(request: CreateRequest) -> CreateResult:
     root = context.root
     config = context.config
     kb = context.kb
-    target_dir, _ = _target_directory(root, request.dest)
+    target_dir, missing_directories = _target_directory(root, request.dest)
     tags = _stable_unique(request.tags)
     warnings = _warnings(config, request, tags)
-    body = _body(request)
+    prepared = PreparedCreate(
+        request=request,
+        root=root,
+        config=config,
+        kb=kb,
+        target_dir=target_dir,
+        missing_directories=missing_directories,
+        tags=tags,
+        warnings=warnings,
+    )
+    prepared._context = context
+    return prepared
+
+
+def execute_create(
+    prepared: PreparedCreate,
+    body_data: bytes | None,
+) -> CreateResult:
+    request = prepared.request
+    root = prepared.root
+    config = prepared.config
+    kb = prepared.kb
+    target_dir = prepared.target_dir
+    missing_directories = prepared.missing_directories
+    tags = prepared.tags
+    warnings = prepared.warnings
+    body = _body(body_data)
     parents = _parents(kb, request.derived_from)
     superseded_document = _resolve_supersedes(kb, request.supersedes)
     if superseded_document is not None and superseded_document.id not in parents:
@@ -339,7 +357,7 @@ def create(request: CreateRequest) -> CreateResult:
         ),
     )
     try:
-        prepared_write = prepare_write(context, intent)
+        prepared_write = prepare_write(prepared._context, intent)
     except WriteFailure as error:
         if (
             error.operation == "inspect"

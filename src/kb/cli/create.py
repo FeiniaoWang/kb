@@ -9,7 +9,14 @@ from kb.cli.render import (
     render_error_json,
     render_error_text,
 )
-from kb.core.create import CreateFailure, CreateRequest, create
+from kb.cli.create_input import acquire_create_body
+from kb.core.create import (
+    CreateFailure,
+    CreateRequest,
+    CreateResult,
+    execute_create,
+    prepare_create,
+)
 
 CREATE_DESCRIPTION = """Create a synthetic document in the knowledge base.
 
@@ -22,6 +29,15 @@ CREATE_EXAMPLES = """Examples:
   kb create --type outcome --title "Q3 Outcomes" --description "Q3 results." --derived-from CHAT-000012 --derived-from RAW-000004 --status current    Accepted at creation
   kb create --type spec --title "Retry Policy" --description "Retry rules." --supersedes KB-000031 --derived-from CHAT-000040 --body-file -    Replace KB-000031, body from stdin
   kb create --type note --title "Cache Sizing" --description "Sizing note." --derived-from RAW-000004 --dest notes    File under synthetic/notes/"""
+
+
+def _run_create(
+    request: CreateRequest,
+    body_file: str | None,
+) -> CreateResult:
+    prepared = prepare_create(request)
+    body_data = acquire_create_body(body_file)
+    return execute_create(prepared, body_data)
 
 
 def create_command(
@@ -119,22 +135,20 @@ def create_command(
     ] = False,
 ) -> None:
     try:
-        result = create(
-            CreateRequest(
-                type_name=type_name,
-                title=title,
-                description=description,
-                derived_from=derived_from or [],
-                supersedes=supersedes,
-                status=status,
-                tags=tags or [],
-                instructions=instructions,
-                body_file=body_file,
-                dest=dest,
-                actor=actor,
-                kb_root=kb_root,
-            )
+        request = CreateRequest(
+            type_name=type_name,
+            title=title,
+            description=description,
+            derived_from=derived_from or [],
+            supersedes=supersedes,
+            status=status,
+            tags=tags or [],
+            instructions=instructions,
+            dest=dest,
+            actor=actor,
+            kb_root=kb_root,
         )
+        result = _run_create(request, body_file)
     except CreateFailure as error:
         typer.echo(
             render_error_json(error) if json_output else render_error_text(error),
