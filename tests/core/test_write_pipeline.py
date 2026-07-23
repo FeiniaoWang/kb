@@ -2557,6 +2557,62 @@ def test_mutation_write_is_single_use(tmp_path) -> None:
         apply_mutation_write(prepared, {"document": b"replacement again"})
 
 
+def test_mutation_write_deep_copy_shares_single_use_state(tmp_path) -> None:
+    root = initialized(tmp_path)
+    target = root / "synthetic/doc.md"
+    target.write_bytes(SYNTHETIC_DOC)
+    prepared = prepare_mutation_write(
+        load_write_context(root),
+        MutationIntent(
+            mutations=[
+                MutationTarget(key="document", path=Path("synthetic/doc.md"))
+            ],
+            log_entry=LOG_ENTRY,
+        ),
+    )
+    copied = prepared.model_copy(deep=True)
+
+    apply_mutation_write(prepared, {"document": b"first replacement"})
+    target_after_first = target.read_bytes()
+    log_after_first = (root / "log.md").read_bytes()
+
+    with pytest.raises(ValueError, match="already consumed"):
+        apply_mutation_write(copied, {"document": b"replayed replacement"})
+
+    assert target.read_bytes() == target_after_first
+    assert (root / "log.md").read_bytes() == log_after_first
+
+
+def test_mutation_write_rejects_non_bytes_before_consumption_or_writes(
+    tmp_path,
+) -> None:
+    root = initialized(tmp_path)
+    target = root / "synthetic/doc.md"
+    target.write_bytes(SYNTHETIC_DOC)
+    prepared = prepare_mutation_write(
+        load_write_context(root),
+        MutationIntent(
+            mutations=[
+                MutationTarget(key="document", path=Path("synthetic/doc.md"))
+            ],
+            log_entry=LOG_ENTRY,
+        ),
+    )
+    log_before = (root / "log.md").read_bytes()
+
+    with pytest.raises(TypeError, match="bytes"):
+        apply_mutation_write(
+            prepared,
+            {"document": "not bytes"},  # type: ignore[dict-item]
+        )
+
+    assert target.read_bytes() == SYNTHETIC_DOC
+    assert (root / "log.md").read_bytes() == log_before
+    receipt = apply_mutation_write(prepared, {"document": b"valid replacement"})
+    assert receipt.updated == ["synthetic/doc.md"]
+    assert target.read_bytes() == b"valid replacement"
+
+
 def test_mutation_write_preflights_log_content_and_apply_does_not_read_it(
     tmp_path,
     monkeypatch,

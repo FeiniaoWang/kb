@@ -4,6 +4,7 @@ import errno
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
+from threading import Lock
 from typing import Literal
 
 import yaml
@@ -131,6 +132,22 @@ class MutationIntent(BaseModel):
     log_entry: LogEntry
 
 
+class _ConsumptionToken:
+    def __init__(self) -> None:
+        self._consumed = False
+        self._lock = Lock()
+
+    def consume(self) -> None:
+        with self._lock:
+            if self._consumed:
+                raise ValueError("prepared write is already consumed")
+            self._consumed = True
+
+    def __deepcopy__(self, memo: dict[int, object]) -> _ConsumptionToken:
+        memo[id(self)] = self
+        return self
+
+
 class PreparedMutation(BaseModel):
     sources: dict[str, MutationSource]
     _root: Path = PrivateAttr()
@@ -141,7 +158,9 @@ class PreparedMutation(BaseModel):
     _log_row: bytes = PrivateAttr()
     _log_separator: bytes = PrivateAttr(default=b"")
     _updated: list[str] = PrivateAttr(default_factory=list)
-    _consumed: bool = PrivateAttr(default=False)
+    _consumption: _ConsumptionToken = PrivateAttr(
+        default_factory=_ConsumptionToken
+    )
 
 
 @dataclass(frozen=True)
@@ -653,12 +672,16 @@ def apply_mutation_write(
     prepared: PreparedMutation,
     replacements: Mapping[str, bytes],
 ) -> WriteReceipt:
-    if prepared._consumed:
-        raise ValueError("prepared write is already consumed")
     replacement_map = dict(replacements)
     if set(replacement_map) != set(prepared.sources):
         raise ValueError("replacement keys must exactly match prepared mutation keys")
-    prepared._consumed = True
+    replacement_bytes: dict[str, bytes] = {}
+    for key in prepared.sources:
+        value = replacement_map[key]
+        if not isinstance(value, bytes):
+            raise TypeError(f"replacement for {key!r} must be bytes")
+        replacement_bytes[key] = bytes(value)
+    prepared._consumption.consume()
 
     root = prepared._root
     root_identity = prepared._root_identity
@@ -668,7 +691,7 @@ def apply_mutation_write(
             overwrite_rooted_bytes(
                 root,
                 source.path,
-                replacement_map[mutation.key],
+                replacement_bytes[mutation.key],
                 root_identity,
                 prepared._mutation_identities[mutation.key],
             )
