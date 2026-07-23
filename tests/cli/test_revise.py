@@ -800,6 +800,38 @@ def test_ac35_target_resolution_and_class_failures_are_typed(
         assert code in result.stderr
         assert snapshot(root) == before
 
+    root, _ = build_kb(runner, tmp_path / "index-parent")
+    index = root / "index.md"
+    index.write_text(
+        index.read_text(encoding="utf-8").replace(
+            "type: index\n", "type: index\nid: KB-000099\n"
+        ),
+        encoding="utf-8",
+    )
+    before = snapshot(root)
+    result = invoke(runner, root, "KB-000001", "--add-parent", "index.md")
+    assert result.exit_code == 1
+    assert "E_REVISE_PARENT_UNRESOLVED" in result.stderr
+    assert snapshot(root) == before
+
+    root, _ = build_kb(runner, tmp_path / "invalid-path-ref")
+    invalid = root / "raw/sources/invalid.md"
+    invalid.write_text(
+        "---\nid: RAW-0000001\ntype: raw-source\ningested_at: 2026-07-20T09:00:00Z\norigin: file\ntitle: Invalid\n---\nbody\n",
+        encoding="utf-8",
+    )
+    for flag, code in [
+        ("--add-parent", "E_REVISE_PARENT_UNRESOLVED"),
+        ("--link", "E_REVISE_LINK_UNRESOLVED"),
+        ("--pending", "E_REVISE_PENDING_UNRESOLVED"),
+    ]:
+        value = "references=raw/sources/invalid.md" if flag == "--link" else "raw/sources/invalid.md"
+        before = snapshot(root)
+        result = invoke(runner, root, "KB-000001", flag, value)
+        assert result.exit_code == 1
+        assert code in result.stderr
+        assert snapshot(root) == before
+
 
 def test_ac36_malformed_scan_blocks_and_names_paths(
     runner: CliRunner, kb_with_spec
@@ -1102,6 +1134,37 @@ def test_environment_failure_precedes_external_body_acquisition(
     assert "E_REVISE_BODY_NOT_FOUND" not in result.stderr
 
 
+def test_domain_preflight_precedes_external_body_acquisition(
+    runner: CliRunner, tmp_path: Path
+) -> None:
+    missing_body = tmp_path / "missing.md"
+    cases = [
+        ("target", "KB-999999", [], "E_REVISE_TARGET_UNRESOLVED"),
+        ("parent", "KB-000001", ["--add-parent", "RAW-999999"], "E_REVISE_PARENT_UNRESOLVED"),
+        ("validation", "KB-000001", ["--status", "current"], "E_REVISE_VALIDATION"),
+    ]
+    for name, ref, options, expected in cases:
+        root, target = build_kb(runner, tmp_path / name)
+        if name == "validation":
+            target.write_text(
+                target.read_text(encoding="utf-8").replace(
+                    "description: Description for Retry Policy.\n", ""
+                ),
+                encoding="utf-8",
+            )
+        result = invoke(
+            runner,
+            root,
+            ref,
+            *options,
+            "--body-file",
+            str(missing_body),
+        )
+        assert result.exit_code == 1
+        assert expected in result.stderr
+        assert "E_REVISE_BODY_NOT_FOUND" not in result.stderr
+
+
 class _FailingStdin:
     @property
     def buffer(self):
@@ -1109,6 +1172,25 @@ class _FailingStdin:
 
     def read(self):
         raise OSError("stdin read failed")
+
+
+class _UndecodableTextStdin:
+    def read(self):
+        raise UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte")
+
+
+class _ReplacingStdin:
+    def __init__(self, referenced: Path) -> None:
+        self.referenced = referenced
+
+    def read(self):
+        self.referenced.write_text(
+            self.referenced.read_text(encoding="utf-8").replace(
+                "evidence", "replaced evidence"
+            ),
+            encoding="utf-8",
+        )
+        return "new body"
 
 
 def test_revise_failing_stdin_stream_maps_to_io_error_without_writes(
@@ -1124,6 +1206,45 @@ def test_revise_failing_stdin_stream_maps_to_io_error_without_writes(
     assert "E_REVISE_IO" in result.stderr
     assert "stdin read failed" in result.stderr
     assert snapshot(root) == before
+
+
+def test_revise_text_stdin_decode_failure_maps_to_body_not_text(
+    runner: CliRunner, kb_with_spec, monkeypatch
+) -> None:
+    root, _ = kb_with_spec
+    before = snapshot(root)
+    monkeypatch.setattr(
+        revise_input, "sys", SimpleNamespace(stdin=_UndecodableTextStdin())
+    )
+    result = invoke(runner, root, "KB-000001", "--body-file", "-")
+    assert result.exit_code == 1
+    assert "E_REVISE_BODY_NOT_TEXT" in result.stderr
+    assert snapshot(root) == before
+
+
+def test_revise_referenced_document_replaced_during_stdin_acquisition_is_atomic(
+    runner: CliRunner, kb_with_spec, monkeypatch
+) -> None:
+    root, target = kb_with_spec
+    referenced = root / "raw/sources/source.md"
+    before_target = target.read_bytes()
+    before_log = (root / "log.md").read_bytes()
+    monkeypatch.setattr(
+        revise_input, "sys", SimpleNamespace(stdin=_ReplacingStdin(referenced))
+    )
+    result = invoke(
+        runner,
+        root,
+        "KB-000001",
+        "--add-parent",
+        "RAW-000001",
+        "--body-file",
+        "-",
+    )
+    assert result.exit_code == 2
+    assert "E_REVISE_IO" in result.stderr
+    assert target.read_bytes() == before_target
+    assert (root / "log.md").read_bytes() == before_log
 
 
 def test_revise_invalid_tilde_user_path_maps_to_body_not_found_without_writes(

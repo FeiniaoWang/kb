@@ -18,6 +18,12 @@ def acquire_revise_body(
         stream = stdin if stdin is not None else getattr(sys.stdin, "buffer", sys.stdin)
         try:
             data = stream.read()
+        except UnicodeDecodeError as error:
+            raise ReviseFailure(
+                "E_REVISE_BODY_NOT_TEXT",
+                "body is not valid UTF-8 text",
+                1,
+            ) from error
         except OSError as error:
             raise ReviseFailure(
                 "E_REVISE_IO",

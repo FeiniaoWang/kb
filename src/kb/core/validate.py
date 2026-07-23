@@ -98,6 +98,12 @@ class ValidateFailure(Exception):
 def _literal_id(file: ScannedMarkdown) -> str | None:
     if file.frontmatter is None:
         return None
+    type_name = file.frontmatter.root.get("type")
+    if not isinstance(type_name, str) or doc_class_from_type(type_name) in {
+        DocClass.INDEX,
+        DocClass.OPERATIONAL,
+    }:
+        return None
     value = file.frontmatter.root.get("id")
     return value if isinstance(value, str) else None
 
@@ -196,6 +202,8 @@ def _class_contract(type_name: str) -> tuple[str, tuple[str, ...], set[str]]:
         )
     if type_name == "index":
         return "index", ("description",), {"description", "title"}
+    if type_name == "log":
+        return "operational", (), set()
     return (
         "synthetic",
         (
@@ -336,8 +344,6 @@ def _schema_findings(file: ScannedMarkdown) -> list[Finding]:
     assert file.frontmatter is not None
     values = file.frontmatter.root
     type_name = _type_name(file)
-    if type_name == "log":
-        return []
     class_name, mandatory, legal = _class_contract(type_name)
     findings: list[Finding] = []
     for occurrence, field in enumerate(mandatory):
@@ -721,12 +727,13 @@ def _duplicate_id_findings(kb: KB) -> list[Finding]:
             continue
         type_name = file.frontmatter.root.get("type")
         raw_id = file.frontmatter.root.get("id")
-        if (
-            isinstance(type_name, str)
-            and type_name
-            and type_name != "log"
-            and isinstance(raw_id, str)
-        ):
+        if not isinstance(type_name, str) or not isinstance(raw_id, str):
+            continue
+        if doc_class_from_type(type_name) in {
+            DocClass.RAW,
+            DocClass.SYNTHETIC,
+            DocClass.GOVERNANCE,
+        }:
             participants.setdefault(raw_id, []).append(file)
     findings: list[Finding] = []
     for raw_id, files in participants.items():
@@ -948,12 +955,11 @@ def _file_findings(file: ScannedMarkdown, config: Config, kb: KB) -> list[Findin
     if fm0:
         return fm0
     findings = _location_findings(file)
-    if _type_name(file) != "log":
-        findings.extend(_schema_findings(file))
-        findings.extend(_vocabulary_findings(file, config))
-        findings.extend(_id_findings(file, config))
-        findings.extend(_relationship_findings(file, kb))
-        findings.extend(_lifecycle_findings(file, kb))
+    findings.extend(_schema_findings(file))
+    findings.extend(_vocabulary_findings(file, config))
+    findings.extend(_id_findings(file, config))
+    findings.extend(_relationship_findings(file, kb))
+    findings.extend(_lifecycle_findings(file, kb))
     return findings
 
 
@@ -964,6 +970,12 @@ def _all_findings(kb: KB, config: Config) -> list[Finding]:
     findings.extend(_duplicate_id_findings(kb))
     findings.extend(_cycle_findings(kb))
     return sorted(findings, key=lambda item: (item.path, item.code, item.occurrence))
+
+
+def all_findings(kb: KB, config: Config) -> list[Finding]:
+    """Return all document-integrity findings for an in-memory KB snapshot."""
+
+    return _all_findings(kb, config)
 
 
 def _stable_unique(values: list[str]) -> list[str]:
@@ -1009,9 +1021,9 @@ def validate(request: ValidateRequest) -> ValidateResult:
     except (RootDiscoveryError, ConfigLoadError) as error:
         raise ValidateFailure(error.code, error.message) from error
     kb = scan(root)
-    all_findings = _all_findings(kb, config)
+    complete_findings = all_findings(kb, config)
     scope, unresolved = _resolve_scope(kb, request.refs)
-    findings = [item for item in all_findings if Path(item.path) in scope]
+    findings = [item for item in complete_findings if Path(item.path) in scope]
     failed = bool(unresolved) or any(
         item.severity == "error" for item in findings
     )

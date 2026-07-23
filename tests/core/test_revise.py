@@ -5,6 +5,8 @@ from pathlib import Path
 
 import pytest
 
+import kb.core.revise as revise_module
+
 from kb.core.housekeeping import init_kb
 from kb.core.revise import (
     ReviseFailure,
@@ -132,14 +134,17 @@ def _revised_rows(root: Path) -> list[str]:
     ]
 
 
-def test_ac01_append_parent_is_lossless_and_logged(tmp_path: Path) -> None:
+def test_ac01_append_parent_is_lossless_and_logged(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     root, target = _base(tmp_path)
+    monkeypatch.setattr(revise_module, "utc_now", lambda: "2026-07-20T10:00:00Z")
     before = _values(target)
     result = _revise(root, add_parents=["RAW-000002"])
     values = _values(target)
     content = target.read_bytes()
     assert values["derived_from"] == ["CHAT-000001", "RAW-000002"]
-    assert values["timestamp"] != before["timestamp"]
+    assert values["timestamp"] == "2026-07-20T10:00:01Z"
     assert values["last_human_touch"] == before["last_human_touch"]
     assert b'title: "Quoted title" # keep this comment\n' in content
     assert b"custom_key: kept\n" in content
@@ -733,6 +738,51 @@ def test_ac35_non_synthetic_target_is_invalid(tmp_path: Path) -> None:
     assert _failure(root, ref="RAW-000002", status="current").code == (
         "E_REVISE_TARGET_INVALID"
     )
+
+    index = root / "index.md"
+    index.write_text(
+        index.read_text(encoding="utf-8").replace(
+            "type: index\n", "type: index\nid: KB-000099\n"
+        ),
+        encoding="utf-8",
+    )
+    assert _failure(
+        root, add_parents=["index.md"]
+    ).code == "E_REVISE_PARENT_UNRESOLVED"
+
+    invalid = _write(
+        root,
+        "raw/sources/invalid-id.md",
+        RAW.replace("RAW-000002", "RAW-0000002"),
+    )
+    assert invalid.exists()
+    assert _failure(
+        root, links=["references=raw/sources/invalid-id.md"]
+    ).code == "E_REVISE_LINK_UNRESOLVED"
+    assert _failure(
+        root, pending=["raw/sources/invalid-id.md"]
+    ).code == "E_REVISE_PENDING_UNRESOLVED"
+
+
+def test_referenced_document_identity_change_after_prepare_is_typed_and_atomic(
+    tmp_path: Path,
+) -> None:
+    root, _ = _base(tmp_path)
+    prepared = prepare_revise(
+        ReviseRequest(
+            ref="KB-000001",
+            add_parents=["RAW-000002"],
+            body_change=True,
+            kb_root=root,
+        )
+    )
+    referenced = root / "raw/sources/raw-000002.md"
+    referenced.write_text(RAW.replace("raw body", "replacement"), encoding="utf-8")
+    before = _snapshot(root)
+    with pytest.raises(ReviseFailure) as raised:
+        execute_revise(prepared, b"new body")
+    assert (raised.value.code, raised.value.exit_code) == ("E_REVISE_IO", 2)
+    assert _snapshot(root) == before
 
 
 def test_ac37_revised_log_row_starts_with_target_path(tmp_path: Path) -> None:

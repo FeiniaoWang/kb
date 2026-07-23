@@ -336,7 +336,7 @@ def test_ac12_root_synthetic_and_misplaced_governance_are_location_errors(tmp_pa
 def test_ac13_log_type_is_reserved_for_root_log(tmp_path, invoke_validate) -> None:
     root = make_kb(tmp_path / "kb")
     make_doc(root, "log.md", {"type": "log", "anything": [1]})
-    make_doc(root, "raw/notes.md", {"type": "log", "id": 7})
+    make_doc(root, "raw/notes.md", {"type": "log", "custom": 7})
     result = invoke_validate(root, "--json")
     assert codes_for(result, "log.md") == []
     assert codes_for(result, "raw/notes.md") == ["LOC_TYPE_MISMATCH"]
@@ -507,6 +507,16 @@ def test_ac27_index_id_is_forbidden_without_id_checks(tmp_path, invoke_validate)
     root = make_kb(tmp_path / "kb")
     result = run_one(invoke_validate, root, "index.md", {"type": "index", "description": "Root.", "id": "KB-000009"})
     assert codes_for(result, "index.md") == ["FM1_KEY_FORBIDDEN"]
+    assert payload_for(result, "index.md")[0]["id"] is None
+
+    result = run_one(
+        invoke_validate,
+        root,
+        "log.md",
+        {"type": "log", "id": "KB-000009"},
+    )
+    assert codes_for(result, "log.md") == ["FM1_KEY_FORBIDDEN"]
+    assert payload_for(result, "log.md")[0]["id"] is None
 
 
 def test_ac28_unknown_extension_keys_are_never_flagged(tmp_path, invoke_validate) -> None:

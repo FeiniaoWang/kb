@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import deque
+from datetime import datetime, timedelta, timezone
 import re
 from pathlib import Path
 from typing import Literal
@@ -17,7 +18,7 @@ from kb.core.safeio import (
     read_rooted_bytes,
 )
 from kb.core.scan import KB, RootDiscoveryError, resolve_ref, scan_snapshot
-from kb.core.validate import Finding, _all_findings
+from kb.core.validate import Finding, all_findings
 from kb.core.write_pipeline import (
     AllocationBlocked,
     MutationIntent,
@@ -60,9 +61,16 @@ class PreparedRevise(BaseModel):
     link_pairs: list[tuple[str, str]]
     target_path: Path | None = None
     target_id: str | None = None
+    warnings: list[str] = Field(default_factory=list)
     _context: WriteContext = PrivateAttr()
     _target_identity: FileIdentity | None = PrivateAttr(default=None)
     _target_content: bytes | None = PrivateAttr(default=None)
+    _reference_snapshots: dict[Path, tuple[FileIdentity, bytes]] = PrivateAttr(
+        default_factory=dict
+    )
+    _revised_frontmatter: bytes | None = PrivateAttr(default=None)
+    _timestamp: str | None = PrivateAttr(default=None)
+    _note: str | None = PrivateAttr(default=None)
 
 
 class ReviseFailure(Exception):
@@ -141,33 +149,13 @@ def prepare_revise(request: ReviseRequest) -> PreparedRevise:
         target_id=bound_id,
     )
     prepared._context = context
-    candidate = resolve_ref(context.kb, request.ref)
-    if (
-        candidate is not None
-        and candidate.doc_class is DocClass.SYNTHETIC
-        and candidate.id is not None
-        and candidate.frontmatter.root.get("status") != "superseded"
-    ):
-        try:
-            identity = inspect_rooted_file(
-                context.root,
-                candidate.path,
-                context._root_identity,
-            )
-            if identity is None:
-                raise FileNotFoundError(candidate.path)
-            content = read_rooted_bytes(
-                context.root,
-                candidate.path,
-                context._root_identity,
-                identity,
-            )
-        except OSError as error:
-            raise ReviseFailure("E_REVISE_IO", str(error), 2) from error
-        prepared.target_path = candidate.path
-        prepared.target_id = candidate.id
-        prepared._target_identity = identity
-        prepared._target_content = content
+    target = _resolve_target(context.kb, request.ref)
+    identity, content = _snapshot_document(prepared, target)
+    prepared.target_path = target.path
+    prepared.target_id = target.id
+    prepared._target_identity = identity
+    prepared._target_content = content
+    _prepare_domain(prepared, target)
     return prepared
 
 
@@ -203,6 +191,29 @@ def _resolve_id(kb: KB, ref: str, code: str) -> str:
             1,
         )
     return document.id
+
+
+def _snapshot_document(
+    prepared: PreparedRevise,
+    document: Document,
+) -> tuple[FileIdentity, bytes]:
+    try:
+        identity = inspect_rooted_file(
+            prepared.root,
+            document.path,
+            prepared._context._root_identity,
+        )
+        if identity is None:
+            raise FileNotFoundError(document.path)
+        content = read_rooted_bytes(
+            prepared.root,
+            document.path,
+            prepared._context._root_identity,
+            identity,
+        )
+    except OSError as error:
+        raise ReviseFailure("E_REVISE_IO", str(error), 2) from error
+    return identity, content
 
 
 def _derivation_parents(kb: KB, doc_id: str) -> list[str]:
@@ -332,8 +343,8 @@ def _validate_proposed(
     snapshots = _snapshot_frontmatter(prepared.kb)
     snapshots[target.path] = revised
     proposed_kb = scan_snapshot(prepared.root, snapshots)
-    baseline = _all_findings(prepared.kb, prepared.config)
-    proposed = _all_findings(proposed_kb, prepared.config)
+    baseline = all_findings(prepared.kb, prepared.config)
+    proposed = all_findings(proposed_kb, prepared.config)
     baseline_errors = {
         _finding_identity(finding)
         for finding in baseline
@@ -364,14 +375,28 @@ def _validate_proposed(
     return warnings
 
 
-def execute_revise(
-    prepared: PreparedRevise,
-    body_data: bytes | None,
-) -> ReviseResult:
+def _revision_timestamp(existing: object, current: str) -> str:
+    candidate = datetime.fromisoformat(current.replace("Z", "+00:00"))
+    if candidate.tzinfo is None:
+        candidate = candidate.replace(tzinfo=timezone.utc)
+    candidate = candidate.astimezone(timezone.utc)
+    if isinstance(existing, str):
+        try:
+            previous = datetime.fromisoformat(existing.replace("Z", "+00:00"))
+        except ValueError:
+            previous = None
+        if previous is not None:
+            if previous.tzinfo is None:
+                previous = previous.replace(tzinfo=timezone.utc)
+            previous = previous.astimezone(timezone.utc)
+            if candidate <= previous:
+                candidate = previous + timedelta(seconds=1)
+    return candidate.replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def _prepare_domain(prepared: PreparedRevise, target: Document) -> None:
     request = prepared.request
     kb = prepared.kb
-    target = _resolve_target(kb, request.ref)
-    _assert_bound_target(prepared, target)
     assert target.id is not None
     values = target.frontmatter.root
 
@@ -474,8 +499,7 @@ def execute_revise(
         new_pending.remove(marker)
     pending_changed = new_pending != existing_pending
 
-    body = _decode_body(body_data) if body_data is not None else None
-    timestamp = utc_now()
+    timestamp = _revision_timestamp(values.get("timestamp"), utc_now())
     set_keys: dict[str, object] = {"timestamp": timestamp}
     remove_keys: tuple[str, ...] = ()
     if request.human:
@@ -502,7 +526,7 @@ def execute_revise(
     )
     if request.status is not None:
         note_parts.append(f"status {request.status}")
-    if body is not None:
+    if request.body_change:
         note_parts.append("body")
     note_parts.extend(f"+pending {ref}" for ref in pending_adds)
     note_parts.extend(f"-pending {ref}" for ref in pending_clears)
@@ -510,28 +534,12 @@ def execute_revise(
         f" ({', '.join(note_parts)})" if note_parts else ""
     )
 
-    intent = MutationIntent(
-        mutations=[MutationTarget(key="document", path=target.path)],
-        log_entry=LogEntry(
-            at=timestamp,
-            action="revised",
-            actor=request.actor,
-            doc_ids=[target.id],
-            note=note,
-        ),
-    )
-    try:
-        prepared_write = prepare_mutation_write(prepared._context, intent)
-    except WriteFailure as error:
-        raise ReviseFailure("E_REVISE_IO", str(error.cause), 2) from error
     try:
         revised = replace_frontmatter_keys(
-            prepared_write.sources["document"].content,
+            prepared._target_content,
             set_keys=set_keys,
             remove_keys=remove_keys,
         )
-        if body is not None:
-            revised = replace_document_body(revised, body)
     except (UnicodeError, ValueError) as error:
         raise ReviseFailure(
             "E_REVISE_NOT_EDITABLE",
@@ -539,16 +547,6 @@ def execute_revise(
             f"{request.ref}: {error}",
             1,
         ) from error
-    if (
-        prepared._target_content is not None
-        and prepared_write.sources["document"].content != prepared._target_content
-    ):
-        raise ReviseFailure(
-            "E_REVISE_IO",
-            "target changed between preparation and execution",
-            2,
-        )
-
     validation_warnings = _validate_proposed(prepared, target, revised)
     for warning in validation_warnings:
         if warning.startswith("warning: LINKTYPE_UNDECLARED:"):
@@ -557,6 +555,88 @@ def execute_revise(
                 continue
         if warning not in warnings:
             warnings.append(warning)
+
+    referenced_ids = set(new_parents)
+    referenced_ids.update(
+        target_id for targets in new_links.values() for target_id in targets
+    )
+    referenced_ids.update(new_pending)
+    referenced_ids.update(pending_clears)
+    for document_id in sorted(referenced_ids):
+        document = kb.by_id.get(document_id)
+        if document is None or document.path == target.path:
+            continue
+        prepared._reference_snapshots[document.path] = _snapshot_document(
+            prepared, document
+        )
+
+    prepared.warnings = warnings
+    prepared._revised_frontmatter = revised
+    prepared._timestamp = timestamp
+    prepared._note = note
+
+
+def _assert_bound_references(prepared: PreparedRevise) -> None:
+    for path, (expected_identity, expected_content) in (
+        prepared._reference_snapshots.items()
+    ):
+        document = next(
+            (candidate for candidate in prepared.kb.documents if candidate.path == path),
+            None,
+        )
+        if document is None:
+            raise ReviseFailure(
+                "E_REVISE_IO",
+                f"referenced document changed between preparation and execution: {path}",
+                2,
+            )
+        identity, content = _snapshot_document(prepared, document)
+        if identity != expected_identity or content != expected_content:
+            raise ReviseFailure(
+                "E_REVISE_IO",
+                f"referenced document changed between preparation and execution: {path}",
+                2,
+            )
+
+
+def execute_revise(
+    prepared: PreparedRevise,
+    body_data: bytes | None,
+) -> ReviseResult:
+    request = prepared.request
+    target = _resolve_target(prepared.kb, request.ref)
+    _assert_bound_target(prepared, target)
+    _assert_bound_references(prepared)
+    assert target.id is not None
+    assert prepared._revised_frontmatter is not None
+    assert prepared._timestamp is not None
+    assert prepared._note is not None
+
+    body = _decode_body(body_data) if body_data is not None else None
+    revised = prepared._revised_frontmatter
+    if body is not None:
+        revised = replace_document_body(revised, body)
+
+    intent = MutationIntent(
+        mutations=[MutationTarget(key="document", path=target.path)],
+        log_entry=LogEntry(
+            at=prepared._timestamp,
+            action="revised",
+            actor=request.actor,
+            doc_ids=[target.id],
+            note=prepared._note,
+        ),
+    )
+    try:
+        prepared_write = prepare_mutation_write(prepared._context, intent)
+    except WriteFailure as error:
+        raise ReviseFailure("E_REVISE_IO", str(error.cause), 2) from error
+    if prepared_write.sources["document"].content != prepared._target_content:
+        raise ReviseFailure(
+            "E_REVISE_IO",
+            "target changed between preparation and execution",
+            2,
+        )
 
     try:
         receipt = apply_mutation_write(
@@ -569,5 +649,5 @@ def execute_revise(
         id=target.id,
         path=target.path.as_posix(),
         updated=receipt.updated,
-        warnings=warnings,
+        warnings=prepared.warnings,
     )

@@ -58,7 +58,7 @@ def test_discover_root_reports_shared_error(tmp_path) -> None:
     )
 
 
-def test_scan_classifies_from_type_and_excludes_log(tmp_path) -> None:
+def test_scan_classifies_every_document_class_from_type(tmp_path) -> None:
     write_doc(tmp_path, "raw/sources/a.md", "id: RAW-000001\ntype: raw-source\n")
     write_doc(tmp_path, "synthetic/a.md", "id: KB-000001\ntype: coding-spec\n")
     write_doc(tmp_path, "governance/a.md", "id: GOVERNANCE-A\ntype: conventions\n")
@@ -68,11 +68,12 @@ def test_scan_classifies_from_type_and_excludes_log(tmp_path) -> None:
     assert [doc.doc_class for doc in kb.documents] == [
         DocClass.GOVERNANCE,
         DocClass.INDEX,
+        DocClass.OPERATIONAL,
         DocClass.RAW,
         DocClass.SYNTHETIC,
     ]
     assert "RAW-000001" in kb.by_id
-    assert all(doc.path != Path("log.md") for doc in kb.documents)
+    assert next(doc for doc in kb.documents if doc.path == Path("log.md")).id is None
 
 
 def test_charter_type_classifies_as_governance():
@@ -112,14 +113,26 @@ def test_scan_keeps_bad_id_shapes_classifiable_for_validate(tmp_path) -> None:
     assert kb.malformed == []
 
 
-def test_scan_retains_log_in_files_but_excludes_it_from_documents(tmp_path) -> None:
-    write_doc(tmp_path, "log.md", "type: log\ncustom: ignored\n")
+def test_scan_retains_log_as_path_addressed_operational_document(tmp_path) -> None:
+    write_doc(tmp_path, "log.md", "type: log\nid: KB-000099\ncustom: ignored\n")
     kb = scan(tmp_path)
     assert [item.path.as_posix() for item in kb.files] == ["log.md"]
     assert kb.files[0].frontmatter.root["type"] == "log"
-    assert kb.documents == []
+    assert len(kb.documents) == 1
+    assert kb.documents[0].doc_class is DocClass.OPERATIONAL
+    assert kb.documents[0].id is None
     assert kb.by_id == {}
     assert kb.malformed == []
+
+
+def test_scan_indexes_only_canonical_ids_on_id_bearing_classes(tmp_path) -> None:
+    write_doc(tmp_path, "index.md", "type: index\ndescription: Root.\nid: KB-000001\n")
+    write_doc(tmp_path, "raw/sources/bad.md", "id: RAW-0000001\ntype: raw-source\n")
+    write_doc(tmp_path, "governance/charter.md", "id: GOVERNANCE-CHARTER\ntype: charter\n")
+    kb = scan(tmp_path)
+    assert kb.by_id == {"GOVERNANCE-CHARTER": kb.documents[0]}
+    assert next(doc for doc in kb.documents if doc.path == Path("index.md")).id is None
+    assert next(doc for doc in kb.documents if doc.path == Path("raw/sources/bad.md")).id is None
 
 
 def test_document_body_is_loaded_lazily(tmp_path, monkeypatch) -> None:

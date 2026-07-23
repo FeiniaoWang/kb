@@ -18,6 +18,10 @@ from pydantic import (
 
 CURRENT_SCHEMA = 1
 ID_PREFIX_PATTERN = re.compile(r"^[A-Z]+$")
+CANONICAL_NUMERIC_ID_PATTERN = re.compile(
+    r"^[A-Z]+-(?:[0-9]{6}|[1-9][0-9]{6,})$"
+)
+RESERVED_GOVERNANCE_ID_PATTERN = re.compile(r"^GOVERNANCE-[A-Z][A-Z0-9-]*$")
 
 
 class DocClass(StrEnum):
@@ -25,6 +29,7 @@ class DocClass(StrEnum):
     SYNTHETIC = "synthetic"
     GOVERNANCE = "governance"
     INDEX = "index"
+    OPERATIONAL = "operational"
 
 
 class RawClass(StrEnum):
@@ -52,6 +57,12 @@ class IndexFrontmatter(BaseModel):
     type: Literal["index"]
     description: str
     title: str | None = None
+
+
+class OperationalFrontmatter(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    type: Literal["log"]
 
 
 class RawFrontmatter(BaseModel):
@@ -100,8 +111,18 @@ class Document(BaseModel):
         frontmatter: Frontmatter,
     ) -> Document:
         raw_id = frontmatter.root.get("id")
+        document_id: str | None = None
+        if isinstance(raw_id, str):
+            if (
+                doc_class in {DocClass.RAW, DocClass.SYNTHETIC}
+                and CANONICAL_NUMERIC_ID_PATTERN.fullmatch(raw_id)
+            ) or (
+                doc_class is DocClass.GOVERNANCE
+                and RESERVED_GOVERNANCE_ID_PATTERN.fullmatch(raw_id)
+            ):
+                document_id = raw_id
         document = cls(
-            id=raw_id if isinstance(raw_id, str) else None,
+            id=document_id,
             path=relative_path,
             doc_class=doc_class,
             frontmatter=frontmatter,

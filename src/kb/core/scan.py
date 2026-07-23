@@ -10,7 +10,9 @@ from pydantic import BaseModel, Field
 
 from kb.core.model import DocClass, Document, Frontmatter
 
-ID_REF_PATTERN = re.compile(r"^[A-Z]+-(?:[0-9]{6,}|[A-Z][A-Z0-9-]*)$")
+ID_REF_PATTERN = re.compile(
+    r"^(?:[A-Z]+-(?:[0-9]{6}|[1-9][0-9]{6,})|GOVERNANCE-[A-Z][A-Z0-9-]*)$"
+)
 NO_KB_MESSAGE = (
     "not inside a knowledge base (no kb-config.json found); "
     "run 'kb init' or pass --kb"
@@ -107,7 +109,7 @@ def read_frontmatter(path: Path) -> Frontmatter:
 
 def doc_class_from_type(type_name: str) -> DocClass | None:
     if type_name == "log":
-        return None
+        return DocClass.OPERATIONAL
     if type_name == "index":
         return DocClass.INDEX
     if type_name in {"raw-source", "chat", "feedback"}:

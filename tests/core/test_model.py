@@ -15,6 +15,7 @@ from kb.core.model import (
     Frontmatter,
     GovernanceFrontmatter,
     IndexFrontmatter,
+    OperationalFrontmatter,
     RawClass,
     load_config,
     parse_config_bytes,
@@ -29,6 +30,7 @@ def test_shared_enums_have_pinned_values() -> None:
         "synthetic",
         "governance",
         "index",
+        "operational",
     ]
     assert [item.value for item in RawClass] == ["source", "chat", "feedback"]
 
@@ -57,6 +59,11 @@ def test_typed_frontmatter_accepts_unknown_keys() -> None:
     assert governance.model_extra == {"custom": "preserved"}
     assert index.model_extra == {"custom": 7}
     assert "id" not in index.model_dump()
+
+    operational = OperationalFrontmatter.model_validate(
+        {"type": "log", "custom": "preserved"}
+    )
+    assert operational.model_extra == {"custom": "preserved"}
 
 
 def test_load_config_defaults_missing_fields_and_ignores_unknown_keys(tmp_path) -> None:
