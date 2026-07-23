@@ -16,7 +16,14 @@ def acquire_revise_body(
         return None
     if body_file == "-":
         stream = stdin if stdin is not None else getattr(sys.stdin, "buffer", sys.stdin)
-        data = stream.read()
+        try:
+            data = stream.read()
+        except OSError as error:
+            raise ReviseFailure(
+                "E_REVISE_IO",
+                f"stdin body is unavailable: {error}",
+                2,
+            ) from error
         try:
             return data.encode("utf-8") if isinstance(data, str) else data
         except UnicodeEncodeError as error:
@@ -25,13 +32,13 @@ def acquire_revise_body(
                 "body is not valid UTF-8 text",
                 1,
             ) from error
-    path = Path(body_file).expanduser()
     try:
+        path = Path(body_file).expanduser()
         resolved = path.resolve(strict=True)
         if not resolved.is_file():
             raise OSError("not a regular file")
         return resolved.read_bytes()
-    except OSError as error:
+    except (OSError, RuntimeError) as error:
         raise ReviseFailure(
             "E_REVISE_BODY_NOT_FOUND",
             f"body file is unavailable: {body_file}: {error}",

@@ -74,7 +74,7 @@ def revise_command(
         Literal["draft", "current", "retired"] | None,
         typer.Option(
             "--status",
-            help="\b\nExplicit status transition (never superseded). [default: unchanged]",
+            help="\b\nExplicit, human-directed status transition (never superseded). [default: unchanged]",
             show_default=False,
         ),
     ] = None,

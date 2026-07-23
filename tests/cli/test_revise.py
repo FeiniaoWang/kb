@@ -4,12 +4,14 @@ import json
 import re
 from datetime import datetime
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import yaml
 from typer.testing import CliRunner
 
 from kb.cli.app import app
+from kb.cli import revise_input
 
 
 TIMESTAMP = r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z"
@@ -37,6 +39,30 @@ def body_bytes(path: Path) -> bytes:
     assert closing >= 0
     remainder = content[closing + len(b"\n---") :]
     return remainder.removeprefix(b"\n")
+
+
+def frontmatter_block(content: bytes) -> bytes:
+    closing = content.find(b"\n---", len(b"---\n"))
+    assert closing >= 0
+    return content[: closing + len(b"\n---")]
+
+
+def without_frontmatter_keys(content: bytes, keys: set[str]) -> bytes:
+    block = frontmatter_block(content)
+    for key in keys:
+        if key == "derived_from":
+            block = re.sub(
+                rb"(?ms)^derived_from:.*?(?=^---$|^[A-Za-z_][^:\n]*:)",
+                b"",
+                block,
+            )
+        else:
+            block = re.sub(
+                rf"(?m)^{re.escape(key)}:[^\n]*(?:\n|$)".encode(),
+                b"",
+                block,
+            )
+    return block
 
 
 def revised_rows(root: Path) -> list[str]:
@@ -137,6 +163,13 @@ def test_ac01_append_parent_preserves_other_frontmatter_and_touch(
     runner: CliRunner, kb_with_spec
 ) -> None:
     root, target = kb_with_spec
+    target.write_text(
+        target.read_text(encoding="utf-8").replace(
+            "title: Retry Policy\n",
+            'title: "Retry Policy" # keep title\ncustom_key: "kept"\n# preserve this comment\n',
+        ),
+        encoding="utf-8",
+    )
     before = target.read_bytes()
     before_values = frontmatter(target)
     result = invoke(runner, root, "KB-000001", "--add-parent", "RAW-000001")
@@ -149,9 +182,11 @@ def test_ac01_append_parent_preserves_other_frontmatter_and_touch(
     assert values["derived_from"] == ["CHAT-000001", "RAW-000001"]
     assert values["timestamp"] != before_values["timestamp"]
     assert values["last_human_touch"] == before_values["last_human_touch"]
-    for line in before.splitlines():
-        if line.startswith((b"id:", b"type:", b"title:", b"description:")):
-            assert line in target.read_bytes()
+    assert without_frontmatter_keys(
+        before, {"derived_from", "timestamp"}
+    ) == without_frontmatter_keys(
+        target.read_bytes(), {"derived_from", "timestamp"}
+    )
 
 
 def test_ac02_human_advances_touch_to_revision_timestamp(
@@ -316,6 +351,10 @@ def test_ac13_distinct_link_types_keep_argument_order(
     runner: CliRunner, kb_with_spec
 ) -> None:
     root, target = kb_with_spec
+    existing = invoke(
+        runner, root, "KB-000001", "--link", "references=CHAT-000001"
+    )
+    assert existing.exit_code == 0
     result = invoke(
         runner,
         root,
@@ -323,16 +362,23 @@ def test_ac13_distinct_link_types_keep_argument_order(
         "--link",
         "contradicts=CHAT-000001",
         "--link",
-        "references=RAW-000001",
+        "constrains=RAW-000001",
     )
     assert result.exit_code == 0
-    assert list(frontmatter(target)["links"]) == ["contradicts", "references"]
+    assert list(frontmatter(target)["links"]) == [
+        "references",
+        "contradicts",
+        "constrains",
+    ]
 
 
 def test_ac14_duplicate_link_target_is_rejected(
-    runner: CliRunner, kb_with_spec
+    runner: CliRunner, kb_with_spec, tmp_path: Path
 ) -> None:
     root, _ = kb_with_spec
+    assert invoke(
+        runner, root, "KB-000001", "--link", "references=RAW-000001"
+    ).exit_code == 0
     before = snapshot(root)
     result = invoke(
         runner,
@@ -340,12 +386,24 @@ def test_ac14_duplicate_link_target_is_rejected(
         "KB-000001",
         "--link",
         "references=RAW-000001",
-        "--link",
-        "references=RAW-000001",
     )
     assert result.exit_code == 1
     assert "E_REVISE_LINK_DUPLICATE" in result.stderr
     assert snapshot(root) == before
+    repeated_root, _ = build_kb(runner, tmp_path / "repeated")
+    repeated_before = snapshot(repeated_root)
+    repeated = invoke(
+        runner,
+        repeated_root,
+        "KB-000001",
+        "--link",
+        "references=RAW-000001",
+        "--link",
+        "references=RAW-000001",
+    )
+    assert repeated.exit_code == 1
+    assert "E_REVISE_LINK_DUPLICATE" in repeated.stderr
+    assert snapshot(repeated_root) == repeated_before
 
 
 def test_ac15_malformed_link_tokens_are_usage_errors(
@@ -574,6 +632,13 @@ def test_ac27_body_file_replaces_only_body_and_revised_keys(
     runner: CliRunner, kb_with_spec, tmp_path: Path
 ) -> None:
     root, target = kb_with_spec
+    target.write_text(
+        target.read_text(encoding="utf-8").replace(
+            "title: Retry Policy\n",
+            'title: "Retry Policy" # keep title\ncustom_key: "kept"\n# preserve this comment\n',
+        ),
+        encoding="utf-8",
+    )
     body_file = tmp_path / "body.md"
     body_file.write_text("new body\n", encoding="utf-8")
     before = target.read_bytes()
@@ -586,9 +651,9 @@ def test_ac27_body_file_replaces_only_body_and_revised_keys(
     )
     assert result.exit_code == 0
     assert body_bytes(target) == b"new body\n"
-    for line in before.splitlines():
-        if line.startswith((b"id:", b"type:", b"title:", b"description:")):
-            assert line in target.read_bytes()
+    assert without_frontmatter_keys(
+        before, {"timestamp"}
+    ) == without_frontmatter_keys(target.read_bytes(), {"timestamp"})
 
 
 def test_ac28_stdin_body_normalizes_line_endings_and_trailing_newline(
@@ -776,20 +841,73 @@ def test_ac38_revise_never_changes_indexes(runner: CliRunner, kb_with_spec) -> N
 
 
 def test_ac39_representative_preflight_errors_leave_kb_byte_identical(
-    runner: CliRunner, tmp_path: Path
+    runner: CliRunner, tmp_path: Path, monkeypatch
 ) -> None:
     cases = [
-        ("parent", ["--add-parent", "RAW-999999"], None),
-        ("link", ["--link", "references=RAW-999999"], None),
-        ("pending", ["--pending", "RAW-999999"], None),
-        ("body", ["--body-file", "-"], b"\xff"),
-        ("missing", ["--body-file", str(tmp_path / "missing")], None),
+        ("malformed-scan", ["--status", "current"], None, "E_REVISE_MALFORMED", 2),
+        ("no-changes", [], None, "E_REVISE_NO_CHANGES", 2),
+        ("link-token", ["--link", "references"], None, "E_REVISE_LINK_INVALID", 2),
+        ("target-unresolved", ["--status", "current"], None, "E_REVISE_TARGET_UNRESOLVED", 1),
+        ("target-invalid", ["--status", "current"], None, "E_REVISE_TARGET_INVALID", 1),
+        ("not-editable", ["--status", "current"], None, "E_REVISE_NOT_EDITABLE", 1),
+        ("parent-unresolved", ["--add-parent", "RAW-999999"], None, "E_REVISE_PARENT_UNRESOLVED", 1),
+        ("parent-duplicate", ["--add-parent", "CHAT-000001"], None, "E_REVISE_PARENT_DUPLICATE", 1),
+        ("cycle", ["--add-parent", "KB-000002"], None, "E_REVISE_CYCLE", 1),
+        ("link-unresolved", ["--link", "references=KB-999999"], None, "E_REVISE_LINK_UNRESOLVED", 1),
+        ("link-duplicate-existing", ["--link", "references=RAW-000001"], None, "E_REVISE_LINK_DUPLICATE", 1),
+        ("link-duplicate-repeated", ["--link", "references=RAW-000001", "--link", "references=RAW-000001"], None, "E_REVISE_LINK_DUPLICATE", 1),
+        ("pending-unresolved", ["--pending", "RAW-999999"], None, "E_REVISE_PENDING_UNRESOLVED", 1),
+        ("pending-not-parent", ["--pending", "RAW-000001"], None, "E_REVISE_PENDING_INVALID", 1),
+        ("pending-clear-absent", ["--clear-pending", "CHAT-000001"], None, "E_REVISE_PENDING_INVALID", 1),
+        ("pending-add-clear-conflict", ["--pending", "CHAT-000001", "--clear-pending", "CHAT-000001"], None, "E_REVISE_PENDING_INVALID", 1),
+        ("body-missing", ["--body-file", str(tmp_path / "missing-body.md")], None, "E_REVISE_BODY_NOT_FOUND", 2),
+        ("body-not-regular", ["--body-file", str(tmp_path)], None, "E_REVISE_BODY_NOT_FOUND", 2),
+        ("body-not-text", ["--body-file", "-"], b"\xff", "E_REVISE_BODY_NOT_TEXT", 1),
+        ("body-stdin-io", ["--body-file", "-"], None, "E_REVISE_IO", 2),
+        ("validation", ["--status", "current"], None, "E_REVISE_VALIDATION", 1),
     ]
-    for offset, (_, args, input_data) in enumerate(cases):
-        root, _ = build_kb(runner, tmp_path / f"case-{offset}")
+    for offset, (case, args, input_data, code, exit_code) in enumerate(cases):
+        root, target = build_kb(runner, tmp_path / f"case-{offset}")
+        target_ref = "KB-000001"
+        if case == "malformed-scan":
+            (root / "synthetic" / "bad.md").write_text(
+                "---\nid: KB-000099\n---\nbad\n", encoding="utf-8"
+            )
+        elif case == "target-unresolved":
+            target_ref = "KB-999999"
+        elif case == "target-invalid":
+            target_ref = "RAW-000001"
+        elif case == "not-editable":
+            target.write_text(
+                target.read_text(encoding="utf-8").replace(
+                    "derived_from:\n  - CHAT-000001\n",
+                    "derived_from: CHAT-000001\n",
+                ),
+                encoding="utf-8",
+            )
+        elif case == "cycle":
+            create(runner, root, "Cycle Child", "CHAT-000001", "KB-000001")
+        elif case == "link-duplicate-existing":
+            assert invoke(
+                runner, root, "KB-000001", "--link", "references=RAW-000001"
+            ).exit_code == 0
+        elif case == "pending-add-clear-conflict":
+            args = ["--pending", "CHAT-000001", "--clear-pending", "CHAT-000001"]
+        elif case == "validation":
+            target.write_text(
+                target.read_text(encoding="utf-8").replace(
+                    "description: Description for Retry Policy.\n", ""
+                ),
+                encoding="utf-8",
+            )
+        elif case == "body-stdin-io":
+            monkeypatch.setattr(
+                revise_input, "sys", SimpleNamespace(stdin=_FailingStdin())
+            )
         before = snapshot(root)
-        result = invoke(runner, root, "KB-000001", *args, input=input_data)
-        assert result.exit_code in {1, 2}
+        result = invoke(runner, root, target_ref, *(args or []), input=input_data)
+        assert result.exit_code == exit_code, result.output
+        assert code in result.stderr
         assert snapshot(root) == before
 
 
@@ -832,6 +950,8 @@ def test_ac40_json_success_and_error_envelopes_are_exact(
             "message": payload["error"]["message"],
         }
     }
+    assert isinstance(payload["error"]["message"], str)
+    assert payload["error"]["message"]
 
 
 def test_ac41_combined_run_applies_all_changes_once(
@@ -936,9 +1056,22 @@ def test_revise_help_and_root_registration_order(runner: CliRunner) -> None:
     help_result = runner.invoke(app, ["revise", "--help"])
     assert help_result.exit_code == 0
     for text in [
+        "Usage: root revise [OPTIONS] REF",
         "Revise a synthetic document in place, preserving its id.",
+        "--add-parent TEXT",
         "Append a parent to derived_from; repeatable.",
+        "--link TYPE=REF",
         "Append an associative link target; repeatable.",
+        "--body-file TEXT",
+        "body unchanged",
+        "--status [draft|current|retired]",
+        "human-directed status transition",
+        "--pending TEXT",
+        "--clear-pending TEXT",
+        "--human",
+        "--actor TEXT",
+        "--kb PATH",
+        "--json",
         "Examples:",
         "kb revise KB-000042 --status current --human",
     ]:
@@ -967,3 +1100,44 @@ def test_environment_failure_precedes_external_body_acquisition(
     assert result.exit_code == 2
     assert "E_NO_KB" in result.stderr
     assert "E_REVISE_BODY_NOT_FOUND" not in result.stderr
+
+
+class _FailingStdin:
+    @property
+    def buffer(self):
+        return self
+
+    def read(self):
+        raise OSError("stdin read failed")
+
+
+def test_revise_failing_stdin_stream_maps_to_io_error_without_writes(
+    runner: CliRunner, kb_with_spec, monkeypatch
+) -> None:
+    root, _ = kb_with_spec
+    before = snapshot(root)
+    monkeypatch.setattr(
+        revise_input, "sys", SimpleNamespace(stdin=_FailingStdin())
+    )
+    result = invoke(runner, root, "KB-000001", "--body-file", "-")
+    assert result.exit_code == 2
+    assert "E_REVISE_IO" in result.stderr
+    assert "stdin read failed" in result.stderr
+    assert snapshot(root) == before
+
+
+def test_revise_invalid_tilde_user_path_maps_to_body_not_found_without_writes(
+    runner: CliRunner, kb_with_spec
+) -> None:
+    root, _ = kb_with_spec
+    before = snapshot(root)
+    result = invoke(
+        runner,
+        root,
+        "KB-000001",
+        "--body-file",
+        "~kb_task14_user_that_does_not_exist/body.md",
+    )
+    assert result.exit_code == 2
+    assert "E_REVISE_BODY_NOT_FOUND" in result.stderr
+    assert snapshot(root) == before
