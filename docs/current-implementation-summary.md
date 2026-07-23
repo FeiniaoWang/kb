@@ -18,7 +18,7 @@ The current implementation is a strong foundation for adding read-only query and
 The current verification suite passes:
 
 ```text
-698 passed in 18.29s (`uv run pytest -q`)
+697 passed in 17.36s (`uv run pytest -q`)
 ```
 
 The status refresh commit leaves two pre-existing untracked documentation files in the worktree; they are unrelated and were not modified.
