@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import deque
+import re
 from pathlib import Path
 from typing import Literal
 
@@ -10,6 +11,11 @@ from pydantic import BaseModel, Field, PrivateAttr
 from kb.core.frontmatter import replace_document_body, replace_frontmatter_keys
 from kb.core.housekeeping import LogEntry, utc_now
 from kb.core.model import Config, ConfigLoadError, DocClass, Document
+from kb.core.safeio import (
+    FileIdentity,
+    inspect_rooted_file,
+    read_rooted_bytes,
+)
 from kb.core.scan import KB, RootDiscoveryError, resolve_ref, scan_snapshot
 from kb.core.validate import Finding, _all_findings
 from kb.core.write_pipeline import (
@@ -52,7 +58,11 @@ class PreparedRevise(BaseModel):
     config: Config
     kb: KB
     link_pairs: list[tuple[str, str]]
+    target_path: Path | None = None
+    target_id: str | None = None
     _context: WriteContext = PrivateAttr()
+    _target_identity: FileIdentity | None = PrivateAttr(default=None)
+    _target_content: bytes | None = PrivateAttr(default=None)
 
 
 class ReviseFailure(Exception):
@@ -119,14 +129,45 @@ def prepare_revise(request: ReviseRequest) -> PreparedRevise:
             2,
         )
     link_pairs = _parse_link_tokens(request.links)
+    bound_path: Path | None = None
+    bound_id: str | None = None
     prepared = PreparedRevise(
         request=request,
         root=context.root,
         config=context.config,
         kb=context.kb,
         link_pairs=link_pairs,
+        target_path=bound_path,
+        target_id=bound_id,
     )
     prepared._context = context
+    candidate = resolve_ref(context.kb, request.ref)
+    if (
+        candidate is not None
+        and candidate.doc_class is DocClass.SYNTHETIC
+        and candidate.id is not None
+        and candidate.frontmatter.root.get("status") != "superseded"
+    ):
+        try:
+            identity = inspect_rooted_file(
+                context.root,
+                candidate.path,
+                context._root_identity,
+            )
+            if identity is None:
+                raise FileNotFoundError(candidate.path)
+            content = read_rooted_bytes(
+                context.root,
+                candidate.path,
+                context._root_identity,
+                identity,
+            )
+        except OSError as error:
+            raise ReviseFailure("E_REVISE_IO", str(error), 2) from error
+        prepared.target_path = candidate.path
+        prepared.target_id = candidate.id
+        prepared._target_identity = identity
+        prepared._target_content = content
     return prepared
 
 
@@ -236,8 +277,51 @@ def _snapshot_frontmatter(kb: KB) -> dict[Path, bytes]:
     return snapshots
 
 
-def _finding_identity(finding: Finding) -> tuple[str, str, str | None, str]:
-    return finding.code, finding.path, finding.id, finding.message
+def _finding_identity(
+    finding: Finding,
+) -> tuple[str, str, str | None, tuple[int, int]]:
+    return finding.code, finding.path, finding.id, finding.occurrence
+
+
+_LINK_WARNING_TYPE = re.compile(r"link type '([^']+)'")
+
+
+def _assert_bound_target(prepared: PreparedRevise, target: Document) -> None:
+    if (
+        prepared.target_path is None
+        or prepared.target_id is None
+        or prepared._target_identity is None
+        or prepared._target_content is None
+    ):
+        return
+    if target.path != prepared.target_path or target.id != prepared.target_id:
+        raise ReviseFailure(
+            "E_REVISE_IO",
+            "target changed between preparation and execution",
+            2,
+        )
+    try:
+        identity = inspect_rooted_file(
+            prepared.root,
+            prepared.target_path,
+            prepared._context._root_identity,
+        )
+        if identity is None:
+            raise FileNotFoundError(prepared.target_path)
+        content = read_rooted_bytes(
+            prepared.root,
+            prepared.target_path,
+            prepared._context._root_identity,
+            identity,
+        )
+    except OSError as error:
+        raise ReviseFailure("E_REVISE_IO", str(error), 2) from error
+    if identity != prepared._target_identity or content != prepared._target_content:
+        raise ReviseFailure(
+            "E_REVISE_IO",
+            "target changed between preparation and execution",
+            2,
+        )
 
 
 def _validate_proposed(
@@ -287,6 +371,7 @@ def execute_revise(
     request = prepared.request
     kb = prepared.kb
     target = _resolve_target(kb, request.ref)
+    _assert_bound_target(prepared, target)
     assert target.id is not None
     values = target.frontmatter.root
 
@@ -454,18 +539,21 @@ def execute_revise(
             f"{request.ref}: {error}",
             1,
         ) from error
+    if (
+        prepared._target_content is not None
+        and prepared_write.sources["document"].content != prepared._target_content
+    ):
+        raise ReviseFailure(
+            "E_REVISE_IO",
+            "target changed between preparation and execution",
+            2,
+        )
 
     validation_warnings = _validate_proposed(prepared, target, revised)
-    existing_warning_types = {
-        warning.rsplit(": ", 1)[-1]
-        for warning in warnings
-        if "link type is not declared" in warning
-    }
     for warning in validation_warnings:
         if warning.startswith("warning: LINKTYPE_UNDECLARED:"):
-            if any(
-                link_type in warning for link_type in existing_warning_types
-            ):
+            match = _LINK_WARNING_TYPE.search(warning)
+            if match is not None and match.group(1) in warned_types:
                 continue
         if warning not in warnings:
             warnings.append(warning)

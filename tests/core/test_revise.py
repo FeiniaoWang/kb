@@ -132,7 +132,7 @@ def _revised_rows(root: Path) -> list[str]:
     ]
 
 
-def test_ac01_ac02_ac33_ac37_append_parent_is_lossless_and_logged(tmp_path: Path) -> None:
+def test_ac01_append_parent_is_lossless_and_logged(tmp_path: Path) -> None:
     root, target = _base(tmp_path)
     before = _values(target)
     result = _revise(root, add_parents=["RAW-000002"])
@@ -153,7 +153,7 @@ def test_ac01_ac02_ac33_ac37_append_parent_is_lossless_and_logged(tmp_path: Path
     assert values["last_human_touch"] == values["timestamp"]
 
 
-def test_ac03_ac04_target_and_parent_path_refs_are_canonical(tmp_path: Path) -> None:
+def test_ac03_target_and_parent_path_refs_are_canonical(tmp_path: Path) -> None:
     root, target = _base(tmp_path)
     result = _revise(
         root,
@@ -165,7 +165,7 @@ def test_ac03_ac04_target_and_parent_path_refs_are_canonical(tmp_path: Path) -> 
     assert _values(target)["derived_from"][-1] == "RAW-000002"
 
 
-def test_ac05_ac06_ac07_parent_failures_are_typed_and_atomic(tmp_path: Path) -> None:
+def test_ac05_parent_failures_are_typed_and_atomic(tmp_path: Path) -> None:
     root, _ = _base(tmp_path)
     cases = [
         (["CHAT-000001"], "E_REVISE_PARENT_DUPLICATE"),
@@ -179,7 +179,7 @@ def test_ac05_ac06_ac07_parent_failures_are_typed_and_atomic(tmp_path: Path) -> 
         assert _snapshot(root) == before
 
 
-def test_ac08_ac09_cycles_name_direct_and_transitive_walks(tmp_path: Path) -> None:
+def test_ac08_cycles_name_direct_and_transitive_walks(tmp_path: Path) -> None:
     root, _ = _base(tmp_path)
     _write(
         root,
@@ -207,7 +207,7 @@ def test_ac10_raw_and_governance_parents_append(tmp_path: Path) -> None:
     ]
 
 
-def test_ac11_ac12_ac13_ac14_links_append_order_and_duplicates(tmp_path: Path) -> None:
+def test_ac11_links_append_order_and_duplicates(tmp_path: Path) -> None:
     root, target = _base(tmp_path)
     _revise(root, links=["references=CHAT-000001"])
     _revise(
@@ -225,7 +225,7 @@ def test_ac11_ac12_ac13_ac14_links_append_order_and_duplicates(tmp_path: Path) -
     assert _snapshot(root) == before
 
 
-def test_ac15_ac16_link_token_and_target_failures(tmp_path: Path) -> None:
+def test_ac15_link_token_and_target_failures(tmp_path: Path) -> None:
     root, _ = _base(tmp_path)
     for token in ["references", "=KB-000001", "references="]:
         with pytest.raises(ReviseFailure) as raised:
@@ -242,7 +242,7 @@ def test_ac15_ac16_link_token_and_target_failures(tmp_path: Path) -> None:
     )
 
 
-def test_ac17_ac18_link_type_warnings_are_stable_and_once(tmp_path: Path) -> None:
+def test_ac17_link_type_warnings_are_stable_and_once(tmp_path: Path) -> None:
     root, _ = _base(tmp_path)
     assert _revise(root, links=["references=CHAT-000001"]).warnings == []
     result = _revise(root, links=["blocks=CHAT-000001", "blocks=RAW-000002"])
@@ -262,7 +262,7 @@ def test_ac17_ac18_link_type_warnings_are_stable_and_once(tmp_path: Path) -> Non
     ]
 
 
-def test_ac19_ac20_ac21_status_transitions_and_frozen_target(tmp_path: Path) -> None:
+def test_ac19_status_transitions_and_frozen_target(tmp_path: Path) -> None:
     root, target = _base(tmp_path)
     _revise(root, status="current")
     assert _values(target)["status"] == "current"
@@ -279,7 +279,25 @@ def test_ac19_ac20_ac21_status_transitions_and_frozen_target(tmp_path: Path) -> 
     assert _failure(root, status="draft").code == "E_REVISE_TARGET_INVALID"
 
 
-def test_ac22_to_ac26_pending_lifecycle_and_failures(tmp_path: Path) -> None:
+def test_ac19_status_only_rewrite_changes_only_status_and_timestamp(
+    tmp_path: Path,
+) -> None:
+    root, target = _base(tmp_path)
+    before = target.read_bytes()
+    _revise(root, status="current")
+    after = target.read_bytes()
+    assert before.replace(b"status: draft", b"status: current") != after
+    before_without_timestamp = before.replace(
+        b"status: draft", b"status: current"
+    ).split(b"timestamp: 2026-07-20T10:00:00Z", 1)
+    after_without_timestamp = after.split(b"timestamp:", 1)
+    assert before_without_timestamp[0] == after_without_timestamp[0]
+    assert before_without_timestamp[1].split(b"\n", 1)[1] == after_without_timestamp[1].split(
+        b"\n", 1
+    )[1]
+
+
+def test_ac22_pending_lifecycle_and_failures(tmp_path: Path) -> None:
     root, target = _base(tmp_path)
     _revise(root, pending=["CHAT-000001"])
     assert _values(target)["pending_upstream"] == ["CHAT-000001"]
@@ -309,7 +327,7 @@ def test_ac22_to_ac26_pending_lifecycle_and_failures(tmp_path: Path) -> None:
     ).code == "E_REVISE_PENDING_INVALID"
 
 
-def test_ac27_to_ac31_body_decode_normalization_and_omission(tmp_path: Path) -> None:
+def test_ac27_body_decode_normalization_and_omission(tmp_path: Path) -> None:
     root, target = _base(tmp_path)
     _revise(
         root,
@@ -329,7 +347,7 @@ def test_ac27_to_ac31_body_decode_normalization_and_omission(tmp_path: Path) -> 
     assert _snapshot(root) == before
 
 
-def test_ac32_ac35_no_changes_and_target_errors(tmp_path: Path) -> None:
+def test_ac32_no_changes_and_target_errors(tmp_path: Path) -> None:
     root, _ = _base(tmp_path)
     with pytest.raises(ReviseFailure) as raised:
         prepare_revise(ReviseRequest(ref="KB-000001", kb_root=root))
@@ -384,7 +402,7 @@ def test_ac36_malformed_scan_blocks_and_names_path(tmp_path: Path) -> None:
     assert _snapshot(root) == before
 
 
-def test_ac38_ac39_indexes_and_kb_are_untouched_on_preflight_failure(
+def test_ac38_indexes_and_kb_are_untouched_on_preflight_failure(
     tmp_path: Path,
 ) -> None:
     root, _ = _base(tmp_path)
@@ -414,7 +432,7 @@ def test_ac40_core_result_and_failure_shapes_are_typed(tmp_path: Path) -> None:
     assert failure.exit_code == 1
 
 
-def test_ac41_ac42_combined_revision_is_one_log_row_with_actor(
+def test_ac41_combined_revision_is_one_log_row_with_actor(
     tmp_path: Path,
 ) -> None:
     root, target = _base(tmp_path)
@@ -475,3 +493,280 @@ def test_ac43_retained_target_cycle_is_validation_failure_and_atomic(
     assert failure.code == "E_REVISE_VALIDATION"
     assert "DG2_CYCLE" in failure.message
     assert _snapshot(root) == before
+
+
+def test_review_stale_target_replacement_is_rejected_before_mutation(
+    tmp_path: Path,
+) -> None:
+    root, target = _base(tmp_path)
+    prepared = prepare_revise(
+        ReviseRequest(ref="KB-000001", status="current", kb_root=root)
+    )
+    target.write_text(
+        _synthetic("KB-000099", ["CHAT-000001"]),
+        encoding="utf-8",
+    )
+    after_replacement = _snapshot(root)
+    with pytest.raises(ReviseFailure) as raised:
+        execute_revise(prepared, None)
+    assert (raised.value.code, raised.value.exit_code) == ("E_REVISE_IO", 2)
+    assert _snapshot(root) == after_replacement
+
+
+def test_review_unrelated_message_change_does_not_block_status_revision(
+    tmp_path: Path,
+) -> None:
+    root, _ = _base(tmp_path)
+    _write(
+        root,
+        "synthetic/unrelated.md",
+        _synthetic(
+            "KB-000099",
+            ["CHAT-000001"],
+            extra="supersedes: KB-000001\n",
+        ),
+    )
+    result = _revise(root, status="current")
+    assert result.id == "KB-000001"
+
+
+def test_review_link_warning_dedup_uses_exact_type_equality(
+    tmp_path: Path,
+) -> None:
+    root, target = _base(tmp_path)
+    config_path = root / "kb-config.json"
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    config["link_types"] = []
+    config_path.write_text(json.dumps(config) + "\n", encoding="utf-8")
+    target.write_text(
+        TARGET.replace(
+            "custom_key: kept\n",
+            "links:\n  references:\n  - CHAT-000001\ncustom_key: kept\n",
+        ),
+        encoding="utf-8",
+    )
+    result = _revise(root, links=["ref=RAW-000002"])
+    assert result.warnings == [
+        "warning: link type is not declared in kb-config.json: ref",
+        "warning: LINKTYPE_UNDECLARED: link type 'references' is not declared in the kb-config.json link_types vocabulary",
+    ]
+
+
+def test_ac02_human_flag_advances_touch_to_timestamp(tmp_path: Path) -> None:
+    root, target = _base(tmp_path)
+    _revise(root, status="current", human=True)
+    values = _values(target)
+    assert values["last_human_touch"] == values["timestamp"]
+
+
+def test_ac04_parent_path_is_stored_as_canonical_id(tmp_path: Path) -> None:
+    root, target = _base(tmp_path)
+    _revise(root, add_parents=["raw/sources/raw-000002"])
+    assert _values(target)["derived_from"][-1] == "RAW-000002"
+
+
+def test_ac06_existing_parent_is_rejected(tmp_path: Path) -> None:
+    root, _ = _base(tmp_path)
+    assert _failure(root, add_parents=["CHAT-000001"]).code == (
+        "E_REVISE_PARENT_DUPLICATE"
+    )
+
+
+def test_ac07_unresolved_parent_is_rejected(tmp_path: Path) -> None:
+    root, _ = _base(tmp_path)
+    assert _failure(root, add_parents=["RAW-999999"]).code == (
+        "E_REVISE_PARENT_UNRESOLVED"
+    )
+
+
+def test_ac09_transitive_cycle_is_rejected(tmp_path: Path) -> None:
+    root, _ = _base(tmp_path)
+    _write(
+        root,
+        "synthetic/kb-000002.md",
+        _synthetic("KB-000002", ["CHAT-000001", "KB-000001"]),
+    )
+    _write(
+        root,
+        "synthetic/kb-000003.md",
+        _synthetic("KB-000003", ["CHAT-000001", "KB-000002"]),
+    )
+    failure = _failure(root, add_parents=["KB-000003"])
+    assert failure.code == "E_REVISE_CYCLE"
+
+
+def test_ac12_existing_link_type_appends_in_prior_order(tmp_path: Path) -> None:
+    root, target = _base(tmp_path)
+    _revise(root, links=["references=CHAT-000001"])
+    _revise(root, links=["references=RAW-000002"])
+    assert _values(target)["links"]["references"] == [
+        "CHAT-000001",
+        "RAW-000002",
+    ]
+
+
+def test_ac13_distinct_link_types_follow_argument_order(tmp_path: Path) -> None:
+    root, target = _base(tmp_path)
+    _revise(root, links=["references=CHAT-000001", "blocks=RAW-000002"])
+    assert list(_values(target)["links"]) == ["references", "blocks"]
+
+
+def test_ac14_repeated_same_run_link_is_rejected(tmp_path: Path) -> None:
+    root, _ = _base(tmp_path)
+    failure = _failure(
+        root,
+        links=["references=CHAT-000001", "references=CHAT-000001"],
+    )
+    assert failure.code == "E_REVISE_LINK_DUPLICATE"
+
+
+def test_ac16_unresolved_link_is_rejected(tmp_path: Path) -> None:
+    root, _ = _base(tmp_path)
+    assert _failure(root, links=["references=KB-999999"]).code == (
+        "E_REVISE_LINK_UNRESOLVED"
+    )
+
+
+def test_ac18_empty_link_vocabulary_warns(tmp_path: Path) -> None:
+    root, _ = _base(tmp_path)
+    config_path = root / "kb-config.json"
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    config["link_types"] = []
+    config_path.write_text(json.dumps(config) + "\n", encoding="utf-8")
+    result = _revise(root, links=["ref=CHAT-000001"])
+    assert result.warnings == [
+        "warning: link type is not declared in kb-config.json: ref"
+    ]
+
+
+def test_ac20_superseded_target_is_invalid(tmp_path: Path) -> None:
+    root, target = _base(tmp_path)
+    target.write_text(
+        TARGET.replace("status: draft", "status: superseded"),
+        encoding="utf-8",
+    )
+    assert _failure(root, status="retired").code == "E_REVISE_TARGET_INVALID"
+
+
+def test_ac21_same_status_is_an_idempotent_revision(tmp_path: Path) -> None:
+    root, target = _base(tmp_path)
+    old_timestamp = _values(target)["timestamp"]
+    _revise(root, status="draft")
+    assert _values(target)["status"] == "draft"
+    assert _values(target)["timestamp"] != old_timestamp
+
+
+def test_ac23_pending_added_parent_succeeds_in_same_run(tmp_path: Path) -> None:
+    root, target = _base(tmp_path)
+    _revise(
+        root,
+        add_parents=["RAW-000002"],
+        pending=["RAW-000002"],
+    )
+    assert _values(target)["pending_upstream"] == ["RAW-000002"]
+
+
+def test_ac24_repeated_same_run_pending_is_rejected(tmp_path: Path) -> None:
+    root, _ = _base(tmp_path)
+    failure = _failure(
+        root,
+        pending=["CHAT-000001", "CHAT-000001"],
+    )
+    assert failure.code == "E_REVISE_PENDING_INVALID"
+
+
+def test_ac25_clear_last_pending_removes_key(tmp_path: Path) -> None:
+    root, target = _base(tmp_path)
+    _revise(root, pending=["CHAT-000001"])
+    _revise(root, clear_pending=["CHAT-000001"])
+    assert "pending_upstream" not in _values(target)
+
+
+def test_ac26_absent_clear_and_add_clear_conflict_are_rejected(
+    tmp_path: Path,
+) -> None:
+    root, _ = _base(tmp_path)
+    assert _failure(root, clear_pending=["CHAT-000001"]).code == (
+        "E_REVISE_PENDING_INVALID"
+    )
+    assert _failure(
+        root,
+        pending=["CHAT-000001"],
+        clear_pending=["CHAT-000001"],
+    ).code == "E_REVISE_PENDING_INVALID"
+
+
+def test_ac28_body_crlf_is_normalized(tmp_path: Path) -> None:
+    root, target = _base(tmp_path)
+    _revise(root, body_change=True, body_data=b"new\r\nsecond\r\n")
+    assert target.read_bytes().endswith(b"---\nnew\nsecond\n")
+
+
+def test_ac29_whitespace_body_is_empty(tmp_path: Path) -> None:
+    root, target = _base(tmp_path)
+    _revise(root, body_change=True, body_data=b" \t\r\n")
+    assert target.read_bytes().rstrip().endswith(b"---")
+
+
+def test_ac30_omitted_body_change_preserves_body_bytes(tmp_path: Path) -> None:
+    root, target = _base(tmp_path)
+    before_body = target.read_bytes().split(b"---\n", 2)[-1]
+    _revise(root, body_change=False, body_data=None, status="current")
+    assert target.read_bytes().split(b"---\n", 2)[-1] == before_body
+
+
+def test_ac31_non_utf8_body_is_typed(tmp_path: Path) -> None:
+    root, _ = _base(tmp_path)
+    failure = _failure(root, body_change=True, body_data=b"\xff\xfe")
+    assert (failure.code, failure.exit_code) == ("E_REVISE_BODY_NOT_TEXT", 1)
+
+
+def test_ac33_untouched_unknown_frontmatter_survives(tmp_path: Path) -> None:
+    root, target = _base(tmp_path)
+    _revise(root, status="current")
+    assert b'title: "Quoted title" # keep this comment\n' in target.read_bytes()
+    assert b"custom_key: kept\n" in target.read_bytes()
+
+
+def test_ac35_non_synthetic_target_is_invalid(tmp_path: Path) -> None:
+    root, _ = _base(tmp_path)
+    assert _failure(root, ref="RAW-000002", status="current").code == (
+        "E_REVISE_TARGET_INVALID"
+    )
+
+
+def test_ac37_revised_log_row_starts_with_target_path(tmp_path: Path) -> None:
+    root, _ = _base(tmp_path)
+    _revise(root, status="current", actor="reviewer")
+    row, = _revised_rows(root)
+    assert " | reviewer | KB-000001 | synthetic/kb-000001.md" in row
+
+
+def test_ac39_each_representative_preflight_failure_preserves_kb_bytes(
+    tmp_path: Path,
+) -> None:
+    cases = (
+        {"add_parents": ["RAW-999999"]},
+        {"links": ["references=RAW-999999"]},
+        {"pending": ["RAW-999999"]},
+        {"clear_pending": ["CHAT-000001"]},
+        {"body_change": True, "body_data": b"\xff"},
+        {"status": "current"},
+    )
+    for offset, options in enumerate(cases):
+        root, target = _base(tmp_path / str(offset))
+        if options == {"status": "current"}:
+            target.write_text(
+                TARGET.replace("description: A concise note.\n", ""),
+                encoding="utf-8",
+            )
+        before = _snapshot(root)
+        failure = _failure(root, **options)
+        assert failure.exit_code in (1, 2)
+        assert _snapshot(root) == before
+
+
+def test_ac42_actor_is_written_to_revised_log(tmp_path: Path) -> None:
+    root, _ = _base(tmp_path)
+    _revise(root, status="current", actor="reviewer")
+    assert " | reviewer | " in _revised_rows(root)[0]
