@@ -1,6 +1,6 @@
 # Current Implementation Summary
 
-**As of:** 2026-07-17
+**As of:** 2026-07-22
 
 ## Project overview
 
@@ -11,7 +11,7 @@ This project is building `kb`, a deterministic Python CLI for maintaining a Git-
 
 Only the CLI foundation is currently being built. There is no skill layer in this repository yet.
 
-The current implementation is a strong foundation for adding read-only query and graph commands, but one important discrepancy needs attention: `kb ingest` is only implemented through AC23 of its 50 acceptance criteria.
+The current implementation is a strong foundation for adding read-only query and graph commands. PRD v0.5 alignment has landed, including the charter, `links`, `pending_upstream`, and `link_types`.
 
 ## What is actually implemented
 
@@ -28,28 +28,15 @@ The worktree was clean when this summary was prepared.
 | `kb init` | Fully implemented against AC1–AC30 |
 | `kb create` | Fully implemented against AC1–AC52 |
 | `kb validate` | Fully implemented against AC1–AC74 |
-| `kb ingest` | Implemented only through AC1–AC23 |
+| `kb ingest` | Fully implemented against AC1–AC50 |
+| `kb revise` | Fully implemented against `kb-revise.md` AC01–AC43 |
 | Query commands | Designed, not implemented |
 | Graph commands | Designed, not implemented |
 | `kb mv` | Designed, not implemented |
 | Standalone `kb index` / `kb log` | Helpers exist, commands do not |
 | Agent skills | Out of scope for this repository so far |
 
-The four registered commands are visible in `src/kb/cli/app.py`.
-
-### The ingest discrepancy
-
-The normative `docs/specs/commands/kb-ingest.md` defines 50 acceptance criteria, but `tests/cli/test_ingest.py` ends at AC23.
-
-Consequently, these advertised behaviors are not implemented:
-
-- Non-UTF-8 files are supposed to be stored as byte-identical originals with a citable Markdown stub. The current implementation instead sends every input through UTF-8 decoding and reports `E_INGEST_NOT_TEXT`.
-- `--dest` is supposed to create nested class subdirectories and indexes. The current `_surface()` rejects every non-null `--dest`.
-- The remaining AC24–AC50 coverage for binary files, destinations, write safety, environment errors, JSON/help completeness, and Git-agnostic behavior is absent.
-
-This is especially confusing because the CLI help already advertises binary-file and `--dest` support. Git history confirms that only the AC1–AC11 and AC12–AC23 ingest slices landed.
-
-`docs/HANDOVER.md` is also stale: it says ingest is complete and validate is absent, which is the inverse of the current checkout.
+The five registered commands are visible in `src/kb/cli/app.py`.
 
 ## Current architecture
 
@@ -115,7 +102,7 @@ Initialization is not transactional: an OS failure may leave a partial scaffold,
 
 ### `kb ingest`
 
-`ingest()` in `core/ingest.py` currently supports:
+`ingest()` in `core/ingest.py` supports:
 
 - File, stdin, and clipboard byte acquisition through an adapter registry.
 - UTF-8 text normalization.
@@ -124,10 +111,10 @@ Initialization is not transactional: an OS failure may leave a partial scaffold,
 - Configurable max+1 IDs.
 - Deterministic slug and title generation with basic collision handling.
 - Raw frontmatter emission.
+- Byte-identical storage with a citable Markdown stub for non-UTF-8 files.
+- Nested destination subdirectories and their indexes via `--dest`.
 - Target index regeneration.
 - Log append.
-
-Binary files and destination subdirectories are not implemented.
 
 ### `kb create`
 
