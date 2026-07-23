@@ -785,6 +785,87 @@ def test_referenced_document_identity_change_after_prepare_is_typed_and_atomic(
     assert _snapshot(root) == before
 
 
+def test_referenced_document_replacement_after_validation_is_rejected(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root, target = _base(tmp_path)
+    referenced = root / "raw/sources/raw-000002.md"
+    original_validate = revise_module._validate_proposed
+
+    def validate_then_replace(*args, **kwargs):
+        warnings = original_validate(*args, **kwargs)
+        referenced.write_text(
+            RAW.replace("raw body", "replacement"),
+            encoding="utf-8",
+        )
+        return warnings
+
+    monkeypatch.setattr(
+        revise_module,
+        "_validate_proposed",
+        validate_then_replace,
+    )
+    prepared = prepare_revise(
+        ReviseRequest(
+            ref="KB-000001",
+            add_parents=["RAW-000002"],
+            kb_root=root,
+        )
+    )
+    before_target = target.read_bytes()
+    before_log = (root / "log.md").read_bytes()
+
+    with pytest.raises(ReviseFailure) as raised:
+        execute_revise(prepared, None)
+
+    assert (raised.value.code, raised.value.exit_code) == ("E_REVISE_IO", 2)
+    assert target.read_bytes() == before_target
+    assert (root / "log.md").read_bytes() == before_log
+
+
+def test_validation_uses_captured_referenced_document_bytes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root, target = _base(tmp_path)
+    referenced = root / "raw/sources/raw-000002.md"
+    original_snapshot = revise_module._snapshot_document
+
+    def replace_then_snapshot(prepared, document):
+        if document.path == Path("raw/sources/raw-000002.md"):
+            referenced.write_text(
+                RAW.replace("RAW-000002", "RAW-000099"),
+                encoding="utf-8",
+            )
+        return original_snapshot(prepared, document)
+
+    monkeypatch.setattr(
+        revise_module,
+        "_snapshot_document",
+        replace_then_snapshot,
+    )
+    before_target = target.read_bytes()
+    before_log = (root / "log.md").read_bytes()
+
+    with pytest.raises(ReviseFailure) as raised:
+        prepare_revise(
+            ReviseRequest(
+                ref="KB-000001",
+                add_parents=["RAW-000002"],
+                kb_root=root,
+            )
+        )
+
+    assert (raised.value.code, raised.value.exit_code) == (
+        "E_REVISE_VALIDATION",
+        1,
+    )
+    assert "LINK_UNRESOLVED" in raised.value.message
+    assert target.read_bytes() == before_target
+    assert (root / "log.md").read_bytes() == before_log
+
+
 def test_ac37_revised_log_row_starts_with_target_path(tmp_path: Path) -> None:
     root, _ = _base(tmp_path)
     _revise(root, status="current", actor="reviewer")

@@ -340,10 +340,20 @@ def _validate_proposed(
     target: Document,
     revised: bytes,
 ) -> list[str]:
-    snapshots = _snapshot_frontmatter(prepared.kb)
-    snapshots[target.path] = revised
-    proposed_kb = scan_snapshot(prepared.root, snapshots)
-    baseline = all_findings(prepared.kb, prepared.config)
+    assert prepared._target_content is not None
+    baseline_snapshots = _snapshot_frontmatter(prepared.kb)
+    baseline_snapshots[target.path] = prepared._target_content
+    baseline_snapshots.update(
+        {
+            path: content
+            for path, (_, content) in prepared._reference_snapshots.items()
+        }
+    )
+    baseline_kb = scan_snapshot(prepared.root, baseline_snapshots)
+    proposed_snapshots = dict(baseline_snapshots)
+    proposed_snapshots[target.path] = revised
+    proposed_kb = scan_snapshot(prepared.root, proposed_snapshots)
+    baseline = all_findings(baseline_kb, prepared.config)
     proposed = all_findings(proposed_kb, prepared.config)
     baseline_errors = {
         _finding_identity(finding)
@@ -547,15 +557,6 @@ def _prepare_domain(prepared: PreparedRevise, target: Document) -> None:
             f"{request.ref}: {error}",
             1,
         ) from error
-    validation_warnings = _validate_proposed(prepared, target, revised)
-    for warning in validation_warnings:
-        if warning.startswith("warning: LINKTYPE_UNDECLARED:"):
-            match = _LINK_WARNING_TYPE.search(warning)
-            if match is not None and match.group(1) in warned_types:
-                continue
-        if warning not in warnings:
-            warnings.append(warning)
-
     referenced_ids = set(new_parents)
     referenced_ids.update(
         target_id for targets in new_links.values() for target_id in targets
@@ -569,6 +570,15 @@ def _prepare_domain(prepared: PreparedRevise, target: Document) -> None:
         prepared._reference_snapshots[document.path] = _snapshot_document(
             prepared, document
         )
+
+    validation_warnings = _validate_proposed(prepared, target, revised)
+    for warning in validation_warnings:
+        if warning.startswith("warning: LINKTYPE_UNDECLARED:"):
+            match = _LINK_WARNING_TYPE.search(warning)
+            if match is not None and match.group(1) in warned_types:
+                continue
+        if warning not in warnings:
+            warnings.append(warning)
 
     prepared.warnings = warnings
     prepared._revised_frontmatter = revised
