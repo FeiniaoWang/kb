@@ -89,7 +89,7 @@ The core contains no Typer calls, printing, or `sys.exit`, so the important CLI/
 `init_kb()` in `core/housekeeping.py`:
 
 - Resolves or creates the target root.
-- Builds the fixed twelve-file scaffold.
+- Builds the fixed thirteen-file scaffold.
 - Creates eight CLI-owned `index.md` files.
 - Creates three protected governance documents: `charter.md`, `conventions.md`, and the human-readable `kb-config.md` reference.
 - Creates `kb-config.json` and append-only `log.md`.
