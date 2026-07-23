@@ -92,7 +92,9 @@ back — same stance as kb create E14).
     else `E_REVISE_BODY_NOT_TEXT`, exit 1. Normalize CRLF/CR to LF, ensure
     exactly one trailing newline; empty or whitespace-only input yields the
     empty body.
-11. Compute the revision instant `T` (UTC, second precision, `Z` suffix).
+11. Compute the revision instant `T` (UTC, second precision, `Z` suffix),
+    strictly later than the target's existing valid `timestamp` even when
+    the wall clock has not advanced.
     New frontmatter: `timestamp: T`; `last_human_touch: T` iff `--human`;
     `derived_from`/`links`/`pending_upstream`/`status` per steps 6–9 (only
     keys actually changed are rewritten; untouched keys — including unknown
@@ -108,8 +110,11 @@ back — same stance as kb create E14).
     a change summary such as `+parent CHAT-000031, +link references=KB-000012,
     status current, body, +pending KB-000007, -pending KB-000003`). Encoding
     failure here is pre-flight `E_REVISE_IO`, exit 2.
-14. Write phase: overwrite the target document (identity-checked, symlink-
-    resistant — 00-shared safeio conventions), append the log row.
+14. Before the write phase, verify the identity and bytes captured for the
+    target and every resolved final parent/link/pending document. A deletion
+    or replacement during body acquisition is `E_REVISE_IO`, with no write.
+    Then overwrite the target document (identity-checked, symlink-resistant
+    — 00-shared safeio conventions) and append the log row.
 15. Report.
 
 ## 4. Errors
@@ -152,7 +157,7 @@ Error envelope per 00-shared §3.
 ## 6. Acceptance criteria
 
 AC01 append one parent: `derived_from` gains the canonical id at the end; all
-other frontmatter bytes unchanged; `timestamp` advanced; `last_human_touch`
+other frontmatter bytes unchanged; `timestamp` strictly advanced; `last_human_touch`
 unchanged without `--human`.
 AC02 `--human` advances `last_human_touch` to equal the new `timestamp`.
 AC03 path REF and id REF resolve to the same target.

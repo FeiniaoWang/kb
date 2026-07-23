@@ -84,7 +84,7 @@ No step writes a single byte — no document, no `index.md`, no `log.md` entry, 
 | raw (`feedback`) | `id`, `ingested_at`, `origin`, `title`, `about` | `id`, `ingested_at`, `origin`, `about` |
 | governance (`charter`, `conventions`, `kb-config`, `health`) | `id`, `title`, `description` | `id`, `title`, `description` |
 | index | `description`, `title` | `description` (`id` is **forbidden** — index documents are path-addressed) |
-| log (operational) | exempt from FM1 checks entirely (§4 step 4) | — |
+| log (operational) | none | none (`id` and every other reserved key are **forbidden**; unknown FM2 extension keys remain legal) |
 
 - **Field shapes** (`FM1_FIELD_INVALID`): `id`, `title`, `description`, `origin`, `instructions`, `supersedes`, `about` — non-empty strings (empty or whitespace-only is invalid); `status` — literally one of `draft`, `current`, `superseded`, `retired` (case-sensitive); `derived_from`, `tags`, `pending_upstream` — lists whose entries are all non-empty strings (empty `tags`/`pending_upstream` lists are legal; an empty `derived_from` is well-shaped but triggers `DG1_NO_PARENTS`); `links` — a mapping of link type to a list of non-empty strings (link types are non-empty strings; an empty mapping or target list is legal); `timestamp`, `last_human_touch`, `ingested_at` — valid timestamps as defined above.
 - **Vocabulary checks:** `TAG_UNDECLARED` fires for every `tags` entry absent from config `tags`; `LINKTYPE_UNDECLARED` fires once for every `links` mapping key absent from config `link_types`. Both fire when the corresponding config list is empty (empty means none declared). `TYPE_UNDECLARED` fires for a synthetic `type` absent from a **non-empty** config `types` list; an empty `types` list means the type vocabulary is unconstrained and no finding fires. This asymmetry is the PRD CLI-6 contract.
@@ -166,7 +166,7 @@ Stable across releases (NFR-9): codes are appended, never renamed or re-severiti
 | `LS_SUPERSEDES_SELF` | error | `supersedes` equals the document's own `id` (preempts the two checks above for that link) | `document supersedes itself` |
 | `LS_TOUCH_AFTER_TIMESTAMP` | warning | both `last_human_touch` and `timestamp` parse (§4.1) and `last_human_touch` is strictly later | `last_human_touch <value> is later than timestamp <value>` |
 
-22 stable finding codes (17 errors, 5 warnings): `FM1_DESCRIPTION_LONG`, `TYPE_UNDECLARED`, `TAG_UNDECLARED`, `LINKTYPE_UNDECLARED`, and `LS_TOUCH_AFTER_TIMESTAMP` are warnings; all others are errors.
+The table above is the source of truth for the finding-code set and each code's severity. New codes are appended to that table; no separate numeric census is maintained.
 
 ### 7.2 Command-level errors (end the run — no findings are produced)
 
@@ -234,7 +234,7 @@ One pytest test per item (00-shared §10), named `test_ac<NN>_<slug>`. Each is i
 | AC24 | Given `title: ""` (case a) and `description: "   "` (case b) on a synthetic document, then each yields `FM1_FIELD_INVALID` (non-empty string required). |
 | AC25 | Given `tags: api` (a string, not a list) on a synthetic document, then `FM1_FIELD_INVALID` naming `'tags'`; given `tags: []` (case b), then no finding (an empty tags list is legal). |
 | AC26 | Given `about: KB-000001` on a raw-source document (case a), `status: current` on a chat document (case b), and `derived_from: [RAW-000001]` on a governance document (case c), then each yields one `FM1_KEY_FORBIDDEN` error naming the key. |
-| AC27 | Given an `index.md` carrying `id: KB-000009`, then `FM1_KEY_FORBIDDEN` naming `'id'` (index documents are path-addressed) — and no `ID_*` finding anchors to it. |
+| AC27 | Given an `index.md` (case a) and root `log.md` (case b) carrying `id: KB-000009`, then each produces `FM1_KEY_FORBIDDEN` naming `'id'` (index and operational documents are path-addressed) — and no `ID_*` finding anchors to either. |
 | AC28 | Given a synthetic and a raw document each carrying an unknown key `custom_field: x`, then **no** finding fires for it (FM2: extension keys are preserved and never flagged). |
 | AC29 | Given a synthetic document with a three-sentence `description` (case a) and an `index.md` with a three-sentence `description` (case b), then each yields one `FM1_DESCRIPTION_LONG` **warning**; a two-sentence description (case c) yields nothing (§4.1 heuristic). |
 | AC30 | Given config `types: ["spec"]` and a synthetic document of `type: retro`, then one `TYPE_UNDECLARED` warning naming `retro`; a `type: spec` document (case b) yields nothing. |

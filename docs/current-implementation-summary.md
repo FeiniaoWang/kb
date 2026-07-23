@@ -18,7 +18,7 @@ The current implementation is a strong foundation for adding read-only query and
 The current verification suite passes:
 
 ```text
-692 passed in 12.20s (`uv run pytest -q`)
+698 passed in 18.29s (`uv run pytest -q`)
 ```
 
 The status refresh commit leaves two pre-existing untracked documentation files in the worktree; they are unrelated and were not modified.
@@ -27,7 +27,7 @@ The status refresh commit leaves two pre-existing untracked documentation files 
 |---|---|
 | `kb init` | Fully implemented against AC1–AC30 |
 | `kb create` | Fully implemented against AC1–AC52 |
-| `kb validate` | Fully implemented against AC1–AC74 |
+| `kb validate` | Fully implemented against AC1–AC82 |
 | `kb ingest` | Fully implemented against AC1–AC50 |
 | `kb revise` | Fully implemented against `kb-revise.md` AC01–AC43 |
 | Query commands | Designed, not implemented |
@@ -63,7 +63,7 @@ flowchart TD
 - One command module per command: parses Typer arguments, builds a Pydantic request, calls the core function, translates failures into exit codes, and renders the result.
 - `render.py`: centralized plain-text, JSON, and error rendering.
 
-The command modules are genuinely thin. They contain little domain logic beyond stdin handling for validation and warning routing.
+The command modules are genuinely thin. They contain little domain logic beyond CLI-owned external input acquisition, validation stdin handling, and warning routing.
 
 ### Core layer
 
@@ -76,11 +76,13 @@ The command modules are genuinely thin. They contain little domain logic beyond 
 - `indexing.py`: index rendering and directory-list regeneration.
 - `safeio.py`: symlink-resistant and identity-checked file mutation.
 - `housekeeping.py`: scaffold constants, initialization, timestamps, and log writing.
-- `ingest.py`: input adapters and raw-document creation.
+- `ingest.py`: deterministic raw-document creation from explicit adapter payloads.
 - `create.py`: synthetic-document creation and supersession.
+- `revise.py`: prepared synthetic revision, reference identity binding, and execution.
+- `write_pipeline.py`: shared scan/config/write preparation for create, ingest, and revise.
 - `validate.py`: all mechanical integrity rules and graph-cycle detection.
 
-The core contains no Typer calls, printing, or `sys.exit`, so the important CLI/core boundary is respected. It is not “pure” in the functional sense: core modules perform filesystem I/O, read stdin, and—in the clipboard adapter—run subprocesses.
+The core contains no Typer calls, printing, `sys.exit`, process-global standard-stream access, or subprocess launching, so the important CLI/core boundary is respected. It is not “pure” in the functional sense because core modules perform KB filesystem I/O. External files, stdin, and clipboard acquisition are CLI-owned adapters that pass explicit bytes and provenance into core workflows.
 
 ## Implemented command behavior
 
@@ -147,14 +149,14 @@ The mutable-file primitives in `core/safeio.py` protect against symlink substitu
 5. Filter findings by their anchoring path.
 6. Apply error, warning, and strict-mode exit rules.
 
-It implements 20 stable finding codes covering:
+It enumerates the stable finding-code source of truth covering:
 
 - Unparseable frontmatter and missing `type`.
 - Type and location agreement.
 - Required fields, field shapes, and forbidden keys.
 - Long descriptions and undeclared vocabularies.
 - Canonical IDs, configured prefixes, and duplicate IDs.
-- Unresolved relationships.
+- Unresolved provenance, associative-link, and pending-upstream relationships.
 - Missing parents and chat-session parentage.
 - Derivation cycles.
 - Supersession and status coupling.
@@ -182,6 +184,7 @@ Classification derives exclusively from the frontmatter `type`, through `doc_cla
 - `SyntheticFrontmatter`: full synthetic write schema.
 - `GovernanceFrontmatter`: governance schema.
 - `IndexFrontmatter`: generated-index schema.
+- `OperationalFrontmatter`: root log schema (`type: log`).
 
 All typed frontmatter models allow unknown extension fields. One subtle distinction is that writer models can be stricter than universal validation: for example, `RawFrontmatter` requires a `title` because ingest always emits one, while `kb validate` does not consider raw `title` universally mandatory.
 
@@ -189,7 +192,7 @@ All typed frontmatter models allow unknown extension fields. One subtle distinct
 
 `Document` contains:
 
-- Literal ID, if present.
+- Canonical ID for an id-bearing raw, synthetic, or governance class; otherwise `None`.
 - KB-relative path.
 - Derived document class.
 - Generic ordered frontmatter.
@@ -198,8 +201,8 @@ All typed frontmatter models allow unknown extension fields. One subtle distinct
 `KB` and `ScannedMarkdown` live in `core/scan.py`:
 
 - `KB.files`: every discovered Markdown file, including malformed and operational files.
-- `KB.documents`: classifiable non-operational documents.
-- `KB.by_id`: in-memory ID lookup.
+- `KB.documents`: every classifiable document, including index and operational documents.
+- `KB.by_id`: in-memory lookup containing only canonical identities from id-bearing classes.
 - `KB.malformed`: paths and parse or classification errors.
 - `KB.root`: resolved root.
 
@@ -212,7 +215,7 @@ This dual representation is important: query commands can operate on valid docum
 `Config` models `kb-config.json`:
 
 - Schema version.
-- Type and tag vocabularies.
+- Type, tag, and associative `link_types` vocabularies.
 - Per-class ID prefixes.
 - Propagation-safe categories.
 
@@ -264,22 +267,18 @@ The strongest reusable foundations are:
 
 There are, however, several emerging pressure points:
 
-1. `create.py` imports `slug()` from `ingest.py`. Naming should be a neutral shared utility, not owned by ingest.
-2. Create and ingest repeat the same root/config/scan/malformed/allocation/index/log workflow, but their safety and feature completeness have diverged. Shared destination planning, naming, and write-preflight utilities would reduce this drift.
-3. `validate.py` is already about 940 lines. It is internally decomposed, but future rule growth would benefit from rule-family modules or a declarative schema-policy layer.
-4. Schema information exists both in Pydantic models and validation tables. This duplication is currently necessary for exhaustive, non-cascading findings, but it creates drift risk.
-5. `housekeeping.py` combines scaffold templates, initialization, timestamps, and logging. Adding public `kb index` and `kb log` commands will likely justify splitting scaffold and log responsibilities.
-6. Core ingest directly reads stdin and invokes clipboard subprocesses. Dependency-injected acquisition adapters would make the domain workflow easier to test and reuse.
-7. `render.py` imports every command result type. This is manageable now but makes every new command modify a central module.
-8. Documentation status is unreliable: `README.md` is effectively empty, plans use unchecked task lists, and `HANDOVER.md` is stale. The source, tests, and Git history are currently more trustworthy than the status prose.
+1. `validate.py` is already large. It is internally decomposed, but future rule growth would benefit from rule-family modules or a declarative schema-policy layer.
+2. Schema information exists both in Pydantic models and validation tables. This duplication is currently necessary for exhaustive, non-cascading findings, but it creates drift risk.
+3. `housekeeping.py` combines scaffold templates, initialization, timestamps, and logging. Adding public `kb index` and `kb log` commands will likely justify splitting scaffold and log responsibilities.
+4. `render.py` imports every command result type. This is manageable now but makes every new command modify a central module.
 
 ## How much trajectory flexibility remains?
 
-A great deal. This is still early: there are only four public commands, and the repository rules explicitly leave the internal structure of `core/` and `cli/` flexible.
+A great deal. This is still early: there are five public commands, and the repository rules explicitly leave the internal structure of `core/` and `cli/` flexible.
 
 Low-risk additions include:
 
-- `show`, `frontmatter`, `filter`, and `resolve`.
+- `show` (including its frontmatter/path projections) and `filter`.
 - Basic search using lazy bodies.
 - Parent and child graph queries using `KB.by_id`.
 - Standalone log append.
@@ -290,8 +289,7 @@ Medium-risk additions include:
 - `kb index --check`.
 - `kb links --transitive` and `--depth`.
 - `kb mv`.
-- A proper revision or mutation command.
-- Transaction planning shared by write commands.
+- Additional mutation commands built on the shared write pipeline.
 
 Trajectory-changing decisions include:
 
