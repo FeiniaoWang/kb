@@ -4,6 +4,7 @@ from typing import Protocol
 from kb.core.create import CreateResult
 from kb.core.housekeeping import InitFailure, InitResult
 from kb.core.ingest import IngestResult
+from kb.core.revise import ReviseResult
 from kb.core.validate import ValidateResult
 
 
@@ -75,6 +76,25 @@ def render_create_json(result: CreateResult) -> str:
             "superseded": result.superseded,
             "created": sorted(result.created),
             "updated": sorted(result.updated),
+        },
+        ensure_ascii=False,
+    )
+
+
+def render_revise_text(result: ReviseResult) -> str:
+    lines = [f"updated  {path}" for path in sorted(result.updated)]
+    lines.append(f"revised {result.id} as {result.path}")
+    return "\n".join(lines)
+
+
+def render_revise_json(result: ReviseResult) -> str:
+    return json.dumps(
+        {
+            "ok": True,
+            "id": result.id,
+            "path": result.path,
+            "updated": sorted(result.updated),
+            "warnings": result.warnings,
         },
         ensure_ascii=False,
     )

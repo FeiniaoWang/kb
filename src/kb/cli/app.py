@@ -3,6 +3,7 @@ import typer
 from kb.cli.create import CREATE_DESCRIPTION, CREATE_EXAMPLES, create_command
 from kb.cli.ingest import INGEST_DESCRIPTION, INGEST_EXAMPLES, ingest_command
 from kb.cli.init import INIT_DESCRIPTION, INIT_EXAMPLES, init_command
+from kb.cli.revise import REVISE_DESCRIPTION, REVISE_EXAMPLES, revise_command
 from kb.cli.validate import VALIDATE_DESCRIPTION, VALIDATE_EXAMPLES, validate_command
 
 
@@ -31,6 +32,12 @@ app.command(
     help=CREATE_DESCRIPTION.replace("\n\n", "\n\n\b\n", 1),
     epilog=CREATE_EXAMPLES,
 )(create_command)
+
+app.command(
+    name="revise",
+    help=REVISE_DESCRIPTION.replace("\n\n", "\n\n\b\n", 1),
+    epilog=REVISE_EXAMPLES,
+)(revise_command)
 
 app.command(
     name="validate",
