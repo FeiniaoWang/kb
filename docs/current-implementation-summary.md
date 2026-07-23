@@ -15,13 +15,13 @@ The current implementation is a strong foundation for adding read-only query and
 
 ## What is actually implemented
 
-The complete current test suite passes:
+The current verification suite passes:
 
 ```text
-276 passed in 2.45s
+692 passed in 12.20s (`uv run pytest -q`)
 ```
 
-The worktree was clean when this summary was prepared.
+The status refresh commit leaves two pre-existing untracked documentation files in the worktree; they are unrelated and were not modified.
 
 | Command | Current status |
 |---|---|
@@ -91,7 +91,7 @@ The core contains no Typer calls, printing, or `sys.exit`, so the important CLI/
 - Resolves or creates the target root.
 - Builds the fixed twelve-file scaffold.
 - Creates eight CLI-owned `index.md` files.
-- Creates two protected governance documents.
+- Creates three protected governance documents: `charter.md`, `conventions.md`, and the human-readable `kb-config.md` reference.
 - Creates `kb-config.json` and append-only `log.md`.
 - Is safely repeatable.
 - With `--force`, restores only CLI-owned config and index files.
@@ -170,7 +170,7 @@ The main shared models are in `core/model.py`.
 
 ### Classification
 
-- `DocClass`: `RAW`, `SYNTHETIC`, `GOVERNANCE`, `INDEX`.
+- `DocClass`: `RAW`, `SYNTHETIC`, `GOVERNANCE`, `INDEX`, `OPERATIONAL`.
 - `RawClass`: `SOURCE`, `CHAT`, `FEEDBACK`.
 
 Classification derives exclusively from the frontmatter `type`, through `doc_class_from_type()`. Paths are validated against classification but never determine it.
