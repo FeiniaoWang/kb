@@ -3,31 +3,24 @@
 **Working title:** Purpose-Driven Personal AI
 **Document type:** Product Vision
 **Status:** Early concept / foundation for product discovery
-**Version:** v2 — three-layer knowledge model
+**Version:** v4 — explicit version history and simplified storage
 **Original:** August 28, 2026
-**Revised:** September 1, 2026
+**Revised:** September 2, 2026
 
 ---
 
-## Changelog — what changed in v2
+## Changelog — what changed in v4
 
-The core thesis is unchanged: purpose, not volume, is the organizing principle for a personal AI's memory. The architecture around that thesis has been reworked.
+The core thesis is unchanged: purpose, not volume, is the organizing principle. v4 simplifies persistence and history management while making version semantics explicit for both claims and maintained outcomes.
 
 | Change | Section |
 |---|---|
-| Two-layer model replaced with **three layers**: raw / knowledge / outcome | §6 |
-| Outcomes reframed as a **view layer** — materialized or ad hoc — rather than a third store | §6.1 |
-| Knowledge layer made **subject-oriented**, with inclusion kept **demand-driven** | §6.2 |
-| **Ownership separated from consumption**: one owning topic per claim, many-to-many outcome binding | §6.3 |
-| New: **layer contracts** — outcomes bind to named facts, claims are superseded not overwritten | §7 |
-| New: **propagation machinery** — lineage, materiality, write-back, gap logging, escape hatch | §8 |
-| Data-engineering analogy expanded into an explicit **borrow / invert / do-not-borrow** analysis | §9 |
-| New: **storage substrate** — files for content, Git for history, database for relationships | §10 |
-| New: human review **tiered by blast radius** rather than applied uniformly | §13 |
-| New: **bootstrap from an outcome**, not from a goal declaration | §24 |
-| New: **metrics** that would falsify the central bet | §25 |
-| New: decisions that keep the **multi-writer** path open | §29 |
-| New: **open design questions** | §36 |
+| Removed **Git** as a required system dependency; durable history and causality are explicit database responsibilities | §10, §21, §29 |
+| Removed the requirement that the database be reconstructable from files/object storage; the database is now a **first-class durable store** that is backed up and migrated normally | §10 |
+| Replaced the physical "files + Git + database" substrate with **object storage + database**, keeping the content store abstract so local files, S3, Azure Blob, GCS, or equivalent storage can be used | §10, §17 |
+| Made outcome versioning explicit: **maintained outcomes create immutable versions and have one current version**; snapshot outcomes remain fixed | §6, §7, §8, §21–§23 |
+| Added **Change Record** as a first-class history/audit concept carrying what changed, why, when, who/what made the change, the trigger, and affected versions | §10.2, §21 |
+| Preserved full historical traceability without Git: old claim/outcome versions remain stored and the database records supersession, lineage, approvals, and causality | §7, §10, §13, §29 |
 
 ---
 
@@ -41,6 +34,8 @@ The long-term vision is a **human–AI working relationship** in which:
 - Humans remain responsible for intent, judgment, priorities, values, and important decisions.
 - The AI continuously understands enough of the human's goals, work, experiences, and context to act as an effective extension of that person.
 - Keeping the AI informed requires relatively little effort from the human.
+
+The knowledge base underneath that relationship should be **consumer-agnostic**. It is shared working knowledge that can be used by a human, one or more AI agents, another software system, or any combination of them. The knowledge base should maintain what is useful and trustworthy without coupling itself to who ultimately consumes an outcome.
 
 The product should feel less like repeatedly giving instructions to a generic chatbot and more like working with a trusted collaborator that understands **what you are trying to accomplish, what has happened so far, what matters, and what it should do next**.
 
@@ -207,10 +202,10 @@ Earlier versions of this vision described two layers: a raw information lake and
 
 That model conflates two things that behave differently:
 
-- **what I know about a subject**, and
-- **what I need in order to produce a specific deliverable**.
+- **what is currently known about a subject**, and
+- **what needs to be assembled for a particular outcome**.
 
-These have different lifetimes, different granularity, and different correctness criteria. Knowledge about a subject should outlive any particular use of it. A deliverable is disposable and is judged by whether it is currently correct and currently useful.
+These have different lifetimes, granularity, and correctness criteria. Knowledge about a subject should outlive any one use of it. An outcome is a purpose-specific view over that knowledge.
 
 The model is therefore split into three layers.
 
@@ -240,7 +235,7 @@ Possible inputs include:
 - decisions;
 - imported application data;
 - automatically captured information;
-- **human corrections made anywhere else in the system**.
+- **corrections, decisions, and evidence produced anywhere else in the human–AI system**.
 
 The philosophy is:
 
@@ -248,7 +243,7 @@ The philosophy is:
 
 Some information in this layer will never become useful. That is acceptable.
 
-Immutability is not a stylistic preference. It is what makes the rest of the system improvable: when extraction logic gets better, knowledge can be rebuilt from sources that were never overwritten.
+Immutability is not a stylistic preference. It preserves the original evidence so extraction and reconciliation logic can improve later without losing or rewriting what actually entered the system.
 
 ---
 
@@ -262,82 +257,109 @@ The knowledge layer answers: *what is currently true, and currently believed, ab
 
 It is deliberately **not** a summary of the raw layer. It is a continuously maintained current-best-understanding, in which new information can confirm, update, supersede, contradict, or add nuance to what is already held.
 
+The knowledge layer is a **shared substrate**. It does not need to know whether the next use will be by a human, an AI agent, another application, or a human–AI team. Its responsibility is to maintain reusable knowledge and provenance.
+
 ---
 
 ### Layer 3 — Outcomes
 
-Knowledge is further processed to serve a **very specific outcome**.
+Knowledge is assembled to serve a **very specific outcome**.
 
-An outcome is a deliverable, an answer, a decision package, a monitored state, a draft, a plan. It is the thing the human actually reads, ships, or acts on.
+An outcome can be a deliverable, answer, decision package, monitored state, draft, plan, report, machine-readable context package, or other purpose-specific view. The eventual consumer may be a human, an AI agent, another system, or some combination of them.
 
-Outcomes come in two forms, distinguished only by whether they are stored:
+**Every outcome is persisted, and every materialized outcome version is immutable.** Outcomes differ only in whether later signals can create a newer version:
 
-- **Long-term outcomes** exist as a node or file in the knowledge base and are maintained as new information arrives.
-- **One-off outcomes** are produced on demand through a chat interface and are not automatically maintained.
+- **Snapshot outcome** — one stored immutable version, with its build manifest; later signals do not refresh it.
+- **Maintained outcome** — a logical outcome with an immutable version history. When a bound claim changes materially, regeneration creates a **new outcome version** and that version becomes current; older versions remain preserved.
 
-A one-off outcome can be **promoted** to a long-term outcome at any time.
+This means an ad-hoc request is not disposable. It becomes a durable snapshot of what was needed and what the system produced at that moment. Maintained outcomes additionally preserve how that result evolved over time.
 
 ---
 
-### 6.1 Outcomes are views, not a third store
+### 6.1 Outcomes are derived views, not canonical knowledge
 
 The cleanest way to understand the model is:
 
-> **Two storage layers and one view layer.**
+> **Two canonical storage layers and one derived view layer.**
 
-Raw and Knowledge are storage. Outcomes are views over Knowledge. Some views are materialized; some are computed on demand.
+Raw and Knowledge are canonical stores. Outcomes are derived views over Knowledge. All outcome versions are persisted as artifacts, but only maintained outcomes participate in incremental refresh. A maintained logical outcome may therefore have many immutable materialized versions, with one version designated as current.
 
-This framing does useful work:
+This removes the need for a promotion lifecycle:
 
-- The two propagation modes stop being two different kinds of thing. A long-term outcome is a **materialized view with incremental maintenance**. A one-off outcome is an **ad hoc query**.
-- "Promoting a one-off to long-term" becomes a one-line operation — materialize this view — instead of a migration path that has to be separately designed.
-- Materializing an outcome has a clear technical justification beyond convenience: it is **pre-computed context-window packing** for a reasoner that has a limited budget.
+- A snapshot and a maintained outcome are produced through the same mechanism.
+- Both bind to claims and carry manifests.
+- The only difference is the **maintenance policy**.
+- Changing a snapshot into a maintained outcome means changing its maintenance mode; future refreshes create new versions rather than rewriting the original materialization.
+
+Persisting outcome views also provides **pre-computed context-window packing** for reasoners with limited context budgets.
 
 ---
 
-### 6.2 Subject-oriented storage, purpose-driven filtering
+### 6.2 Subject-oriented storage, demand-driven inclusion
 
-Organizing the knowledge layer by topic rather than by goal is a deliberate change from earlier drafts, and the reason should be stated explicitly.
+Organizing the knowledge layer by topic rather than by goal is deliberate.
 
-**Why topic, not goal:** goal-scoped knowledge does not survive goal completion. If everything learned is scoped to "launch the product," it dies when the product launches, taking with it everything that was reusable. Subject-oriented knowledge outlives the outcomes it served. This is the same reason a data warehouse conforms dimensions at the subject level and puts purpose in the mart.
+**Why topic, not goal:** goal-scoped knowledge does not survive goal completion. Subject-oriented knowledge outlives the outcomes it served and can be reused by later goals.
 
-**What that costs:** the filter gets blunt. "Is this relevant to my goal?" is a sharp test. "Is this relevant to the topic of my finances?" is not — almost everything is. Left alone, the knowledge layer drifts back into being a data lake one level up.
+**What that costs:** topic relevance is broad. Left alone, the knowledge layer could drift into being a second data lake.
 
-**The fix:** make inclusion **demand-driven**. A claim earns a place in the knowledge layer because at least one outcome — existing, or plausibly anticipated — needs it.
+**The fix:** make inclusion strictly **demand-driven**. A claim earns a place in the active knowledge layer because at least one stored outcome actually depends on it.
 
 - **Topic decides where a claim lives.**
-- **The outcome set decides whether it lives at all.**
+- **Outcomes demonstrate why the claim needs to exist.**
 
-Purpose is therefore not a layer. It is the parameter that configures both transforms: the raw→knowledge extraction filter, and the knowledge→outcome specification.
+A stable active claim with no outcome dependency is therefore a contradiction in the model. When a new outcome requires knowledge that is missing, the system may consult raw sources, derive the needed claim, persist the claim and its lineage, and bind the new outcome to it as part of the same outcome-building operation.
 
-> **Capture can be broad. Retention must be demand-driven. Assembly must be purpose-driven.**
+Purpose remains the parameter that shapes both transforms: it determines what must be learned from raw information for the current need, and what subset of knowledge must be assembled into the outcome.
+
+> **Capture can be broad. Retention must be demonstrated by use. Assembly must be purpose-driven.**
 
 ---
 
 ### 6.3 Structural relationships
 
-The layers form one-to-many relationships, but ownership and consumption must be separated.
+Ownership and outcome dependency must be separated.
 
-**Ownership is one-to-many and strict.**
+**Ownership is strict.**
 
 - One raw layer supports many topics in the knowledge layer.
 - Every knowledge claim has **exactly one owning topic**.
 
-Single ownership means reconciliation has exactly one home. Without it, the same claim exists in three topics, drifts independently, and there is no answer to which copy is current.
+Single ownership means reconciliation has exactly one home. Without it, the same claim can drift independently across topics and there is no authoritative current version.
 
-**Consumption is many-to-many and loose.**
+**Outcome dependency is many-to-many.**
 
-- An outcome may subscribe to claims from **any number of topics**.
+- One outcome may bind to claims from any number of topics.
+- One claim may support any number of outcomes.
 
-Real outcomes cut across subjects. Preparing for a board review on Project X needs project knowledge, financial knowledge, and knowledge about the people in the room. Forcing an outcome to live under a single parent topic leads to either duplicating knowledge across topics — which guarantees divergence — or widening topics until they mean nothing.
+Real outcomes cut across subjects. A board-review brief may need project knowledge, financial knowledge, and knowledge about the people involved. The knowledge layer does not care whether that brief will be consumed by a person or by an agent; it only records the facts the outcome depends on.
 
-In database terms: **topic is a partition key; outcome subscriptions are foreign keys.**
+In database terms: **topic is the ownership/partition boundary; outcome bindings are dependency edges.**
 
 ---
 
+### 6.4 Support count: demonstrated reuse without promotion
+
+Every named claim has a derived **support count**:
+
+> **support_count = number of distinct stored outcomes that depend on the claim**
+
+Snapshot and maintained outcomes contribute equally. The count is derived from persisted outcome bindings, so it can be recalculated when needed or cached as database metadata rather than treated as an independent fact.
+
+Support count is useful because it measures demonstrated reuse without introducing candidate claims, promotion thresholds, or separate claim lifecycles.
+
+However, support count must **not** become the primary retrieval rule. A popular claim can still be irrelevant to a new problem.
+
+The ordering principle is:
+
+1. **Relevance to the desired outcome first.**
+2. **Support count as a secondary priority signal** among otherwise relevant claims.
+
+A higher support count means a claim has proven useful across more outcomes and is therefore worth considering earlier, not that it is automatically relevant.
+
 ## 7. Layer Contracts
 
-If outcomes re-read whole topic files, then any change to how knowledge is represented invalidates every outcome downstream. The seam between Layer 2 and Layer 3 needs a contract.
+If outcomes re-read whole topic representations, then any change to how knowledge is represented invalidates everything downstream. The seam between Layer 2 and Layer 3 needs a contract.
 
 ### 7.1 Facts are the interface
 
@@ -347,15 +369,15 @@ An outcome does not say "read the Project X topic." It says "I depend on facts `
 
 This buys three things:
 
-1. **Targeted invalidation.** When a fact changes, exactly the outcomes bound to that fact become stale. Everything else is untouched. No full recomputation.
-2. **Computable blast radius.** The number of outcomes bound to a fact is a number the system knows, which is what makes review tiering possible (§13).
-3. **Representation freedom.** How a topic file is internally organized can change without breaking consumers, as long as the named facts still resolve.
+1. **Targeted invalidation.** When a fact changes, exactly the maintained outcomes bound to that fact can become stale. Snapshot outcomes remain unchanged historical artifacts.
+2. **Computable blast radius.** The number of maintained outcomes affected by a fact change is known, which makes review tiering possible (§13).
+3. **Representation freedom.** How a topic is internally represented can change without breaking downstream views, as long as the named facts still resolve.
 
-This is the same pattern as a data contract between a producing and consuming team, applied to knowledge rather than to tables.
+This is the same pattern as a data contract between a producer and downstream dependency, applied to knowledge rather than tables.
 
-### 7.2 Claims are superseded, never overwritten
+### 7.2 Claim versions are superseded, never overwritten
 
-Every claim carries:
+A named logical claim may have multiple immutable versions. The database designates the current version and preserves the supersession chain. Each claim version records:
 
 - the evidence it derives from;
 - when it became current;
@@ -364,23 +386,29 @@ Every claim carries:
 
 This is a slowly changing dimension in the classical sense, and the decades of practice around that pattern apply directly.
 
-The property it buys is the one that matters most for trust: **"why did this outcome change?" is answerable**, and any historical outcome can be reproduced exactly from the fact versions it was built from.
+The property it buys is the one that matters most for trust: **"why did this outcome change?" is answerable**, and any historical outcome can be reproduced exactly from the claim versions it was built from.
 
-### 7.3 Outcomes carry a build manifest
+### 7.3 Outcomes are versioned and every version carries a build manifest
 
-A materialized outcome records the specific fact versions it was assembled from. Regeneration is then a diff between two manifests, not a mystery.
+Every materialized outcome version — snapshot or maintained — records the specific claim versions it was assembled from.
 
----
+A **snapshot outcome** normally has one immutable version. Its manifest makes the historical result reproducible and explains what the system knew at that moment.
+
+A **maintained outcome** is a logical outcome with a version history. Each material regeneration creates a new immutable outcome version with its own build manifest. The database records which version is current and how each version supersedes the previous one. Older versions are never overwritten.
+
+This makes regeneration a diff between two explicit builds rather than a mystery and makes questions such as *what did this outcome say before, what changed, and why?* directly answerable.
+
+Because bindings are persisted in the database, claim support counts can be calculated from them without introducing a second independent source of truth.
 
 ## 8. Propagation and Incremental Maintenance
 
-Two paths carry information from raw data into outcomes.
+Both outcome modes use the same knowledge path.
 
-**Path A — maintained outcomes.** New raw information updates the knowledge layer; changed facts mark bound outcomes stale; stale outcomes regenerate.
+**Path A — maintained outcome.** Assemble from claims, persist an immutable outcome version and manifest, designate it current, then monitor its bound claims. New raw information may update those claims; material changes can mark the outcome stale and trigger regeneration into a new immutable version.
 
-**Path B — ad hoc outcomes.** The user asks a question through chat. The answer is assembled from the knowledge layer at that moment and is not maintained.
+**Path B — snapshot outcome.** Assemble from claims and persist one immutable outcome version and manifest, but do not refresh it when later signals arrive.
 
-The dataflow is easy to describe. The machinery underneath it is where this becomes hard.
+The difference is therefore not how an outcome obtains knowledge. The difference is only whether it participates in future maintenance.
 
 ---
 
@@ -388,63 +416,75 @@ The dataflow is easy to describe. The machinery underneath it is where this beco
 
 The system must record which raw items support which claim, and which claims feed which outcome.
 
-Without lineage, every new input forces recomputation of everything downstream. That is expensive, and worse, it is **nondeterministic**: re-derivation drifts, so an unchanged input produces a changed outcome, and the user stops trusting the system.
+Without lineage, every new input forces broad recomputation. That is expensive, and worse, it is **nondeterministic**: re-derivation can drift, so an unchanged source may produce a changed result and trust erodes.
 
 ---
 
 ### 8.2 Materiality, not immediate recompute
 
-Not every knowledge update should trigger an outcome rewrite.
+Not every claim update should trigger a new maintained-outcome version.
 
-The sequence should be: mark the outcome stale → let something cheap decide whether the change is **material** to that outcome → regenerate only then.
+The sequence should be: claim changes → find bound **maintained** outcomes → mark potentially stale → let something cheap decide whether the change is **material** to each outcome → generate a new version only when needed.
 
-Regeneration should surface as a **diff with the triggering evidence attached**, not a silent overwrite. If a long-term outcome quietly rewrites itself because a trivial fact moved, the user loses confidence in every outcome the system maintains.
+Regeneration should create a **new immutable outcome version** and surface a diff with the triggering evidence attached. The previous current version remains preserved in history.
 
-Whether regeneration is automatic or gated on review is a **per-outcome property**, not a system-wide policy.
+Snapshot outcomes never enter this maintenance path. Their single stored version remains exactly as produced, even when the underlying knowledge later changes.
+
+Whether regeneration is automatic or gated on review remains a **per-outcome property**, not a system-wide policy.
 
 ---
 
 ### 8.3 The reverse edge
 
-The most valuable signal the system will ever receive is **the human editing an outcome**.
+The most valuable learning signal is an authoritative correction, decision, or real-world result produced at the outcome boundary — often from a human, but potentially supplied through another trusted participant in the system.
 
-If that correction lives only in the outcome, the same error regenerates next time.
+If a correction lives only in the outcome, the same error can recur next time.
 
 Corrections must therefore flow **upward**:
 
-1. The correction lands in the raw layer as a source — it is real information about the world.
+1. The correction lands in the raw layer as a source — it is new evidence about the world or about the user's intent.
 2. It updates or supersedes the claim in the knowledge layer that produced the error.
-3. Every other outcome bound to that claim becomes stale.
+3. Bound maintained outcomes are reconsidered; snapshot outcomes remain historical records.
 
-An architecture with only downward arrows cannot learn from outcomes, no matter what the loop description says.
-
----
-
-### 8.4 One-off outcomes are demand signals
-
-A chat question is not disposable. It is the highest-quality available evidence about what the knowledge layer should contain.
-
-Even when the answer is never materialized:
-
-- **log the query**;
-- if answering it required dropping to the raw layer because the knowledge layer lacked what was needed, **record that as a gap**.
-
-Repeated similar one-offs should **automatically trigger a promotion suggestion**, rather than waiting for the user to think of it.
+An architecture with only downward arrows cannot learn from outcomes.
 
 ---
 
-### 8.5 The escape hatch, and why it must exist
+### 8.4 Every outcome is a demand signal
 
-Raw→knowledge is lossy. Knowledge→outcome is lossy again.
+Because every outcome is persisted, the system has a durable record of what knowledge was actually needed.
 
-Double compression means an outcome will eventually need something the extractor discarded, even though it is sitting intact in the raw layer.
+Each outcome contributes bindings to the claims that supported it. Those bindings naturally update each claim's **support count**.
 
-The knowledge layer must therefore not be a hard wall:
+This replaces promotion logic with something simpler:
 
-- an outcome may read raw sources **through lineage** when the knowledge layer is insufficient;
-- every use of that escape hatch is logged as a **knowledge gap**.
+- there is only one kind of claim;
+- snapshot and maintained outcomes both demonstrate demand;
+- reuse emerges from the binding graph rather than a hard threshold;
+- frequently reused claims become easier to prioritize for future relevant outcomes.
 
-The escape hatch prevents dead ends. The gap log is how the knowledge layer learns what it should have kept.
+No global promotion threshold is required.
+
+---
+
+### 8.5 The escape hatch becomes a gap-filling path
+
+Raw→knowledge is lossy. The current knowledge layer will eventually be insufficient for some desired outcome.
+
+The system therefore needs an escape hatch to raw information, but that escape hatch should preserve the rule that **outcomes ultimately depend on claims**.
+
+When outcome construction cannot find enough relevant knowledge:
+
+1. search or inspect raw sources;
+2. derive the missing information;
+3. create or reconcile normal claims in the knowledge layer;
+4. record source→claim lineage;
+5. bind the outcome to those claims;
+6. persist the outcome and its manifest.
+
+This is a **knowledge gap resolution path**, not a parallel path that bypasses the knowledge layer forever.
+
+The result is important: snapshot and maintained outcomes use the same internal mechanism. New problems can enrich the shared knowledge base even when the resulting outcome will never be maintained.
 
 ---
 
@@ -454,9 +494,7 @@ In a deterministic pipeline, idempotency comes from transform purity: the same i
 
 That guarantee does not exist here.
 
-Idempotency must be enforced at the **storage layer** instead — content-addressed keys, so that the same source producing the same fact slot does not create a second competing claim.
-
----
+Idempotency must be enforced at the **storage layer** instead — content-addressed keys, stable claim slots, or equivalent controls so that the same source producing the same fact does not create a second competing current claim.
 
 ## 9. Relationship to Data Engineering
 
@@ -468,11 +506,11 @@ But the differences have to be **load-bearing**. A statement that "our data is u
 
 ### 9.1 Borrow directly
 
-**Immutable raw plus rebuildability.** Most AI memory systems treat memory as one mutable store, which means an improved extractor gives no retroactive benefit. Keeping raw immutable means knowledge can be rebuilt.
+**Immutable raw plus reprocessing optionality.** Most AI memory systems treat memory as one mutable store, which means an improved extractor can no longer inspect the original evidence. Keeping raw immutable preserves the option to revisit extraction or reconciliation later without making reprocessing a normal operating requirement.
 
 **Slowly changing dimensions.** The supersession requirement in §7.2 is exactly SCD Type 2.
 
-**Conformed dimensions as a shared entity registry.** People, organizations, and projects appear across many topics. Resolving them once, centrally, stops the same person existing as three entities in three topic files. The entity-resolution problem is identical.
+**Conformed dimensions as a shared entity registry.** People, organizations, and projects appear across many topics. Resolving them once, centrally, stops the same person existing as three entities in three topic representations. The entity-resolution problem is identical.
 
 **Data contracts.** §7.1 is a data contract applied to knowledge.
 
@@ -482,7 +520,7 @@ But the differences have to be **load-bearing**. A statement that "our data is u
 
 ### 9.2 Borrow, but invert
 
-**The ETL/ELT instinct.** In a data platform the pipeline is the asset and tables are derived, so "just re-run it" is always available. Here the transform costs money and produces a different answer each time. That inverts the relationship: **the derived knowledge artifact is an asset to preserve and version, not a cache to recompute**. Rebuilding the knowledge layer is a deliberate migration event with human review, closer to a schema change than a nightly job.
+**The ETL/ELT instinct.** In a data platform the pipeline is the asset and tables are derived, so "just re-run it" is always available. Here the transform costs money and can produce a different answer each time. That inverts the relationship: **the derived knowledge artifact is an asset to preserve and version, not a cache to recompute**. Large-scale reprocessing of knowledge is therefore a deliberate migration event with human review, closer to a schema change than a nightly job.
 
 **Data quality testing.** You cannot assert that an extracted claim is correct. You can assert **structural invariants**: every claim resolves to evidence; every evidence pointer is live; no two current claims occupy the same slot with contradictory values; every fact an outcome binds to exists. Correctness testing moves to sampling and human review — which is precisely what the AI-suggests / human-approves pattern is for.
 
@@ -502,7 +540,7 @@ But the differences have to be **load-bearing**. A statement that "our data is u
 
 ### 9.4 The differences that force design decisions
 
-**The consumer is a reasoner under a context budget, not a query engine.** A warehouse answers "can this question be answered." This system must answer "does the right subset fit." Selection and compression become first-class architectural concerns with no clean analogue in data engineering. This is the real justification for materializing outcomes.
+**One important downstream consumer is a reasoner under a context budget, not a query engine.** A warehouse answers "can this question be answered." When an outcome is assembled for an AI reasoner, the system must also answer "does the right subset fit." Selection and compression therefore become first-class architectural concerns. This is one justification for keeping compact, persisted outcome views rather than repeatedly reconstructing context from scratch; human and software consumers can use the same views without changing the knowledge model.
 
 **Truth is contested, not merely late-arriving.** In a warehouse, disagreement between sources is a data quality bug. Here, two sources can legitimately disagree and the user can change their mind. **Contradiction is a representable state**, not an error condition.
 
@@ -522,34 +560,47 @@ But the differences have to be **load-bearing**. A statement that "our data is u
 
 ---
 
-## 10. Storage Substrate
+## 10. Storage and History Substrate
 
-The system stores content in **files**, history in **Git**, and relationships in a **database**.
+The system uses two durable storage responsibilities:
 
-- **Files** hold knowledge content. Files support multiple formats and can sit on different storage infrastructure. They are portable and human-readable.
-- **Git** holds history. The change history is itself important knowledge-base information — it records not only what is believed but when belief changed.
-- **A database** connects files across layers into a usable knowledge base: file metadata, relationships between files, the list of core concepts each file is responsible for tracking, short summaries, vector embeddings, and whatever else makes retrieval work.
+- **Object storage** holds content: raw source objects, immutable claim-version content, immutable outcome-version content, and other large or format-specific artifacts. "Object storage" is an abstraction, not a commitment to one vendor or filesystem. An implementation may begin with local files and later use S3, Azure Blob, Google Cloud Storage, or an equivalent store without changing the knowledge model.
+- **A database** is a first-class durable system of record for metadata and relationships: logical object identities, version relationships, current-version pointers, source→claim lineage, claim→outcome bindings, topic ownership, authorship, timestamps, approvals, change history, support counts or caches, retrieval metadata, and other structured state.
 
-### 10.1 The rule that makes this work
+The object store and database are both canonical, but for different responsibilities. The design does **not** require the database to be reconstructable from object storage. Production reliability comes from normal database backup, restore, migration, replication, and disaster-recovery practices.
 
-> **The database must be fully rebuildable from files and Git history. Nothing lives only in the database.**
+Object-store metadata may be used for small infrastructure hints such as content type, schema version, object ID, or checksum, but it is not expected to carry the complete knowledge graph or audit history. Rich metadata and relationships belong in the database.
 
-This makes schema migration a drop-and-rebuild, makes index drift impossible to sustain, and keeps the portable artifact portable.
+### 10.1 Immutable content, durable structured state
 
-Two consequences follow:
+Historical content versions are preserved rather than overwritten:
 
-- **Embeddings** are rebuildable at cost, so they may live in the database alone.
-- **Human decisions and approvals** are not derivable from anything. They must land in files, which means **an approval is a commit, not a database row**.
+- raw sources are append-only;
+- claim updates create new claim versions and preserve superseded versions;
+- maintained-outcome refreshes create new outcome versions and preserve prior versions;
+- snapshot outcomes remain fixed as produced.
 
-### 10.2 Commits must carry causality
+The database records which claim and maintained-outcome versions are current. It also records validity and supersession relationships so the system can answer historical questions without relying on storage-system versioning semantics.
 
-If an AI update touches thirty files in one commit, the reason for the change is lost.
+This means the architecture does not depend on Git, S3 Versioning, or any specific blob-store history mechanism for domain history. Storage-provider versioning may still be enabled operationally, but the KB's history is represented explicitly in its own data model.
 
-Structured commit trailers linking a commit to its triggering raw source and to the decision made would give queryable causality for almost no effort. The database indexes those trailers.
+### 10.2 Change Records carry causality
 
-Git then provides time-travel for free. Files carry current state, Git carries history, and the database carries an index of that history — which is what makes questions like *what did I believe on this date* and *what changed since then* cheap to answer.
+Version history alone says **what** changed. Trust also requires knowing **why** it changed.
 
----
+The database therefore stores a first-class **Change Record** for meaningful KB mutations. A change record should capture enough information to explain the causal event, including:
+
+- what changed;
+- previous and new version references where applicable;
+- why the change was made;
+- the triggering source, correction, decision, or process;
+- who or what made or approved the change;
+- when it happened;
+- which claims, outcomes, topics, or other objects were affected.
+
+One change record may group multiple related version changes produced by the same causal event. For example, a new source may supersede one claim and cause three maintained outcomes to generate new versions; those mutations can share one change ID.
+
+This replaces the useful semantic role previously assigned to Git commits without making Git a technology dependency. The database can directly answer questions such as *what did I believe on this date?*, *what changed since then?*, and *why did this outcome change?* by combining version history, lineage, and change records.
 
 ## 11. The Product's Core Loop
 
@@ -694,36 +745,43 @@ The objective is to minimize the amount of repetitive cognitive labour required 
 
 ## 13. Human Review: Tier by Blast Radius
 
-The system should apply the pattern of **AI does the work, human reviews the important decisions** wherever it applies. That pattern is what substitutes for deterministic data quality gates.
+The system should apply the pattern of **AI does the work, human reviews the important decisions** wherever it applies. That pattern substitutes for deterministic data-quality gates where judgment is required.
 
 But applied uniformly, it fails.
 
-Review requests scale with input volume. At any real ingestion rate, the review queue becomes the new job — which is exactly the failure mode named in the principle *minimize synchronization cost*. A system that asks for approval on everything has not freed the human's time; it has changed the shape of the work.
+Review requests scale with input volume. At any real ingestion rate, the review queue becomes the new job — exactly the failure mode named in *minimize synchronization cost*.
 
-### 13.1 Tiering
+### 13.1 Reuse and blast radius are different numbers
 
-The lineage graph already computes blast radius, so this is a calculation rather than a judgment call.
+A claim's **support count** measures how many stored outcomes have used it. It is a reuse signal.
+
+A claim change's **blast radius** measures how many **maintained outcomes** may need reconsideration if that claim changes. Snapshot outcomes do not regenerate, so they contribute to support count but not to maintenance blast radius.
+
+Keeping those concepts separate prevents a heavily reused historical fact from automatically creating a large review burden.
+
+### 13.2 Tiering
 
 | Change | Handling |
 |---|---|
-| New claim nothing binds to yet | Auto-apply |
-| Change to a claim with small blast radius, reversible | Apply, flag for later review |
-| Change to a claim many outcomes bind to | Queue for approval before applying |
+| New claim introduced for a new outcome; narrow and reversible | Apply, optionally flag for later review |
+| Change to a claim with no maintained outcomes depending on it | Apply, preserve provenance; snapshots remain unchanged |
+| Change affecting a small number of maintained outcomes, reversible | Apply, flag for later review |
+| Change affecting many maintained outcomes | Queue for approval before applying |
 | Topic boundary creation or merge | Queue for approval |
-| Knowledge layer rebuild or schema change | Explicit migration, always reviewed |
+| Knowledge-layer bulk migration or schema change | Explicit migration, always reviewed |
 | Contradiction the system cannot resolve | Queue as a question, prioritized by value of information |
 
-### 13.2 Two distinct modes
+There should not normally be an active **new claim with zero outcome dependencies**. Claims are created because an outcome demonstrated the need for them (§6.2).
 
-**Approve before applying** and **applied, flagged for review** are different products.
+### 13.3 Two distinct modes
 
-Because Git makes almost everything reversible, the second mode is available far more often than instinct suggests, and it preserves flow. Reserve the first for changes that are hard to reverse or wide in blast radius.
+**Approve before applying** and **apply, then flag for review** are different modes.
 
-### 13.3 Batch, don't interrupt
+Because immutable versions and database change records make most KB changes traceable and reversible, the second mode is available far more often than instinct suggests and preserves flow. Reserve pre-approval for changes that are hard to reverse, uncertain in a consequential way, or wide in blast radius.
 
-Review should be a periodic pass over a queue, not an interruption of the user's work. The queue itself should be ordered by consequence, so that if the user only ever reads the top of it, they are still reading the decisions that matter.
+### 13.4 Batch, don't interrupt
 
----
+Review should be a periodic pass over a queue, not an interruption of the user's work. The queue itself should be ordered by consequence, so that if the user only reads the top of it, they still see the decisions that matter most.
 
 ## 14. A New Definition of a "Second Brain"
 
@@ -828,86 +886,90 @@ A fix applied only to an outcome will be undone the next time that outcome regen
 
 Human attention is spent on decisions that are wide or hard to reverse. Everything else is applied and made reversible.
 
+### 16.16 Knowledge is consumer-agnostic
+
+The knowledge layer maintains reusable claims and evidence. It should not encode whether the next consumer is a human, an AI agent, or another system.
+
+### 16.17 Outcome persistence and maintenance are separate concerns
+
+Every materialized outcome version is retained as a snapshot of work performed. Maintenance is an explicit policy layered on top: snapshot outcomes stay fixed; maintained outcomes create new immutable versions when refreshed, with one version designated current.
+
+### 16.18 Reuse should emerge from bindings, not promotion thresholds
+
+Claims have one lifecycle. Their support count is derived from how many stored outcomes depend on them; relevance remains the primary criterion for future use.
+
+### 16.19 History is explicit domain data
+
+Version relationships, causality, approvals, and change reasons belong to the KB's own data model. They should not depend on Git commits or storage-provider version history.
+
+### 16.20 Storage technology should remain replaceable
+
+The knowledge model should depend on an object-storage abstraction rather than a local filesystem or a specific cloud provider. Structured metadata and relationships belong in the durable database.
+
 ---
 
 ## 17. Conceptual Architecture
 
-```text
-                              HUMAN
-              Goals • Judgment • Decisions • Corrections
-                                │
-                                ▼
-                    ┌───────────────────────┐
-                    │  Goal / Purpose Model │
-                    └───────────┬───────────┘
-                                │ configures both transforms
-                                ▼
-┌──────────────────────────────────────────────────────────────────────┐
-│  LAYER 3 — OUTCOMES (views)                                          │
-│                                                                      │
-│  ┌────────────┐  ┌────────────┐  ┌────────────┐  ┌───────────────┐  │
-│  │ materialized│ │ materialized│ │ materialized│ │  ad hoc query │  │
-│  │  outcome A │  │  outcome B │  │  outcome C │  │  (not stored) │  │
-│  └────────────┘  └────────────┘  └────────────┘  └───────────────┘  │
-│         ▲  binds to named facts (many-to-many)         ▲             │
-└─────────┼──────────────────────────────────────────────┼─────────────┘
-          │                                              │
-┌─────────┴──────────────────────────────────────────────┼─────────────┐
-│  LAYER 2 — KNOWLEDGE (subject-oriented)                │             │
-│                                                        │             │
-│   Topic: Project X     Topic: Finances     Topic: People             │
-│   claims • decisions   constraints         entities • relations      │
-│                                                        │             │
-│   every claim: typed • named • versioned • evidence-linked           │
-│   every claim: exactly one owning topic                │             │
-└──────────────────────────────┬─────────────────────────┼─────────────┘
-                               ▲  extraction • reconciliation          │
-                               │  lossy • nondeterministic • cached    │
-┌──────────────────────────────┴─────────────────────────┴─────────────┐
-│  LAYER 1 — RAW INFORMATION LAKE (immutable, append-only)             │
-│                                                                      │
-│  Chats • Files • Meetings • Voice • Email • Notes • Screenshots      │
-│  Messages • Events • Observations • Human corrections                │
-└──────────────────────────────────────────────────────────────────────┘
+The architecture is intentionally simple at the highest level:
 
-   ◀── write-back:   outcome corrections re-enter as raw sources
-   ◀── escape hatch: an outcome may read raw via lineage; logs a gap
+```mermaid
+flowchart LR
+    R["1. Raw Information<br/>Everything captured<br/>Immutable • Append-only"]
+    K["2. Shared Knowledge Base<br/>Reusable subject-oriented claims<br/>Versioned • Evidence-linked"]
+    O["3. Outcomes<br/>Immutable materialized versions<br/>Maintained: one version is current"]
+    C["4. Humans • AI agents • Other systems"]
+    P["Purpose / Desired Outcome"]
+
+    R -->|"learn"| K
+    K -->|"assemble"| O
+    O -->|"use"| C
+    C -->|"corrections / new evidence"| R
+    P -.-> K
+    P -.-> O
 ```
 
-Substrate: **files** for content, **Git** for history, **database** for relationships and retrieval.
+The important separation is:
 
----
+- **Raw Information** preserves what entered the system.
+- **Shared Knowledge** maintains the current best understanding as reusable claims.
+- **Outcomes** package subsets of that knowledge for a specific purpose.
+- **Consumers are outside the knowledge architecture.** The same knowledge base can support humans, AI agents, and other software without changing its internal model.
+
+If the Knowledge layer cannot support a requested outcome, outcome construction temporarily drops to Raw, derives the missing claims, records lineage, and then completes the outcome through the normal Knowledge→Outcome path.
+
+Substrate: **object storage** for immutable/versioned content and a **durable database** for metadata, relationships, current-version pointers, lineage, change history, and retrieval. Git is not required. Support count is derived from persisted outcome bindings.
 
 ## 18. The Goal as a Function
 
-```text
-Raw Information
-      +
-Human Goal                    ← configures the extraction filter
-      +
-Existing Topic Knowledge
-      +
-AI Reasoning
-      ↓
-Current Subject Knowledge (claims: typed, versioned, evidence-linked)
-      +
-Outcome Specification         ← configures the assembly
-      ↓
-Outcome (materialized view, or ad hoc answer)
-      ↓
-Human Judgment + Real-World Result
-      ↓
-Correction re-enters as a raw source
-      ↓
-Updated Knowledge → stale outcomes → regeneration
+```mermaid
+flowchart TD
+    N["Desired outcome / purpose"]
+    K["Relevant existing claims"]
+    G{"Enough knowledge?"}
+    R["Raw information / new input"]
+    C["Create or reconcile missing claims"]
+    O["Persist outcome version + build manifest"]
+    D{"Maintenance mode"}
+    S["Snapshot<br/>kept, not refreshed"]
+    M["Maintained<br/>new version when material claims change"]
+
+    N --> K
+    K --> G
+    G -->|"Yes"| O
+    G -->|"No"| R
+    R --> C
+    C --> O
+    O --> D
+    D --> S
+    D --> M
 ```
 
-The goal is not metadata. It is a central input into almost every knowledge-management decision the system makes — but it enters at **two different points**, and they are not the same decision.
+Purpose is not metadata. It enters at two distinct decisions:
 
-- Entering the raw→knowledge transform, purpose decides **what is worth keeping**.
-- Entering the knowledge→outcome transform, purpose decides **what is worth assembling now**.
+- During gap filling and raw→knowledge extraction, purpose decides **what must be learned and retained because this outcome needs it**.
+- During knowledge→outcome assembly, purpose decides **which relevant claims should be included now**.
 
----
+After the outcome is stored, its bindings become durable evidence of demand. Those bindings contribute to claim support counts whether the outcome is a snapshot or maintained.
 
 ## 19. Example
 
@@ -1019,7 +1081,7 @@ The first implementation does not need a complex ontology, but several concepts 
 
 ### Goal
 
-The outcome the human wants to achieve.
+The purpose or result the human–AI system is trying to achieve.
 
 ### Source
 
@@ -1027,7 +1089,7 @@ Raw information entering the system.
 
 ### Knowledge Item
 
-A structured piece of goal-relevant understanding.
+A structured piece of purpose-relevant understanding.
 
 Possible types:
 
@@ -1047,7 +1109,7 @@ Possible types:
 
 ### Entity
 
-A meaningful person, organization, project, product, place, concept, or other object associated with the goal.
+A meaningful person, organization, project, product, place, concept, or other object relevant to one or more outcomes.
 
 ### Relationship
 
@@ -1059,37 +1121,64 @@ Source material supporting a knowledge item.
 
 ### State
 
-The system's current understanding of the goal and progress toward it.
+The system's current understanding of progress or conditions relevant to a purpose.
 
 ### Action
 
-Something the human or AI may need to do.
+Something a human, AI agent, or other system may need to do.
 
 ### Topic
 
-The subject that owns a set of knowledge claims. Emergent rather than pre-designed: the AI proposes boundaries, the human approves. Every claim belongs to exactly one topic.
+The subject that owns a set of knowledge claims. Emergent rather than pre-designed: AI may propose boundaries and humans can review consequential changes. Every active claim belongs to exactly one topic.
 
 ### Claim
 
-The unit of the knowledge layer. Typed, named, versioned, evidence-linked, and owned by one topic. Superseded rather than overwritten.
+A named logical unit of the knowledge layer, typed and owned by one topic. A claim may have multiple immutable versions, with one version designated current when the claim has a resolved current belief.
+
+A claim exists in the active knowledge layer because at least one stored outcome depends on it.
+
+### Claim Version
+
+An immutable evidence-linked materialization of a claim at a point in time. New evidence may confirm the current version or cause a new version to supersede it. Superseded versions remain preserved with their validity period, evidence, and change record.
+
+### Support Count
+
+A derived property of a named claim: the number of distinct stored outcomes whose bindings depend on that claim. Snapshot and maintained outcomes both count. It is a secondary reuse/ranking signal, not a promotion threshold and not a substitute for relevance.
 
 ### Outcome
 
-A view over knowledge, serving one specific purpose. Either materialized and maintained, or produced ad hoc and discarded.
+A logical persisted view over knowledge serving one specific purpose.
+
+Every outcome has a maintenance mode:
+
+- **snapshot** — normally has one immutable materialized version and is never automatically refreshed;
+- **maintained** — may have many immutable materialized versions and is reconsidered when bound claims change. Exactly one version is designated current.
+
+The consumer is not part of the outcome model; it may be a human, AI agent, other system, or combination.
 
 ### Binding
 
-The declared dependency from an outcome to the named facts it needs. The unit of invalidation, and the thing that makes blast radius computable.
+The declared dependency from an outcome to the named claims it needs. Bindings are the unit of provenance, support-count calculation, and targeted invalidation.
+
+### Outcome Version
+
+An immutable materialization of an outcome at a particular point in time. It records the content produced, its build manifest, creation time, and supersession relationship when another version replaces it as current.
+
+### Build Manifest
+
+The exact claim versions used to produce an outcome version. Every materialized outcome version has one.
+
+### Change Record
+
+A durable database record explaining a meaningful KB change: what changed, why, when, who or what caused or approved it, the triggering evidence or decision, and the affected old/new versions. A single change record may group several related mutations under one causal event.
 
 ### Lineage
 
-The recorded edges from raw source to claim, and from claim to outcome. Without lineage there is no targeted invalidation, no provenance, and no honest answer to why something changed.
+The recorded edges from raw source to claim, and from claim to outcome. Without lineage there is no targeted invalidation, provenance, reproducibility, or honest answer to why something changed.
 
 ### Gap
 
-A recorded instance of the knowledge layer failing to supply what an outcome needed. The primary input to deciding what the knowledge layer should contain next.
-
----
+A recorded instance of the current knowledge layer failing to supply what a desired outcome needed. Resolving a gap produces or updates normal claims rather than creating a separate candidate-claim lifecycle.
 
 ## 22. An Important Architectural Distinction
 
@@ -1103,29 +1192,25 @@ This should remain relatively immutable.
 
 ### 2. Derived knowledge
 
-What the AI currently believes is important based on the sources and goal.
+What the system currently believes is useful and true based on sources and demonstrated outcome demand.
 
-This may change.
+This may change through supersession and reconciliation.
 
 ### 3. Working context
 
-The subset of derived knowledge needed for a specific AI task at a specific moment.
+The subset of derived knowledge assembled for a specific outcome at a specific moment.
 
 This distinction prevents the system from treating every historical statement as equally current and equally relevant.
 
 ### How this maps onto the three layers
 
-The three forms are not the same axis as the three layers, and conflating them causes confusion.
-
 | Form | Where it lives |
 |---|---|
 | Source memory | Layer 1, immutable |
 | Derived knowledge | Layer 2, superseded over time |
-| Working context | Assembled at Layer 3, either materialized as an outcome or built transiently for an ad hoc query |
+| Working context | Layer 3 as a persisted outcome with a build manifest |
 
-A materialized outcome is working context that was worth keeping.
-
----
+A **snapshot outcome** preserves working context exactly as it was assembled. A **maintained outcome** preserves every materialized version of that working context and designates one version as current; relevant material claim changes may generate a new current version without deleting the prior one.
 
 ## 23. MVP Hypothesis
 
@@ -1133,71 +1218,76 @@ The first version should prove one central hypothesis:
 
 > **A purpose-driven knowledge layer can make a personal AI meaningfully more useful than an AI operating directly over a large unstructured memory store.**
 
-The MVP does not need to ingest a person's entire digital life.
-
-It could begin with one goal and a few input channels.
+The MVP does not need to ingest a person's entire digital life. It can begin with one desired outcome and a few input channels.
 
 ### MVP experience
 
-1. User names something they need to produce now — the first outcome.
-2. User supplies whatever context they have, through chat, files, or voice.
-3. AI produces the outcome, and records what it needed in order to do so.
-4. AI proposes an initial topic boundary and an initial set of claims; the user reviews and approves.
-5. User can inspect and correct the knowledge model at any time; corrections travel upward.
-6. User marks the outcome as maintained, or lets it stay one-off.
-7. New information updates claims; bound outcomes go stale and regenerate as a reviewable diff.
-8. AI maintains, per topic: current state, decisions, constraints, open questions, risks, next actions.
-9. The system asks only the highest-value clarification questions, batched rather than interrupting.
-10. Repeated ad hoc questions surface as promotion suggestions.
+1. The user names something that needs to be produced now — the first outcome.
+2. The system checks the existing knowledge layer for relevant claims.
+3. If knowledge is insufficient, the user supplies context and/or the system consults available raw sources.
+4. The system creates or reconciles the claims the outcome actually requires, with evidence and lineage.
+5. The outcome is produced as an immutable outcome version, persisted, and bound to the exact claim versions used.
+6. The user chooses whether the outcome is **snapshot** or **maintained**. The knowledge and claim lifecycle does not change.
+7. Corrections and decisions flow upward as new raw evidence and may supersede claims.
+8. New signals can stale only maintained outcomes; a material refresh creates a new immutable outcome version and advances the current-version pointer. Snapshot outcomes remain fixed historical artifacts.
+9. Every stored outcome contributes to claim support counts, so repeated use increases demonstrated reuse naturally.
+10. The system asks only high-value clarification questions, preferably batched rather than interrupting.
 
-The goal model is elicited **through** the first few outcomes rather than demanded before any work is done (§24).
+The goal model is elicited **through** actual outcomes rather than demanded before any useful work is done (§24).
 
----
+## 24. Bootstrapping and Outcome-Level Cold Start
 
-## 24. Bootstrapping: Start From an Outcome, Not a Goal
+Cold start is not only a new-knowledge-base problem.
 
-The cold start is a larger risk to this product than the architecture is.
+It occurs whenever:
 
-A purpose-driven knowledge base has almost no value until it has been fed. The natural MVP flow — define a goal, then supply information for several weeks before anything useful appears — describes a value curve that enterprises tolerate and individuals do not.
+> **The current knowledge layer is insufficient to support a desired outcome.**
 
-Inverting it fixes the problem, and it follows from the demand-driven principle anyway.
+There are therefore at least two common cases:
 
-> **Make the first outcome the entry point.**
+1. **Initial cold start** — the knowledge base is new and contains little useful knowledge.
+2. **Outcome-level cold start** — the knowledge base already exists, but a new problem requires knowledge that has never been needed before.
 
-1. Ask what the person needs to produce right now.
-2. Produce it.
-3. Let the knowledge layer accrete **backwards** from what that outcome actually required.
+Both cases use the same mechanism.
+
+> **Start from the desired outcome, not from speculative knowledge collection.**
+
+1. Ask what needs to be produced or decided now.
+2. Attempt to assemble it from existing claims.
+3. If knowledge is insufficient, consult raw sources and/or request the minimum additional context needed.
+4. Create or reconcile the missing claims and record lineage.
+5. Produce and persist the outcome with bindings to those claims.
+
+This causes the knowledge layer to accrete **backwards from demonstrated demand**.
 
 Two things follow:
 
-- The first session delivers something, so the value curve starts above zero.
-- The knowledge layer is populated by **demonstrated demand** rather than by speculation about what might matter later — which is the inclusion criterion §6.2 requires.
+- The first interaction around a new problem can still deliver value instead of requiring weeks of setup.
+- Once the gap has been resolved, future related outcomes can reuse the newly created claims, so the same area of the knowledge base becomes progressively warmer.
 
-The goal model still exists, and still shapes filtering. But it is elicited **through** the first few outcomes rather than demanded before any work is done.
-
----
+A mature knowledge base can therefore still experience cold starts at its edges. That is expected, not a failure of the model.
 
 ## 25. Measuring Whether the Bet Is Working
 
-The central bet needs a number attached to it, early.
+The central bet needs numbers attached to it early.
 
 ### Primary metric — knowledge layer sufficiency rate
 
-> What fraction of outcomes can be produced from the knowledge layer alone, without dropping through the escape hatch to raw?
+> What fraction of desired outcomes can be produced from the knowledge layer without needing to drop to raw sources or request new context?
 
-If this rate does not climb over time, the core bet is wrong, and it is better to learn that in month two than in year two.
+If this rate does not climb within recurring problem areas, the core bet is wrong or the knowledge layer is failing to retain the right things.
 
 ### Supporting metrics
 
-- **Human correction rate on regenerated outcomes** — how often a maintained outcome is wrong enough to need editing after it updates itself. Measures whether propagation is trustworthy.
-- **Review queue volume per unit of input** — measures whether the human-in-the-loop design is actually saving time or has become the new job (§13).
-- **Gap-to-promotion latency** — how long between a repeated one-off question and the knowledge layer acquiring what it needed to answer it.
-- **Synchronization time per day** — the number the product promise in §15 is making a claim about.
-- **Stale-outcome ratio** — how many maintained outcomes are currently out of date relative to their bound facts.
+- **Correction rate on regenerated maintained outcomes** — how often a maintained outcome needs meaningful correction after refresh. Measures propagation trustworthiness.
+- **Review queue volume per unit of input** — whether human-in-the-loop design is saving time or becoming the new job (§13).
+- **Gap-to-claim latency** — how long it takes from discovering missing knowledge for an outcome to having the necessary claim available in the knowledge layer.
+- **Knowledge reuse rate** — how often new outcomes reuse claims that already existed rather than creating entirely new ones.
+- **Support-count distribution** — whether a useful core of claims is being reused across many outcomes or the knowledge layer is fragmenting into one-off facts.
+- **Synchronization time per day** — the human effort required to keep important real-world context current.
+- **Stale maintained-outcome ratio** — how many maintained outcomes are currently out of date relative to their bound claims. Snapshot outcomes are excluded by definition.
 
-The first metric tests the thesis. The rest test whether the implementation is honest about it.
-
----
+Support count is an explanatory signal, not a target to maximize. The system should never prefer a popular but irrelevant claim over a less-used claim that better fits the desired outcome.
 
 ## 26. What the MVP Should Not Try to Solve
 
@@ -1221,55 +1311,53 @@ The early product should stay focused on proving that **purpose-driven knowledge
 
 ## 27. Possible Initial Product Experience
 
-A simple product could have four main views.
+A simple product could have several main views.
 
 ### Goal
 
-What am I trying to accomplish?
+What are we trying to accomplish?
 
 ### Knowledge
 
-What does the AI currently understand that matters?
+What does the shared knowledge base currently understand that matters, and which claims are most reused?
 
 ### Inbox
 
-What new information has entered the system, and what did the AI learn from it?
+What new information has entered the system, and what did it change?
 
 ### Outcomes
 
-What is this system currently maintaining for me, what is stale, and what changed?
+What outcomes have been produced? Which are snapshots, which are maintained, what is stale, and what changed?
 
 ### Review
 
-What has the AI decided that I should look at, ordered by consequence?
+Which AI-proposed changes or unresolved contradictions deserve human judgment, ordered by consequence?
 
 ### Collaborate
 
-What should we think about, decide, or do next?
+What should the human and AI agents think about, decide, or do next using the shared knowledge base?
 
-The user should be able to see the AI's evolving mental model rather than interacting only through a chat window.
-
----
+The user should be able to see the evolving shared working model rather than interacting only through a chat window.
 
 ## 28. Sync Should Be Selective, Not Exhaustive
 
-The product does not need to know everything about a person.
+The system does not need to know everything about a person or project.
 
-It needs to know **enough of the right things**.
-
-This is an important philosophical difference.
+It needs to know **enough of the right things for the outcomes that matter**.
 
 The objective is not:
 
 > Human Brain = AI Memory
 
-The objective is:
+Nor is it:
 
-> Human Goal-Relevant Context ≈ AI Working Understanding
+> Raw Data = Knowledge Base
 
-The system should therefore optimize for **sufficient synchronization**, not complete synchronization.
+The objective is closer to:
 
----
+> Goal-Relevant Shared Context ≈ What the human–AI system needs to work effectively
+
+The system should therefore optimize for **sufficient synchronization**, not complete synchronization. New outcome-level cold starts are acceptable; the important property is that resolving them leaves reusable knowledge behind.
 
 ## 29. Evolution Path to Multi-Writer
 
@@ -1279,7 +1367,7 @@ The first version is single-user. Simplicity should win. But a few decisions mad
 
 - **Every claim has an author and a timestamp.** Adding attribution later means backfilling something that was never recorded.
 - **Every claim has exactly one owning topic.** Ownership is how concurrent writers are arbitrated; retrofitting it into a knowledge layer that grew without it is a data migration.
-- **Approvals are commits, not database rows.** Multi-writer needs a shared, auditable record of who decided what. Git already provides one.
+- **Approvals are durable change records.** Multi-writer needs a shared, auditable record of who decided what, when, and why. The database records the approval and links it to the affected versions and causal change record.
 - **Contradiction is a representable state.** Single-user contradiction comes from changing your mind. Multi-writer contradiction comes from disagreement. The representation is the same; only the resolution policy differs.
 
 **What can safely wait:**
@@ -1348,13 +1436,13 @@ It is a **combined human–AI system** capable of accomplishing far more than ei
 
 ## 32. Product Vision Statement
 
-> **Create a purpose-driven personal AI that continuously transforms a person's messy stream of information into the small, evolving body of knowledge needed to achieve an important goal—so AI can do most of the cognitive heavy lifting while the human remains focused on intent, judgment, and decisions.**
+> **Create a purpose-driven personal AI that continuously transforms a person's messy stream of information into a small, evolving, shared body of knowledge that humans and AI agents can use together to achieve important outcomes—so AI can do more of the cognitive heavy lifting while humans remain focused on intent, judgment, and responsibility.**
 
 ---
 
 ## 33. One-Sentence Version
 
-**Don't try to make AI remember everything about a person; make it understand what the person is trying to accomplish, then continuously organize everything it learns around that purpose.**
+**Don't try to make AI remember everything about a person; maintain the shared knowledge that humans and AI agents actually need for the outcomes they are trying to achieve.**
 
 ---
 
@@ -1362,11 +1450,11 @@ It is a **combined human–AI system** capable of accomplishing far more than ei
 
 The project can be built around one question:
 
-> **What is the minimum amount of effort a human must spend keeping an AI synchronized with their world for that AI to become a genuinely useful long-term collaborator?**
+> **What is the minimum amount of synchronization effort needed to maintain enough shared context for humans and AI agents to operate as one effective system over time?**
 
-The three-layer model—**raw information lake + subject-oriented knowledge layer + purpose-specific outcome views**—is the proposed answer to that question.
+The three-layer model — **raw information + subject-oriented shared knowledge + purpose-specific persisted outcomes** — is the proposed answer.
 
-The raw layer minimizes the cost of capture. The knowledge layer makes what was captured reusable. The outcome layer makes it useful without being asked twice.
+The raw layer minimizes capture cost. The knowledge layer makes demonstrated useful knowledge reusable. The outcome layer packages that knowledge for concrete work and records what was actually needed.
 
 ---
 
@@ -1374,28 +1462,26 @@ The raw layer minimizes the cost of capture. The knowledge layer makes what was 
 
 This product is ultimately making a specific bet:
 
-> **The bottleneck to highly useful personalized AI is not primarily model intelligence or access to more data. It is the absence of a purpose-driven system that continuously converts messy human context into useful, current, goal-specific knowledge.**
+> **The bottleneck to highly useful personalized AI is not primarily model intelligence or access to more data. It is the absence of a purpose-driven system that continuously converts messy context into useful, current, reusable shared knowledge.**
 
-If that bet is correct, the winning personal AI products will not simply have the largest memories.
+If that bet is correct, winning personal AI products will not simply have the largest memories.
 
-They will have the best mechanisms for deciding **what matters, why it matters, and what should be done with it**.
-
----
+They will have the best mechanisms for deciding **what matters for a desired outcome, turning gaps into reusable knowledge, and keeping humans and AI agents aligned on the same current understanding**.
 
 ## 36. Open Design Questions
 
 These remain unresolved and are worth tracking explicitly rather than deciding by default.
 
-1. **What is the unit of a claim?** Too fine and the fact namespace becomes unmanageable and binding becomes brittle. Too coarse and targeted invalidation stops being targeted, because every change touches every outcome.
+1. **What is the unit of a claim?** Too fine and the fact namespace becomes unmanageable and binding becomes brittle. Too coarse and targeted invalidation stops being targeted because every change touches too many outcomes.
 
-2. **Who writes the outcome specification?** If the user must specify precisely what an outcome needs, the system inherits the curation burden it was built to remove. If the AI infers it, the binding set drifts and invalidation becomes unreliable.
+2. **Who writes the outcome specification?** If the user must specify precisely what an outcome needs, the system inherits the curation burden it was built to remove. If AI infers it, the binding set can drift and invalidation may become unreliable.
 
-3. **How are topic boundaries revised after the fact?** AI suggests and the human approves, but splitting or merging a topic later means re-homing claims that outcomes are already bound to. Is that a rename with redirection, or a breaking change?
+3. **How are topic boundaries revised after the fact?** Splitting or merging a topic means re-homing claims that outcomes are already bound to. Is that a rename with redirection, or a breaking change?
 
-4. **What is the retention policy for the raw layer?** Immutability and append-only are stated. Unbounded growth is implied. At what point does that become a cost or a privacy problem, and what is deleted first?
+4. **What is the retention policy for the raw layer?** Immutability and append-only are stated. Unbounded growth is implied. At what point does that become a cost or privacy problem, and what is deleted first?
 
 5. **How is a superseded claim distinguished from a contradicted one?** "I changed my mind" and "two sources disagree" have the same shape and different correct handling.
 
-6. **When does the goal model itself change, and what happens downstream?** A goal shift can invalidate the filtering decisions behind a large amount of retained knowledge. Is that a rebuild, or is stale-but-retained knowledge acceptable?
+6. **When does the goal model itself change, and what happens downstream?** A goal shift can change what future outcomes need. Because claims are now retained through demonstrated outcome use rather than goal membership, does a goal shift require any knowledge migration at all, or only new outcome assembly behavior?
 
-7. **What does the system do with knowledge that no outcome needs any more?** Demand-driven inclusion implies demand-driven eviction. It is not obvious that eviction is safe, or that it is worth the complexity at small scale.
+7. **How long should snapshot outcomes be retained?** They are useful as demand history, reproducibility artifacts, and inputs to support count, but indefinite retention may create privacy and storage costs. If snapshots expire, should their contribution to support count expire too?
