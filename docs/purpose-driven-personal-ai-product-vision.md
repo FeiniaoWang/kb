@@ -3,7 +3,7 @@
 **Working title:** Purpose-Driven Personal AI
 **Document type:** Product Vision
 **Status:** Early concept / foundation for product discovery
-**Version:** v6 — simplified to the load-bearing core
+**Version:** v6.2 — storage substrate resolved: database is the system of record for the knowledge layer
 **Revised:** September 2, 2026
 
 ---
@@ -62,6 +62,8 @@ The unit of that organization is a **Knowledge Space**: a bounded body of knowle
 
 > **Capture can be broad. Retention is demand-informed. Assembly must be purpose-driven.**
 
+**Purpose is not descriptive metadata.** It actively governs both what knowledge the system learns and retains, and which relevant claims it assembles for a particular outcome.
+
 ---
 
 ## 4. The Two-Layer Model
@@ -84,6 +86,8 @@ Some of it will never become useful. That is acceptable.
 Immutability is not a stylistic preference: it preserves the original evidence so extraction and reconciliation logic can improve later without rewriting what actually entered the system.
 
 There is exactly **one** lake. Multiple lakes would reintroduce a routing decision at capture time, which is the friction the lake exists to remove.
+
+The lake is the one place where content lives as bytes in object storage. Every source is still registered in the database so that evidence links resolve to an identity and a locator rather than to a file path (§9.2).
 
 ### 4.2 Layer 2 — Knowledge
 
@@ -144,6 +148,8 @@ Persisting outcomes also gives **pre-computed context packing** for reasoners un
 ## 5. Contracts: Names Are the Interface
 
 A space exposes **named, typed, addressable** claims and outcomes. Consumers bind to those names.
+
+> **Anything outside a space binds only to its published interface, never directly to its internal claims.**
 
 An outcome does not say "read the Project X topic." It says "I depend on `project-x.current-scope`, `project-x.committed-date`, `people.sponsor.identity`."
 
@@ -252,14 +258,51 @@ Three rules keep it usable:
 
 ## 9. Storage Substrate
 
-Two durable responsibilities:
+> **Design decision (v6.2).** Object storage holds **source bytes**. The **database is the system of record for the entire knowledge layer** — claims, claim versions, outcomes, manifests, bindings, lineage, and change history, including their content and not merely their structure. Earlier versions placed claim-version and outcome-version content in object storage; that split has been withdrawn.
 
-- **Object storage** holds content: raw sources, immutable claim-version content, immutable outcome-version content. This is an abstraction, not a vendor commitment — local files first is fine.
-- **A database** is the system of record for structure: logical identities, version relationships, current-version pointers, topic ownership, source→claim lineage, claim→outcome bindings, authorship, timestamps, approvals, and change history.
+### 9.1 Why the knowledge layer is not files
 
-Both are canonical, for different responsibilities. The KB's history is represented explicitly in its own data model, so the architecture does not depend on Git or on any blob-store versioning mechanism.
+Nearly every load-bearing operation in this model is a join or a small graph traversal over many small records:
 
-**Change Records carry causality.** Version history says *what* changed; trust also requires *why*. A change record captures the change, the previous and new versions, the triggering source or decision, who or what made or approved it, and when. One change record may group several mutations from the same causal event — a new source superseding one claim and regenerating three outcomes shares one change ID. This lets the database answer *what did I believe on this date?*, *what changed since then?*, and *why did this outcome change?*
+- **targeted invalidation** (§5) — a claim version changes, find the maintained outcomes bound to it;
+- **blast radius** (§8) — count and rank those outcomes to tier review;
+- **"why did this change?"** (§5.2) — manifest → claim versions → supersession chain → evidence;
+- **structural invariants** (§7) — every claim resolves to live evidence, no two current claims occupy the same slot with contradictory values, every bound claim exists;
+- **idempotency** (§6.5) — stable slots, exactly one current version per slot;
+- **gap filling** (§6.4) — create claims, record lineage, and bind an outcome **as one operation**.
+
+Over a blob store, each of these requires a hand-built index that must be kept consistent with the blobs — which is a database, written badly and without transactions. In a relational database they are foreign keys, a partial unique index on `(space_id, topic_id, claim_name) WHERE is_current`, a transaction, and a recursive query.
+
+Scale does not argue the other way. At 1000+ spaces with thousands of claims each and several versions per claim, the knowledge layer is single-digit millions of rows — unremarkable for a single relational instance. The §7 observation that volume is tiny still holds; it argues for affordable per-item processing, not for file-based storage.
+
+### 9.2 The split
+
+- **Object storage — source bytes only.** Transcripts, documents, screenshots, audio, photos, imported exports. An abstraction, not a vendor commitment: local files first is fine.
+- **Database — everything else.** Every Source also has a **row**: identity, content hash, captured-at, channel, media type, and the blob URI. Lineage and evidence links point at source identities and locators, never at URIs. Extracted text and segment locators live in the database too, because evidence should resolve to "paragraph 14 of this transcript," not to a 40 MB file.
+- **Claim versions live entirely in the database.** Payload as a document/JSON column so claim types stay open (§12), with structured columns only for what the invariants and queries need: identity, space, topic, name, type, version, validity window, supersedes, author, timestamp.
+- **Outcome versions are the one hybrid.** Manifest and metadata are always rows. The rendered body is normally a few kilobytes of text and belongs in the database as well. Spill to object storage only when an outcome genuinely *is* a file — a generated deck, a PDF — via a size threshold and a pointer column.
+
+### 9.3 What the database must now enforce that a blob store gave for free
+
+Append-only storage made immutability structural. A database makes it a discipline, so it has to be enforced deliberately:
+
+- version tables are **insert-only**; the only mutation is advancing a current-version pointer, ideally held in its own table rather than as a flag;
+- change records are an **append-only ledger**;
+- `UPDATE`/`DELETE` on version and change tables is denied at the database level (trigger or role permission), not merely avoided in application code.
+
+The KB's history remains represented explicitly in its own data model. The architecture does not depend on Git, on blob-store versioning, or on any storage-engine feature to represent supersession.
+
+### 9.4 Supporting commitments
+
+**One database, not several.** A relational engine with document columns, vector search, and recursive queries covers the open claim types, embedding retrieval, and the space DAG. The network in Appendix A is shallow and small; it does not justify a separate graph store.
+
+**Space identity is on every row.** `space_id` is already required from the first write (§16). Carrying it on every row makes it the natural key for row-level access control — the seam the multi-writer path in Appendix B will need.
+
+**Periodic export to object storage.** Once the database is the system of record for the asset this thesis says matters most, a plain portable snapshot of the knowledge layer (line-delimited JSON per table, written to object storage on a schedule) covers disaster recovery and user data portability. It is a complement, never on the hot path.
+
+### 9.5 Change Records carry causality
+
+Version history says *what* changed; trust also requires *why*. A change record captures the change, the previous and new versions, the triggering source or decision, who or what made or approved it, and when. One change record may group several mutations from the same causal event — a new source superseding one claim and regenerating three outcomes shares one change ID. This lets the database answer *what did I believe on this date?*, *what changed since then?*, and *why did this outcome change?*
 
 ---
 
@@ -327,8 +370,7 @@ flowchart LR
     C["Humans • AI agents • Other systems"]
     P["Purpose"]
 
-    R -->|"learn"| CL
-    R -.->|"gap filling"| OU
+    R -->|"learn / gap filling"| CL
     OU -->|"use"| C
     C -->|"corrections / new evidence"| R
     P -.->|"defines the space"| L2
@@ -341,7 +383,7 @@ The important separations:
 - **Claims are canonical; outcomes are derived from them** and bound to the exact versions used.
 - **Consumers are outside the architecture.** The same knowledge serves humans, agents, and other software without changing the model.
 
-Substrate: object storage for immutable content, a durable database for identity, versions, lineage, bindings, and change history.
+Substrate: **object storage for source bytes; the database for the whole knowledge layer** — claim and outcome content as well as identity, versions, lineage, bindings, and change history (§9).
 
 ---
 
@@ -475,6 +517,8 @@ That is a fundamentally different optimization target.
 5. **How is a superseded claim distinguished from a contradicted one?** "I changed my mind" and "two sources disagree" have the same shape and different correct handling.
 6. **How long should snapshot outcomes be retained?** They are useful as demand history and reproducibility artifacts, but indefinite retention carries privacy and storage cost.
 7. **What is the concrete signal that the single space should become two?** Divergence of purpose is the stated criterion; it is not yet operational.
+8. **Where does the single-database substrate stop being enough?** §9 asserts that millions of rows across 1000+ spaces is unremarkable. The pressure is more likely to come from embedding volume, per-space isolation requirements, or export size than from row count — which of those arrives first is unknown.
+9. **What is the size threshold at which an outcome body spills to object storage,** and does an outcome that *is* a file behave differently in any other respect — diffing, review, or reproduction?
 
 ---
 
@@ -515,6 +559,7 @@ The first version is single-user and simplicity should win. A few decisions dete
 
 - every claim has an author and a timestamp;
 - every claim has exactly one owning topic, inside exactly one owning space — the space is also the natural future unit of access control and sharing;
+- anything outside a space consumes its knowledge only through the published interface, never by binding directly to internal claims;
 - approvals are durable change records, so there is a shared auditable record of who decided what and why;
 - contradiction is a representable state — single-user contradiction is changing your mind, multi-writer contradiction is disagreement; the representation is the same and only the resolution policy differs.
 
