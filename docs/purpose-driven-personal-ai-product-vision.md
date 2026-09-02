@@ -3,24 +3,28 @@
 **Working title:** Purpose-Driven Personal AI
 **Document type:** Product Vision
 **Status:** Early concept / foundation for product discovery
-**Version:** v4 — explicit version history and simplified storage
+**Version:** v5 — two layers and a network of Knowledge Spaces
 **Original:** August 28, 2026
 **Revised:** September 2, 2026
 
 ---
 
-## Changelog — what changed in v4
+## Changelog — what changed in v5
 
-The core thesis is unchanged: purpose, not volume, is the organizing principle. v4 simplifies persistence and history management while making version semantics explicit for both claims and maintained outcomes.
+The core thesis is unchanged: purpose, not volume, is the organizing principle. v5 changes the shape of the knowledge layer. Instead of one flat knowledge layer with a separate outcome tier above it, the knowledge layer becomes a **network of Knowledge Spaces**, each with a single purpose, composing into a directed acyclic graph.
 
 | Change | Section |
 |---|---|
-| Removed **Git** as a required system dependency; durable history and causality are explicit database responsibilities | §10, §21, §29 |
-| Removed the requirement that the database be reconstructable from files/object storage; the database is now a **first-class durable store** that is backed up and migrated normally | §10 |
-| Replaced the physical "files + Git + database" substrate with **object storage + database**, keeping the content store abstract so local files, S3, Azure Blob, GCS, or equivalent storage can be used | §10, §17 |
-| Made outcome versioning explicit: **maintained outcomes create immutable versions and have one current version**; snapshot outcomes remain fixed | §6, §7, §8, §21–§23 |
-| Added **Change Record** as a first-class history/audit concept carrying what changed, why, when, who/what made the change, the trigger, and affected versions | §10.2, §21 |
-| Preserved full historical traceability without Git: old claim/outcome versions remain stored and the database records supersession, lineage, approvals, and causality | §7, §10, §13, §29 |
+| Collapsed the three-layer model into **two layers**: Raw Information Lake and Knowledge. Outcomes are no longer an architectural tier | §6, §17, §22, §34 |
+| The Knowledge layer is composed of many **Knowledge Spaces**. Each space has one primary purpose, or a very small number of closely related ones. All spaces together are the Knowledge layer | §6 |
+| Outcomes remain a first-class object type with unchanged semantics, but they live **inside a space** as its published sub-layer | §6.1, §21 |
+| Introduced **base spaces** (subject-oriented, long-lived) and **goal spaces** (goal-oriented, finite), which resolves the topic-vs-goal tension left open in v4 | §6.2 |
+| Spaces **compose**: a higher-level space consumes the published outputs of lower-level spaces. The reference graph must remain a **DAG** | §6.4 |
+| Added **published names / output ports**. Cross-space consumption goes through published names — never a direct read of another space's internal claims | §6.5, §7.4 |
+| Spaces can be **split** when they grow too large or their purposes diverge; splitting is a contract change with redirects, not a silent re-homing | §6.6, §13.2, §36 |
+| Added deliberate borrowings from **Medallion architecture, star-schema conformed dimensions, dbt's model DAG, and the data-product shape from Data Mesh**; kept the rejection of Data Mesh's organizational layer | §9.1, §9.3 |
+| Corrections now **route to the owning space** rather than being patched in the consuming space | §8.4, §16.24 |
+| Retained from v4: object storage + database substrate, Change Records, claim and outcome version semantics, demand-driven retention, support count, review tiering by blast radius | throughout |
 
 ---
 
@@ -159,9 +163,11 @@ A personal knowledge system becomes dramatically more useful when it knows:
 
 > **What is this knowledge supposed to help the human accomplish?**
 
-Instead of building one undifferentiated memory of everything, the system should organize knowledge around a small number of explicit goals.
+Instead of building one undifferentiated memory of everything, the system should organize knowledge around a small number of explicit purposes.
 
-Ideally, a goal-oriented knowledge space has:
+The unit of that organization is a **Knowledge Space**.
+
+Ideally, a knowledge space has:
 
 - **one primary goal**, or
 - at most a very small number of closely related goals.
@@ -188,26 +194,37 @@ It tells the AI:
 - what changes are significant;
 - what the AI should proactively help with.
 
+### One lake, many spaces
+
+A person does not have one purpose. They have several, at different scales and with different lifetimes.
+
+The system therefore has:
+
+- **one Raw Information Lake**, shared by everything;
+- **many Knowledge Spaces** on top of it, each with a single purpose.
+
+**All of the spaces together are the Knowledge layer.** There is no separate architectural tier above them. A space is not a folder, a tag, or a view — it is a bounded unit of knowledge with one purpose, one owner, its own internal schema, and an explicit published interface.
+
 ### Key principle
 
 > **Capture can be broad. Understanding must be purpose-driven.**
 
-This principle is refined in §6.2 once the knowledge and outcome layers are separated: capture is broad, *retention* is demand-driven, and *assembly* is purpose-driven.
+This principle is refined in §6.3: capture is broad, *retention* is demand-driven, and *assembly* is purpose-driven.
 
 ---
 
-## 6. The Three-Layer Knowledge Model
+## 6. The Two-Layer Model and the Space Network
 
-Earlier versions of this vision described two layers: a raw information lake and a purpose-driven knowledge layer.
+Earlier versions of this vision moved from two layers to three: a raw lake, a knowledge layer, and an outcome layer above it.
 
-That model conflates two things that behave differently:
+The three-layer split was solving a real problem — *what is known about a subject* and *what must be assembled for a particular purpose* behave differently — but it solved it in the wrong place. It made "outcome" a global architectural tier, which implied that outcomes are somehow above and outside knowledge. They are not. An outcome is something a purpose-bounded unit of knowledge **produces**.
 
-- **what is currently known about a subject**, and
-- **what needs to be assembled for a particular outcome**.
+v5 therefore returns to two layers and puts the structure where it belongs: inside and between **Knowledge Spaces**.
 
-These have different lifetimes, granularity, and correctness criteria. Knowledge about a subject should outlive any one use of it. An outcome is a purpose-specific view over that knowledge.
+- **Layer 1 — Raw Information Lake.** One per system. Immutable, append-only, permissive.
+- **Layer 2 — Knowledge.** A network of Knowledge Spaces. Each space has one purpose. Each space internally maintains claims and publishes outcomes. Spaces consume the raw lake, and may consume the published outputs of other spaces.
 
-The model is therefore split into three layers.
+Outcomes did not disappear. They lost their tier and kept their semantics.
 
 ---
 
@@ -215,7 +232,7 @@ The model is therefore split into three layers.
 
 Intentionally permissive, immutable, append-only.
 
-The user should be able to put information into the system without deciding where it belongs or how it should be organized.
+The user should be able to put information into the system without deciding where it belongs, how it should be organized, or which space it serves.
 
 Possible inputs include:
 
@@ -245,108 +262,233 @@ Some information in this layer will never become useful. That is acceptable.
 
 Immutability is not a stylistic preference. It preserves the original evidence so extraction and reconciliation logic can improve later without losing or rewriting what actually entered the system.
 
----
-
-### Layer 2 — Knowledge
-
-Raw information is filtered, extracted, reconciled, and maintained as **knowledge organized by subject or topic**.
-
-Each knowledge item is a **claim**: typed, named, versioned, and linked to the evidence that supports it.
-
-The knowledge layer answers: *what is currently true, and currently believed, about this subject?*
-
-It is deliberately **not** a summary of the raw layer. It is a continuously maintained current-best-understanding, in which new information can confirm, update, supersede, contradict, or add nuance to what is already held.
-
-The knowledge layer is a **shared substrate**. It does not need to know whether the next use will be by a human, an AI agent, another application, or a human–AI team. Its responsibility is to maintain reusable knowledge and provenance.
+There is exactly **one** lake. Multiple lakes would reintroduce the routing decision at capture time, which is precisely the friction the lake exists to remove.
 
 ---
 
-### Layer 3 — Outcomes
+### Layer 2 — Knowledge: a network of Spaces
 
-Knowledge is assembled to serve a **very specific outcome**.
+Raw information is filtered, extracted, reconciled, and maintained as knowledge **inside a space**.
 
-An outcome can be a deliverable, answer, decision package, monitored state, draft, plan, report, machine-readable context package, or other purpose-specific view. The eventual consumer may be a human, an AI agent, another system, or some combination of them.
+A **Knowledge Space** is a bounded unit of knowledge with:
 
-**Every outcome is persisted, and every materialized outcome version is immutable.** Outcomes differ only in whether later signals can create a newer version:
+- **one purpose** — one primary goal, or a very small number of closely related goals;
+- **its own claims**, organized by topic and owned exclusively by that space;
+- **its own outcomes**, which are the artifacts it produces;
+- **an explicit published interface** — the names other spaces and external consumers are allowed to depend on;
+- **its own internal schema**, which may differ from every other space's;
+- **one owner** (in v1, always the user).
+
+The knowledge layer answers: *what is currently true, and currently believed, in service of this purpose?*
+
+It is deliberately **not** a summary of the raw layer. Each space maintains a continuously updated current-best-understanding in which new information can confirm, update, supersede, contradict, or add nuance to what is already held.
+
+The knowledge layer remains a **shared substrate**. A space does not need to know whether the next consumer of its output is a human, an AI agent, another application, another space, or a human–AI team.
+
+---
+
+### 6.1 Anatomy of a space
+
+Every space has the same internal shape, regardless of where it sits in the network.
+
+```
+┌─ Knowledge Space ────────────────────────────┐
+│  Purpose (one goal, or a few related ones)   │
+│                                              │
+│  Inputs      raw sources, and/or published   │
+│              names from upstream spaces      │
+│        ↓                                     │
+│  Claims      named, typed, versioned,        │
+│              evidence-linked; organized by   │
+│              topic; owned by this space      │
+│        ↓                                     │
+│  Outcomes    immutable materialized versions │
+│              with build manifests            │
+│        ↓                                     │
+│  Published   the subset of outcomes and      │
+│  interface   claims other spaces may bind to │
+└──────────────────────────────────────────────┘
+```
+
+**Claims and outcomes are sub-layers within a space, not system layers.** All of the v4 machinery applies unchanged inside every space: named claims, immutable claim versions with supersession, outcome bindings, build manifests, snapshot versus maintained maintenance policy, lineage, change records, materiality checks, and the reverse edge for corrections.
+
+This is the main simplification. There is one mechanism, described once, instantiated many times.
+
+#### Outcomes are derived views, not canonical knowledge
+
+Within a space:
+
+> **Claims are canonical. Outcomes are derived views over claims.**
+
+All outcome versions are persisted as artifacts, but only maintained outcomes participate in incremental refresh. A maintained logical outcome may have many immutable materialized versions, with one designated current.
 
 - **Snapshot outcome** — one stored immutable version, with its build manifest; later signals do not refresh it.
 - **Maintained outcome** — a logical outcome with an immutable version history. When a bound claim changes materially, regeneration creates a **new outcome version** and that version becomes current; older versions remain preserved.
 
-This means an ad-hoc request is not disposable. It becomes a durable snapshot of what was needed and what the system produced at that moment. Maintained outcomes additionally preserve how that result evolved over time.
+An ad-hoc request is therefore not disposable. It becomes a durable snapshot of what was needed and what the system produced at that moment.
 
----
-
-### 6.1 Outcomes are derived views, not canonical knowledge
-
-The cleanest way to understand the model is:
-
-> **Two canonical storage layers and one derived view layer.**
-
-Raw and Knowledge are canonical stores. Outcomes are derived views over Knowledge. All outcome versions are persisted as artifacts, but only maintained outcomes participate in incremental refresh. A maintained logical outcome may therefore have many immutable materialized versions, with one version designated as current.
-
-This removes the need for a promotion lifecycle:
-
-- A snapshot and a maintained outcome are produced through the same mechanism.
-- Both bind to claims and carry manifests.
-- The only difference is the **maintenance policy**.
-- Changing a snapshot into a maintained outcome means changing its maintenance mode; future refreshes create new versions rather than rewriting the original materialization.
+There is no promotion lifecycle. Snapshots and maintained outcomes are produced by the same mechanism; the only difference is the **maintenance policy**, and changing that policy is a property change, not a migration.
 
 Persisting outcome views also provides **pre-computed context-window packing** for reasoners with limited context budgets.
 
 ---
 
-### 6.2 Subject-oriented storage, demand-driven inclusion
+### 6.2 Two flavours of space: base and goal
 
-Organizing the knowledge layer by topic rather than by goal is deliberate.
+A space is defined by having one purpose. But purposes have very different lifetimes, and pretending otherwise creates a real problem.
 
-**Why topic, not goal:** goal-scoped knowledge does not survive goal completion. Subject-oriented knowledge outlives the outcomes it served and can be reused by later goals.
+v4 argued that knowledge should be organized by **topic, not goal**, because goal-scoped knowledge does not survive goal completion. Making every space goal-scoped would contradict that. Facts about a person, an organization, or a project are needed by several goals at once and outlive all of them; if each goal space owned its own copy, single ownership breaks and reconciliation has no home.
 
-**What that costs:** topic relevance is broad. Left alone, the knowledge layer could drift into being a second data lake.
+The network resolves this by admitting that spaces come in two flavours.
 
-**The fix:** make inclusion strictly **demand-driven**. A claim earns a place in the active knowledge layer because at least one stored outcome actually depends on it.
+| | **Base space** | **Goal space** |
+|---|---|---|
+| Purpose | *Maintain the current truth about X* | *Achieve Y* |
+| Orientation | Subject | Goal |
+| Lifetime | Long-lived, often permanent | Finite; ends when the goal ends |
+| Typical inputs | Raw lake, mostly | Base spaces, plus raw lake |
+| Typical consumers | Other spaces | Humans, agents, other systems |
+| Examples | People and relationships; Finances; Health; Employer and industry | Launch the product and get 20 paying customers; Prepare my child for school; Publish the book |
 
-- **Topic decides where a claim lives.**
-- **Outcomes demonstrate why the claim needs to exist.**
+Both are spaces. Both have one purpose, claims, outcomes, and a published interface. The distinction is descriptive, not a separate object type — it describes where a space tends to sit in the network and how long it tends to live.
 
-A stable active claim with no outcome dependency is therefore a contradiction in the model. When a new outcome requires knowledge that is missing, the system may consult raw sources, derive the needed claim, persist the claim and its lineage, and bind the new outcome to it as part of the same outcome-building operation.
+The general shape that follows:
 
-Purpose remains the parameter that shapes both transforms: it determines what must be learned from raw information for the current need, and what subset of knowledge must be assembled into the outcome.
+> **Lower in the network, spaces tend to be subject-oriented and durable. Higher in the network, spaces tend to be goal-oriented and finite.**
+
+This is what makes goal completion safe. When a goal space is archived, the durable knowledge it depended on is not deleted with it, because that knowledge was never owned by the goal space — it lives in the base spaces the goal space consumed. What is archived is the goal-specific interpretation, which is exactly what should not outlive the goal.
+
+---
+
+### 6.3 Subject-oriented storage, demand-driven inclusion
+
+Within a space, claims are still organized **by topic**, and inclusion is still **demand-driven**.
+
+**Why topic inside a space:** even within one purpose, subject-oriented organization gives reconciliation a single home and lets internal representation evolve without breaking bindings.
+
+**What that costs:** topic relevance is broad. Left alone, a space could drift into being a small second data lake.
+
+**The fix:** a claim earns a place in a space because at least one stored outcome — of that space, or of a downstream space consuming its published names — actually depends on it.
+
+- **Topic decides where a claim lives inside a space.**
+- **Purpose decides which space it belongs to.**
+- **Outcomes demonstrate why the claim needs to exist at all.**
+
+A stable active claim with no outcome dependency remains a contradiction in the model. When a new outcome requires knowledge that is missing, the space may consult raw sources or upstream published names, derive the needed claim, persist the claim and its lineage, and bind the outcome to it as part of the same operation.
 
 > **Capture can be broad. Retention must be demonstrated by use. Assembly must be purpose-driven.**
 
 ---
 
-### 6.3 Structural relationships
+### 6.4 Composition: spaces form a DAG
 
-Ownership and outcome dependency must be separated.
+Spaces are not a flat list. They compose.
 
-**Ownership is strict.**
+**Splitting.** When a space grows too large, or its purposes begin to diverge, it is split into smaller spaces with tighter purposes. Divergence of purpose is the signal — not size alone. A space that is large but coherently serving one goal is fine; a space that is small but serving two unrelated goals should be split.
 
-- One raw layer supports many topics in the knowledge layer.
-- Every knowledge claim has **exactly one owning topic**.
+**Composing.** When an outcome requires knowledge from several spaces, the answer is **not** to widen an existing space or to let one space reach into another's internals. It is to create a **new higher-level space** whose purpose is that cross-cutting outcome, and which consumes the published outputs of the lower-level spaces.
 
-Single ownership means reconciliation has exactly one home. Without it, the same claim can drift independently across topics and there is no authoritative current version.
+```mermaid
+flowchart BT
+    RAW["Raw Information Lake"]
 
-**Outcome dependency is many-to-many.**
+    P["People &amp; relationships<br/><i>base space</i>"]
+    F["Finances<br/><i>base space</i>"]
+    W["Employer &amp; industry<br/><i>base space</i>"]
 
-- One outcome may bind to claims from any number of topics.
-- One claim may support any number of outcomes.
+    L["Launch the product<br/><i>goal space</i>"]
+    S["Prepare my child for school<br/><i>goal space</i>"]
 
-Real outcomes cut across subjects. A board-review brief may need project knowledge, financial knowledge, and knowledge about the people involved. The knowledge layer does not care whether that brief will be consumed by a person or by an agent; it only records the facts the outcome depends on.
+    B["Quarterly life review<br/><i>higher-level goal space</i>"]
 
-In database terms: **topic is the ownership/partition boundary; outcome bindings are dependency edges.**
+    RAW --> P
+    RAW --> F
+    RAW --> W
+    P --> L
+    W --> L
+    P --> S
+    F --> S
+    L --> B
+    F --> B
+    S --> B
+```
+
+**The one hard constraint: the reference graph must be a DAG.**
+
+Cycles are prohibited because they destroy the three properties the whole design rests on:
+
+- **termination** — propagation of a claim change must halt;
+- **reproducibility** — a build manifest must resolve to a finite, well-defined set of versions;
+- **an honest answer to "why did this change?"** — a cycle makes causality circular and unexplainable.
+
+A cycle attempt is a signal, not an error to route around. If space A needs something from B and B needs something from A, either they are one space, or the shared part belongs in a third space below both. The system should detect the attempted cycle at binding time and propose one of those two resolutions.
+
+**Evolution.** Because splitting and composing are both ordinary operations, the network is expected to change shape over time. It is not designed up front. It accretes from demonstrated demand in exactly the way claims do (§24): a new space is created when a new purpose demonstrably needs one, not in anticipation.
 
 ---
 
-### 6.4 Support count: demonstrated reuse without promotion
+### 6.5 Published names: how spaces consume each other
+
+A consuming space binds to a **published name** on the producing space, never to its internal claims.
+
+Two kinds of name may be published:
+
+- **A published outcome.** The normal case. A stable, purpose-shaped artifact the producing space maintains — for example, `people/current-relationship-summary` or `finances/monthly-position`.
+- **A published claim.** A single named, typed claim exposed directly — for example, `people.sponsor.identity`. Useful when a consumer needs one precise fact and routing it through a whole outcome would be wasteful.
+
+Both are contracts. Everything not published is private to the space, and internal representation may change freely as long as published names still resolve (§7.1).
+
+**Why this granularity matters: blast radius.**
+
+If cross-space consumption could only happen through one big published outcome per space, then any material change anywhere in the producing space would regenerate that outcome and stale every consumer, including consumers that did not care about the changed fact. Targeted invalidation — the property §7.1 exists to buy — would be lost at every space boundary.
+
+The rule that keeps it is therefore not "outcomes only." It is:
+
+> **Ownership is single. Cross-space reads go through published names. The reference graph is acyclic.**
+
+Two practices follow:
+
+1. **Publish several small, well-named outputs rather than one large one.** Think output ports, not a single export.
+2. **Allow published-claim binding where a consumer genuinely needs one fact**, so that fine-grained invalidation survives the boundary.
+
+The published interface should be deliberately smaller than the space's internal surface. A space that publishes everything it knows has no encapsulation and will be impossible to refactor.
+
+---
+
+### 6.6 Structural relationships
+
+Ownership and dependency must stay separate.
+
+**Ownership is strict.**
+
+- One raw lake supports many spaces.
+- Every claim has **exactly one owning topic**, inside **exactly one owning space**.
+- A claim is never co-owned or duplicated across spaces. If two spaces need the same fact, one owns it and the other consumes it by published name.
+
+Single ownership means reconciliation has exactly one home. Without it, the same fact drifts independently in several places and there is no authoritative current version.
+
+**Dependency is many-to-many.**
+
+- One outcome may bind to claims from its own space and to published names from any number of upstream spaces.
+- One published name may be consumed by any number of downstream spaces and external consumers.
+
+**Splitting a space is a contract change, not a rename.** Because published names may already have downstream bindings, a split must preserve resolution of every published name — either by keeping the name resolving in one of the resulting spaces, or by leaving an explicit redirect. Silent re-homing of a published name is a breaking change and is treated as one (§13.2).
+
+In database terms: **space is the ownership and encapsulation boundary; topic is the partition inside it; bindings to published names are the dependency edges.**
+
+---
+
+### 6.7 Support count: demonstrated reuse without promotion
 
 Every named claim has a derived **support count**:
 
 > **support_count = number of distinct stored outcomes that depend on the claim**
 
-Snapshot and maintained outcomes contribute equally. The count is derived from persisted outcome bindings, so it can be recalculated when needed or cached as database metadata rather than treated as an independent fact.
+This now counts outcomes **across the whole network**, not just within the owning space. An outcome in a downstream space that depends on a published name contributes to the support count of the claims behind that name. That is the point: a base-space claim earns its keep by being useful to goal spaces, and the count should show it.
 
-Support count is useful because it measures demonstrated reuse without introducing candidate claims, promotion thresholds, or separate claim lifecycles.
+Snapshot and maintained outcomes contribute equally. The count is derived from persisted bindings, so it can be recalculated when needed or cached as database metadata rather than treated as an independent fact.
+
+Support count measures demonstrated reuse without introducing candidate claims, promotion thresholds, or separate claim lifecycles.
 
 However, support count must **not** become the primary retrieval rule. A popular claim can still be irrelevant to a new problem.
 
@@ -357,13 +499,33 @@ The ordering principle is:
 
 A higher support count means a claim has proven useful across more outcomes and is therefore worth considering earlier, not that it is automatically relevant.
 
-## 7. Layer Contracts
+### 6.8 A note on the name
 
-If outcomes re-read whole topic representations, then any change to how knowledge is represented invalidates everything downstream. The seam between Layer 2 and Layer 3 needs a contract.
+Several names were considered for this unit. The criteria were that it should not sound like a storage tier, should not imply a fixed hierarchy, and should carry the connotation of a bounded thing with a purpose.
 
-### 7.1 Facts are the interface
+| Candidate | Why not / why |
+|---|---|
+| Zone | Reads as a storage or availability tier; suggests partitioning by policy rather than by purpose |
+| Domain | Strong precedent in Domain-Driven Design's bounded context, which is a genuinely good analogy, but "domain" is overloaded and implies subject rather than purpose |
+| Context | Collides with "context window" and "working context" (§22), both already used with different meanings |
+| **Space** | Chosen. Already in use in §5 as "knowledge space", carries boundedness without implying tier or hierarchy, and reads naturally in both flavours: *base space*, *goal space* |
 
-The knowledge layer exposes **named, typed, addressable claims**. Outcomes bind to those names.
+The DDD comparison is worth keeping in mind even though the name was not taken from it. A bounded context has one owner, one internal model, an explicit published language at its edge, and translation rather than sharing across boundaries. That is the same set of commitments a space makes, arrived at from a different direction.
+
+---
+
+## 7. Contracts
+
+There are now two seams that need contracts, and they are the same contract applied twice:
+
+- **Inside a space**, between claims and the outcomes assembled from them.
+- **Between spaces**, between a producing space's published names and the downstream spaces that bind to them.
+
+If an outcome re-reads a whole topic representation, or a downstream space re-reads another space wholesale, then any change to how knowledge is represented invalidates everything downstream. Named interfaces prevent that.
+
+### 7.1 Names are the interface
+
+A space exposes **named, typed, addressable** claims and outcomes. Consumers bind to those names.
 
 An outcome does not say "read the Project X topic." It says "I depend on facts `project-x.current-scope`, `project-x.committed-date`, `people.sponsor.identity`."
 
@@ -371,7 +533,7 @@ This buys three things:
 
 1. **Targeted invalidation.** When a fact changes, exactly the maintained outcomes bound to that fact can become stale. Snapshot outcomes remain unchanged historical artifacts.
 2. **Computable blast radius.** The number of maintained outcomes affected by a fact change is known, which makes review tiering possible (§13).
-3. **Representation freedom.** How a topic is internally represented can change without breaking downstream views, as long as the named facts still resolve.
+3. **Representation freedom.** How a topic is internally represented can change without breaking downstream views, as long as the named facts still resolve. Across a space boundary this is stronger: a space can be reorganized internally, and even split, without downstream spaces noticing, provided its published names keep resolving.
 
 This is the same pattern as a data contract between a producer and downstream dependency, applied to knowledge rather than tables.
 
@@ -400,6 +562,19 @@ This makes regeneration a diff between two explicit builds rather than a mystery
 
 Because bindings are persisted in the database, claim support counts can be calculated from them without introducing a second independent source of truth.
 
+### 7.4 The space contract
+
+A space's contract with the rest of the network is small and explicit:
+
+| The space promises | The consumer promises |
+|---|---|
+| Every published name resolves, or resolves through a recorded redirect | It binds only to published names |
+| A published name keeps its meaning and type; a meaning change is a new name | It does not reach into the space's internal claims |
+| Changes to a published name are recorded as change records with causality | It records its bindings so invalidation can be targeted |
+| The space is the sole owner and reconciler of the claims behind its published names | Corrections travel back to the owning space, not applied locally (§8.4) |
+
+Everything else in a space is private. The published interface should stay deliberately narrow; it is the only part of a space that is expensive to change.
+
 ## 8. Propagation and Incremental Maintenance
 
 Both outcome modes use the same knowledge path.
@@ -412,15 +587,38 @@ The difference is therefore not how an outcome obtains knowledge. The difference
 
 ---
 
-### 8.1 Lineage in both hops
+### 8.1 Lineage in every hop
 
-The system must record which raw items support which claim, and which claims feed which outcome.
+The system must record:
 
-Without lineage, every new input forces broad recomputation. That is expensive, and worse, it is **nondeterministic**: re-derivation can drift, so an unchanged source may produce a changed result and trust erodes.
+- which raw items support which claim;
+- which claims feed which outcome;
+- which published names a downstream space binds to, and which of its claims or outcomes depend on them.
+
+Lineage is therefore continuous across the whole network, not just within a space. Without it, every new input forces broad recomputation. That is expensive, and worse, it is **nondeterministic**: re-derivation can drift, so an unchanged source may produce a changed result and trust erodes.
 
 ---
 
-### 8.2 Materiality, not immediate recompute
+### 8.2 Propagation across spaces
+
+A claim change propagates transitively, but only along recorded bindings, and only through published names.
+
+1. A claim in space A changes materially.
+2. Maintained outcomes in A bound to that claim are marked potentially stale.
+3. If a **published name** of A is affected, downstream spaces bound to that name are notified.
+4. Each downstream space applies its own materiality test. A change that is material to A is not automatically material to B.
+5. Propagation continues downstream only where materiality is confirmed.
+
+Two properties make this safe:
+
+- **The DAG guarantees termination.** Propagation cannot loop.
+- **Materiality is evaluated locally at every hop.** Each space decides for itself, so a noisy upstream space does not force regeneration across the whole network.
+
+Unpublished changes stop at the space boundary by construction, which is the main practical benefit of keeping the published interface narrow.
+
+---
+
+### 8.3 Materiality, not immediate recompute
 
 Not every claim update should trigger a new maintained-outcome version.
 
@@ -434,7 +632,7 @@ Whether regeneration is automatic or gated on review remains a **per-outcome pro
 
 ---
 
-### 8.3 The reverse edge
+### 8.4 The reverse edge
 
 The most valuable learning signal is an authoritative correction, decision, or real-world result produced at the outcome boundary — often from a human, but potentially supplied through another trusted participant in the system.
 
@@ -443,14 +641,18 @@ If a correction lives only in the outcome, the same error can recur next time.
 Corrections must therefore flow **upward**:
 
 1. The correction lands in the raw layer as a source — it is new evidence about the world or about the user's intent.
-2. It updates or supersedes the claim in the knowledge layer that produced the error.
-3. Bound maintained outcomes are reconsidered; snapshot outcomes remain historical records.
+2. It updates or supersedes the claim that produced the error, **in the space that owns that claim**.
+3. Bound maintained outcomes are reconsidered, in the owning space and transitively downstream; snapshot outcomes remain historical records.
+
+**Corrections route to the owning space.** This is the network's version of the rule, and it is the one most easily got wrong. If a goal space notices that a fact it consumed from a base space is wrong, it must not fix the fact locally. A local fix creates a second, divergent belief with no reconciliation home, and it will be silently overwritten the next time the published name refreshes. The correction goes to the raw layer, is attributed to the owning space, and supersedes the claim there — which then benefits every other consumer of that fact.
+
+Lineage is what makes this routing possible: the binding records which space the consumed name came from.
 
 An architecture with only downward arrows cannot learn from outcomes.
 
 ---
 
-### 8.4 Every outcome is a demand signal
+### 8.5 Every outcome is a demand signal
 
 Because every outcome is persisted, the system has a durable record of what knowledge was actually needed.
 
@@ -467,7 +669,7 @@ No global promotion threshold is required.
 
 ---
 
-### 8.5 The escape hatch becomes a gap-filling path
+### 8.6 The escape hatch becomes a gap-filling path
 
 Raw→knowledge is lossy. The current knowledge layer will eventually be insufficient for some desired outcome.
 
@@ -488,7 +690,7 @@ The result is important: snapshot and maintained outcomes use the same internal 
 
 ---
 
-### 8.6 Idempotency has to live in storage
+### 8.7 Idempotency has to live in storage
 
 In a deterministic pipeline, idempotency comes from transform purity: the same input produces the same output, so re-running is safe.
 
@@ -508,11 +710,29 @@ But the differences have to be **load-bearing**. A statement that "our data is u
 
 **Immutable raw plus reprocessing optionality.** Most AI memory systems treat memory as one mutable store, which means an improved extractor can no longer inspect the original evidence. Keeping raw immutable preserves the option to revisit extraction or reconciliation later without making reprocessing a normal operating requirement.
 
+**Medallion architecture.** The space network maps onto bronze/silver/gold more cleanly than the earlier three-layer model did:
+
+| Medallion | This system |
+|---|---|
+| Bronze — raw, immutable, as-landed | Raw Information Lake |
+| Silver — cleaned, conformed, reusable, subject-oriented | **Base spaces** |
+| Gold — business-shaped marts serving specific questions | **Goal spaces** |
+
+The borrowing that matters is not the three names. It is the underlying discipline: **reusable conformed knowledge is built once and consumed many times; purpose-shaped artifacts are built on top of it and are allowed to be numerous, opinionated, and disposable.** That discipline is exactly what stops every goal space from re-deriving the same facts from raw.
+
+The difference to keep in mind: Medallion tiers are usually a fixed three, and refinement is the only axis. Here the network is arbitrarily deep and the axis is **purpose**, so a goal space can consume another goal space (§6.4) without that being a layering violation.
+
 **Slowly changing dimensions.** The supersession requirement in §7.2 is exactly SCD Type 2.
 
-**Conformed dimensions as a shared entity registry.** People, organizations, and projects appear across many topics. Resolving them once, centrally, stops the same person existing as three entities in three topic representations. The entity-resolution problem is identical.
+**Conformed dimensions as a shared entity registry.** People, organizations, and projects appear across many spaces. Resolving them once, centrally, stops the same person existing as three entities in three spaces. In the network this becomes concrete: **the shared entity registry is itself a base space** — likely the first one — that nearly everything else consumes. The entity-resolution problem is identical.
 
-**Data contracts.** §7.1 is a data contract applied to knowledge.
+**Star schema's fact/dimension split, as an analogy for space design.** Dimensions are shared, slowly changing, and reused across many facts; facts are numerous and question-specific. That is the base-space/goal-space distinction. The useful design heuristic that follows: *if several goals would each need their own copy of it, it is dimensional and belongs in a base space.* The formal star schema itself should not be adopted — see §9.3.
+
+**The model DAG.** dbt's central idea is that transformations are named, versioned models that reference each other by name, forming a DAG that the tool validates and traverses. §6.4 and §6.5 are that idea applied to knowledge: `ref()` becomes a binding to a published name, sources are the raw lake, and cycle detection is a first-class feature rather than an afterthought.
+
+**The data-product shape.** One owner, explicit input ports, explicit output ports, its own internal model, composable with other data products. This is precisely what a space is, and the vocabulary is worth borrowing even though the organizational half of Data Mesh is not (§9.3).
+
+**Data contracts.** §7.1 and §7.4 are data contracts applied to knowledge.
 
 **Freshness as an explicit per-view property.** Maps onto per-outcome regeneration policy.
 
@@ -528,13 +748,21 @@ But the differences have to be **load-bearing**. A statement that "our data is u
 
 ### 9.3 Do not borrow
 
-**A global schema or ontology defined up front.** Warehouses can conform globally because the question set is bounded and stable. Here, schema should emerge per topic and be allowed to differ across topics, with conformance only at the shared-entity boundary.
+**A global schema or ontology defined up front.** Warehouses can conform globally because the question set is bounded and stable. Here, schema should emerge per space and be allowed to differ across spaces, with conformance only at the published-name and shared-entity boundaries. The space model exists partly to make heterogeneous internal schemas safe.
+
+**Star schema as an actual physical model.** Its dimensional split is a good design heuristic (§9.1), but its machinery — fixed grain, surrogate keys, denormalized fact tables, conformed dimension tables designed up front — exists to make large-scale analytical joins fast. There is no join-performance problem at this volume, and imposing a fixed grain on knowledge would force exactly the up-front ontology the previous point rejects. Borrow the intuition, not the model.
+
+**A prescribed number of tiers.** Medallion's bronze/silver/gold is a useful mental model, not a constraint to enforce. The network's depth should follow purpose, not a naming convention. Rejecting a legitimate space because it would be "a fourth tier" would be cargo-culting.
 
 **Pipeline-centric architecture.** In data engineering the pipeline is the primary artifact and data flows through it. Here the **knowledge artifact is primary** and processing is opportunistic. Building an orchestration and scheduling layer would import complexity this system does not need.
 
 **Completeness.** Warehouses aim for exhaustive coverage where the totals tie out. This system explicitly does not (§28). Completeness thinking is the gravitational pull that drags the knowledge layer back into being a second data lake.
 
-**Data Mesh.** It solves an organizational problem that does not exist at single-user scale. Revisit only if the system becomes multi-writer.
+**Data Mesh's organizational layer.** Domain teams, federated governance, and self-serve platform infrastructure solve an organizational problem that does not exist at single-user scale. Revisit only if the system becomes multi-writer.
+
+Note the split from §9.1: the **data-product shape** — one owner, input and output ports, internal autonomy, composability — is borrowed and is in fact what a space is. The organizational apparatus around it is not. Keeping these separate matters, because the shape is cheap and the apparatus is expensive.
+
+**Pipeline orchestration and scheduling.** Even though the network is now a DAG, it should not acquire a scheduler. Propagation is event-driven along recorded bindings (§8.2), not a nightly run over the graph. A DAG of knowledge artifacts is not a DAG of jobs.
 
 ---
 
@@ -565,7 +793,9 @@ But the differences have to be **load-bearing**. A statement that "our data is u
 The system uses two durable storage responsibilities:
 
 - **Object storage** holds content: raw source objects, immutable claim-version content, immutable outcome-version content, and other large or format-specific artifacts. "Object storage" is an abstraction, not a commitment to one vendor or filesystem. An implementation may begin with local files and later use S3, Azure Blob, Google Cloud Storage, or an equivalent store without changing the knowledge model.
-- **A database** is a first-class durable system of record for metadata and relationships: logical object identities, version relationships, current-version pointers, source→claim lineage, claim→outcome bindings, topic ownership, authorship, timestamps, approvals, change history, support counts or caches, retrieval metadata, and other structured state.
+- **A database** is a first-class durable system of record for metadata and relationships: logical object identities, version relationships, current-version pointers, source→claim lineage, claim→outcome bindings, **cross-space bindings to published names**, **space membership, space purpose, and the space reference graph**, topic ownership, authorship, timestamps, approvals, change history, support counts or caches, retrieval metadata, and other structured state.
+
+The space graph is database state, not a folder convention. Acyclicity must be **enforced at binding time** by the database or the application writing to it, because a cycle admitted once is expensive to unwind later.
 
 The object store and database are both canonical, but for different responsibilities. The design does **not** require the database to be reconstructable from object storage. Production reliability comes from normal database backup, restore, migration, replication, and disaster-recovery practices.
 
@@ -596,7 +826,7 @@ The database therefore stores a first-class **Change Record** for meaningful KB 
 - the triggering source, correction, decision, or process;
 - who or what made or approved the change;
 - when it happened;
-- which claims, outcomes, topics, or other objects were affected.
+- which claims, outcomes, topics, spaces, or other objects were affected.
 
 One change record may group multiple related version changes produced by the same causal event. For example, a new source may supersede one claim and cause three maintained outcomes to generate new versions; those mutations can share one change ID.
 
@@ -608,7 +838,7 @@ The product should operate as a continuous loop.
 
 ### 1. Define the goal
 
-The human establishes the purpose of the knowledge space.
+The human establishes the purpose of a knowledge space — either by creating one, or by working within one that already exists.
 
 The system helps clarify:
 
@@ -619,7 +849,7 @@ The system helps clarify:
 - time horizon;
 - current state.
 
-The user should not need to perfectly define the goal on day one. The goal can evolve.
+The user should not need to perfectly define the goal on day one. The goal can evolve, and if it evolves far enough that the space is serving two purposes, that is the signal to split (§6.4).
 
 ### 2. Capture information
 
@@ -697,7 +927,7 @@ The AI uses this model to:
 
 Human decisions and real-world results update the knowledge model.
 
-Corrections do not stop at the outcome. A correction enters the raw layer as a source, supersedes the claim that produced the error, and marks every other outcome bound to that claim as stale (§8.3).
+Corrections do not stop at the outcome. A correction enters the raw layer as a source, supersedes the claim that produced the error **in the space that owns it**, and marks every other outcome bound to that claim — including outcomes in downstream spaces — as stale (§8.4).
 
 The system becomes more useful over time.
 
@@ -767,11 +997,15 @@ Keeping those concepts separate prevents a heavily reused historical fact from a
 | Change to a claim with no maintained outcomes depending on it | Apply, preserve provenance; snapshots remain unchanged |
 | Change affecting a small number of maintained outcomes, reversible | Apply, flag for later review |
 | Change affecting many maintained outcomes | Queue for approval before applying |
-| Topic boundary creation or merge | Queue for approval |
+| Topic boundary creation or merge inside a space | Queue for approval |
+| Change to a claim behind a **published name** with downstream space bindings | Queue for approval; blast radius crosses a contract |
+| **Creating a new space** | Queue for approval — cheap to do, but proliferation is the main failure mode (§36) |
+| **Splitting or merging a space** | Always reviewed. Published names must keep resolving or carry explicit redirects |
+| **Adding or removing a published name** | Adding: apply, flag. Removing or changing meaning: queue for approval — it is a contract break |
 | Knowledge-layer bulk migration or schema change | Explicit migration, always reviewed |
 | Contradiction the system cannot resolve | Queue as a question, prioritized by value of information |
 
-There should not normally be an active **new claim with zero outcome dependencies**. Claims are created because an outcome demonstrated the need for them (§6.2).
+There should not normally be an active **new claim with zero outcome dependencies**. Claims are created because an outcome demonstrated the need for them (§6.3).
 
 ### 13.3 Two distinct modes
 
@@ -872,7 +1106,7 @@ Knowledge earns its place because an outcome needs it, not because it is interes
 
 ### 16.12 Subject-oriented storage, purpose-driven assembly
 
-Knowledge is organized by topic so that it outlives the goals it served. Purpose enters as a filter on what to keep and a specification for what to assemble.
+Inside a space, knowledge is organized by topic so that it outlives the individual outcomes it served. Purpose enters as a filter on what to keep and a specification for what to assemble.
 
 ### 16.13 Derived knowledge is an asset, not a cache
 
@@ -906,6 +1140,26 @@ Version relationships, causality, approvals, and change reasons belong to the KB
 
 The knowledge model should depend on an object-storage abstraction rather than a local filesystem or a specific cloud provider. Structured metadata and relationships belong in the durable database.
 
+### 16.21 One space, one purpose
+
+A space exists to serve one goal, or a very small number of closely related ones. When purposes diverge, the space is split rather than widened. Size alone is not the trigger; divergence of purpose is.
+
+### 16.22 Spaces compose; the graph stays acyclic
+
+A cross-cutting need creates a new higher-level space that consumes existing ones. It does not create a copy, and it does not create a back-reference. Acyclicity is enforced, not merely encouraged, because termination, reproducibility, and explainable causality all depend on it.
+
+### 16.23 Cross-space reads go through published names
+
+Everything a space does not publish is private. Consumers bind to names, never to internals. The published interface is deliberately narrower than what the space knows, because it is the only part that is expensive to change.
+
+### 16.24 Corrections route to the owning space
+
+A fact is owned by exactly one space. A correction discovered anywhere in the network is applied there, so that every consumer benefits and no divergent second belief is created.
+
+### 16.25 The network is grown, not designed
+
+Spaces accrete from demonstrated demand exactly as claims do. A new space is created when a purpose needs one, not in anticipation of one.
+
 ---
 
 ## 17. Conceptual Architecture
@@ -914,30 +1168,59 @@ The architecture is intentionally simple at the highest level:
 
 ```mermaid
 flowchart LR
-    R["1. Raw Information<br/>Everything captured<br/>Immutable • Append-only"]
-    K["2. Shared Knowledge Base<br/>Reusable subject-oriented claims<br/>Versioned • Evidence-linked"]
-    O["3. Outcomes<br/>Immutable materialized versions<br/>Maintained: one version is current"]
-    C["4. Humans • AI agents • Other systems"]
-    P["Purpose / Desired Outcome"]
+    subgraph L1["Layer 1 — Raw Information Lake"]
+        R["Everything captured<br/>Immutable • Append-only"]
+    end
 
-    R -->|"learn"| K
-    K -->|"assemble"| O
-    O -->|"use"| C
+    subgraph L2["Layer 2 — Knowledge (a network of Spaces)"]
+        direction LR
+        B1["Base space<br/><i>maintain truth about X</i>"]
+        B2["Base space<br/><i>maintain truth about Y</i>"]
+        G1["Goal space<br/><i>achieve A</i>"]
+        G2["Higher-level goal space<br/><i>achieve B</i>"]
+
+        B1 -->|"published names"| G1
+        B2 -->|"published names"| G1
+        B2 -->|"published names"| G2
+        G1 -->|"published names"| G2
+    end
+
+    C["Humans • AI agents • Other systems"]
+    P["Purpose"]
+
+    R -->|"learn"| B1
+    R -->|"learn"| B2
+    R -->|"learn"| G1
+    G1 -->|"use"| C
+    G2 -->|"use"| C
+    B1 -->|"use"| C
     C -->|"corrections / new evidence"| R
-    P -.-> K
-    P -.-> O
+    P -.->|"defines each space"| L2
 ```
 
-The important separation is:
+Each space, expanded, has the same internal shape (§6.1):
 
-- **Raw Information** preserves what entered the system.
-- **Shared Knowledge** maintains the current best understanding as reusable claims.
-- **Outcomes** package subsets of that knowledge for a specific purpose.
-- **Consumers are outside the knowledge architecture.** The same knowledge base can support humans, AI agents, and other software without changing its internal model.
+```mermaid
+flowchart TD
+    IN["Inputs: raw sources and/or<br/>upstream published names"]
+    CL["Claims — canonical<br/>topic-owned • versioned • evidence-linked"]
+    OU["Outcomes — derived views<br/>immutable versions • build manifests"]
+    PUB["Published interface<br/>the subset others may bind to"]
 
-If the Knowledge layer cannot support a requested outcome, outcome construction temporarily drops to Raw, derives the missing claims, records lineage, and then completes the outcome through the normal Knowledge→Outcome path.
+    IN --> CL --> OU --> PUB
+```
 
-Substrate: **object storage** for immutable/versioned content and a **durable database** for metadata, relationships, current-version pointers, lineage, change history, and retrieval. Git is not required. Support count is derived from persisted outcome bindings.
+The important separations are:
+
+- **Raw Information** preserves what entered the system. There is exactly one lake.
+- **Each space** maintains the current best understanding needed for one purpose, and produces outcomes from it.
+- **The network** lets a cross-cutting purpose be served by composing spaces rather than by widening one or copying facts.
+- **Published names** are the only cross-space interface, which keeps invalidation targeted and internals refactorable.
+- **Consumers are outside the knowledge architecture.** The same network can serve humans, AI agents, and other software without changing its internal model.
+
+If a space cannot support a requested outcome, outcome construction drops to raw sources or upstream published names, derives the missing claims, records lineage, and completes the outcome through the normal claims→outcome path (§8.6).
+
+Substrate: **object storage** for immutable/versioned content and a **durable database** for metadata, relationships, current-version pointers, lineage, the space graph, cross-space bindings, change history, and retrieval. Git is not required. Support count is derived from persisted bindings across the whole network.
 
 ## 18. The Goal as a Function
 
@@ -1083,6 +1366,23 @@ The first implementation does not need a complex ontology, but several concepts 
 
 The purpose or result the human–AI system is trying to achieve.
 
+### Knowledge Space
+
+A bounded unit of knowledge serving one purpose. It owns a set of topics and their claims, produces outcomes from them, and exposes a published interface. It may consume raw sources and the published names of upstream spaces.
+
+Descriptively, spaces come in two flavours (§6.2), which is a characterization rather than a separate type:
+
+- **base space** — subject-oriented, long-lived, consumed by other spaces;
+- **goal space** — goal-oriented, finite, usually consumed by humans and agents.
+
+All spaces together are the Knowledge layer. Their reference graph must remain acyclic.
+
+### Published Name
+
+A stable, typed identifier that a space exposes for external binding — either a published outcome or a published claim. It is the only legitimate way for another space to consume this space's knowledge. Everything not published is private.
+
+Published names are contracts: they must keep resolving, keep their meaning, and carry explicit redirects when a space is split.
+
 ### Source
 
 Raw information entering the system.
@@ -1129,13 +1429,13 @@ Something a human, AI agent, or other system may need to do.
 
 ### Topic
 
-The subject that owns a set of knowledge claims. Emergent rather than pre-designed: AI may propose boundaries and humans can review consequential changes. Every active claim belongs to exactly one topic.
+The subject that owns a set of knowledge claims **inside a space**. Emergent rather than pre-designed: AI may propose boundaries and humans can review consequential changes. Every active claim belongs to exactly one topic, inside exactly one space.
 
 ### Claim
 
-A named logical unit of the knowledge layer, typed and owned by one topic. A claim may have multiple immutable versions, with one version designated current when the claim has a resolved current belief.
+A named logical unit of knowledge, typed and owned by one topic within one space. A claim may have multiple immutable versions, with one version designated current when the claim has a resolved current belief.
 
-A claim exists in the active knowledge layer because at least one stored outcome depends on it.
+A claim exists in the active knowledge layer because at least one stored outcome — in its own space or in a downstream space — depends on it.
 
 ### Claim Version
 
@@ -1143,7 +1443,7 @@ An immutable evidence-linked materialization of a claim at a point in time. New 
 
 ### Support Count
 
-A derived property of a named claim: the number of distinct stored outcomes whose bindings depend on that claim. Snapshot and maintained outcomes both count. It is a secondary reuse/ranking signal, not a promotion threshold and not a substitute for relevance.
+A derived property of a named claim: the number of distinct stored outcomes **anywhere in the network** whose bindings depend on that claim, directly or through a published name. Snapshot and maintained outcomes both count. It is a secondary reuse/ranking signal, not a promotion threshold and not a substitute for relevance.
 
 ### Outcome
 
@@ -1158,7 +1458,7 @@ The consumer is not part of the outcome model; it may be a human, AI agent, othe
 
 ### Binding
 
-The declared dependency from an outcome to the named claims it needs. Bindings are the unit of provenance, support-count calculation, and targeted invalidation.
+The declared dependency from an outcome to the names it needs: claims within its own space, and published names from upstream spaces. Bindings are the unit of provenance, support-count calculation, targeted invalidation, cross-space propagation, and correction routing.
 
 ### Outcome Version
 
@@ -1174,7 +1474,7 @@ A durable database record explaining a meaningful KB change: what changed, why, 
 
 ### Lineage
 
-The recorded edges from raw source to claim, and from claim to outcome. Without lineage there is no targeted invalidation, provenance, reproducibility, or honest answer to why something changed.
+The recorded edges from raw source to claim, from claim to outcome, and from a consumed published name to the downstream claims and outcomes that depend on it. Without lineage there is no targeted invalidation, provenance, reproducibility, or honest answer to why something changed.
 
 ### Gap
 
@@ -1202,13 +1502,15 @@ The subset of derived knowledge assembled for a specific outcome at a specific m
 
 This distinction prevents the system from treating every historical statement as equally current and equally relevant.
 
-### How this maps onto the three layers
+### How this maps onto the two layers
 
 | Form | Where it lives |
 |---|---|
-| Source memory | Layer 1, immutable |
-| Derived knowledge | Layer 2, superseded over time |
-| Working context | Layer 3 as a persisted outcome with a build manifest |
+| Source memory | Layer 1 — the raw lake, immutable |
+| Derived knowledge | Layer 2 — claims inside a space, superseded over time |
+| Working context | Layer 2 — an outcome inside a space, persisted with a build manifest |
+
+Note that the second and third forms now live in the same layer. That is deliberate: they are distinguished by **role**, not by tier. Claims are canonical, outcomes are derived from them, and both belong to the space whose purpose they serve.
 
 A **snapshot outcome** preserves working context exactly as it was assembled. A **maintained outcome** preserves every materialized version of that working context and designates one version as current; relevant material claim changes may generate a new current version without deleting the prior one.
 
@@ -1219,6 +1521,14 @@ The first version should prove one central hypothesis:
 > **A purpose-driven knowledge layer can make a personal AI meaningfully more useful than an AI operating directly over a large unstructured memory store.**
 
 The MVP does not need to ingest a person's entire digital life. It can begin with one desired outcome and a few input channels.
+
+**The MVP should also begin with one space.** The network is the model's answer to growth, not a v1 feature. Building multi-space composition before a single space has proven useful would be designing for a problem the product has not yet earned. What v1 must do is make the *later* network cheap:
+
+- every claim records its owning space from the first write;
+- outcomes are addressable by name, so publishing one later is a property change rather than a migration;
+- bindings are stored explicitly, so cross-space bindings are the same mechanism with a different endpoint.
+
+The second space should appear when the first one's purposes visibly diverge — which is itself the first real test of §6.4.
 
 ### MVP experience
 
@@ -1303,7 +1613,8 @@ Early versions should avoid becoming:
 - a generic RAG platform;
 - a workflow orchestration platform;
 - a complete data warehouse for a person's life;
-- a system that asks for approval on everything it does.
+- a system that asks for approval on everything it does;
+- a sprawling network of thin spaces built before a single space has demonstrated value.
 
 The early product should stay focused on proving that **purpose-driven knowledge produces better human–AI collaboration**.
 
@@ -1317,9 +1628,13 @@ A simple product could have several main views.
 
 What are we trying to accomplish?
 
+### Spaces
+
+What spaces exist, what is each one's purpose, and how do they depend on each other? A view of the network itself, showing published names and their consumers, is the main new surface v5 requires.
+
 ### Knowledge
 
-What does the shared knowledge base currently understand that matters, and which claims are most reused?
+Within a space, what does the system currently understand that matters, and which claims are most reused?
 
 ### Inbox
 
@@ -1366,7 +1681,8 @@ The first version is single-user. Simplicity should win. But a few decisions mad
 **What must be true from the start:**
 
 - **Every claim has an author and a timestamp.** Adding attribution later means backfilling something that was never recorded.
-- **Every claim has exactly one owning topic.** Ownership is how concurrent writers are arbitrated; retrofitting it into a knowledge layer that grew without it is a data migration.
+- **Every claim has exactly one owning topic, inside exactly one owning space.** Ownership is how concurrent writers are arbitrated; retrofitting it into a knowledge layer that grew without it is a data migration. The space is also the natural future unit of access control and sharing, which is a second reason to establish the boundary now even though v1 has one writer.
+- **Cross-space consumption goes through published names from day one.** In a multi-writer world this becomes the sharing boundary: another person can be granted a space's published interface without being granted its internals. If consumers are allowed to reach into internals in v1, that option is gone.
 - **Approvals are durable change records.** Multi-writer needs a shared, auditable record of who decided what, when, and why. The database records the approval and links it to the affected versions and causal change record.
 - **Contradiction is a representable state.** Single-user contradiction comes from changing your mind. Multi-writer contradiction comes from disagreement. The representation is the same; only the resolution policy differs.
 
@@ -1397,11 +1713,12 @@ A person may eventually have AI collaborators for:
 - creative projects;
 - personal administration.
 
-Each can have its own purpose-driven knowledge model.
+In the v5 model this is not a new architecture. Each of those is a space, or a small cluster of spaces, on the shared raw lake.
 
-Some raw sources may be shared, while goal-oriented knowledge remains scoped to the relevant purpose.
+Two consequences worth naming:
 
-Over time, a higher-level personal AI could coordinate across these goal spaces while respecting privacy and boundaries.
+- **Coordination across areas is a space, not a supervisor.** A "personal chief of staff" that spans work, finance, and family is a higher-level goal space consuming the published names of the others. It needs no special privileges, because it consumes them the same way any space does.
+- **Privacy boundaries follow published interfaces.** A space can expose a coarse summary while keeping sensitive internals private. That is the same encapsulation mechanism used for refactoring, reused for confidentiality — which is why §29 treats published names as a prerequisite for multi-writer rather than a later feature.
 
 ---
 
@@ -1452,9 +1769,9 @@ The project can be built around one question:
 
 > **What is the minimum amount of synchronization effort needed to maintain enough shared context for humans and AI agents to operate as one effective system over time?**
 
-The three-layer model — **raw information + subject-oriented shared knowledge + purpose-specific persisted outcomes** — is the proposed answer.
+The two-layer model — **one permissive raw lake, plus a network of purpose-bounded knowledge spaces composing as a DAG** — is the proposed answer.
 
-The raw layer minimizes capture cost. The knowledge layer makes demonstrated useful knowledge reusable. The outcome layer packages that knowledge for concrete work and records what was actually needed.
+The raw layer minimizes capture cost. Each space keeps its purpose small enough that the AI can decide what matters within it. Base spaces make durable knowledge reusable across purposes. Goal spaces package that knowledge for concrete work and record what was actually needed. Composition means a new cross-cutting purpose costs a new space, not a redesign.
 
 ---
 
@@ -1476,7 +1793,7 @@ These remain unresolved and are worth tracking explicitly rather than deciding b
 
 2. **Who writes the outcome specification?** If the user must specify precisely what an outcome needs, the system inherits the curation burden it was built to remove. If AI infers it, the binding set can drift and invalidation may become unreliable.
 
-3. **How are topic boundaries revised after the fact?** Splitting or merging a topic means re-homing claims that outcomes are already bound to. Is that a rename with redirection, or a breaking change?
+3. **How are space and topic boundaries revised after the fact?** Splitting or merging means re-homing claims that outcomes are already bound to. Inside a space this is a rename with redirection. Across a space boundary it touches a published contract, so the working answer in §6.6 is *published names must keep resolving or carry explicit redirects*. Unresolved: how long redirects live, whether a redirect chain is ever collapsed, and what happens when a split genuinely changes a published name's meaning rather than its location.
 
 4. **What is the retention policy for the raw layer?** Immutability and append-only are stated. Unbounded growth is implied. At what point does that become a cost or privacy problem, and what is deleted first?
 
@@ -1485,3 +1802,13 @@ These remain unresolved and are worth tracking explicitly rather than deciding b
 6. **When does the goal model itself change, and what happens downstream?** A goal shift can change what future outcomes need. Because claims are now retained through demonstrated outcome use rather than goal membership, does a goal shift require any knowledge migration at all, or only new outcome assembly behavior?
 
 7. **How long should snapshot outcomes be retained?** They are useful as demand history, reproducibility artifacts, and inputs to support count, but indefinite retention may create privacy and storage costs. If snapshots expire, should their contribution to support count expire too?
+
+8. **What is the right granularity of a space, and what stops proliferation?** The model makes creating a space cheap, which makes over-fragmentation the most likely failure mode: dozens of thin spaces, each with a small published interface, and most of the system's real complexity pushed into the edges between them. What is the concrete signal that a space should be split, and the concrete signal that two should be merged? A candidate heuristic is *coherence of purpose per claim*, but it is not yet operational.
+
+9. **Who decides that a new space is needed — user or AI?** Creating a space is a more consequential judgement than creating a claim, because it changes the shape of the network. The AI-proposes / human-approves pattern (§13) is the obvious answer, but the proposal needs a trigger. Repeated cross-cutting outcomes that keep binding to the same set of published names are a plausible one.
+
+10. **What happens to a goal space when its goal completes?** Archive it, keep it queryable, or dissolve it? Its outcomes are historical artifacts worth keeping. Its claims may still be referenced by downstream spaces, which means a completed goal space cannot simply be deleted while anything still binds to its published names.
+
+11. **Does the base/goal distinction need to be a real type, or does it stay descriptive?** It is currently descriptive. If the system ever needs to treat them differently — different retention, different review defaults, different lifecycle — it becomes a real attribute, and that decision is cheaper now than later.
+
+12. **When is a cross-cutting need a new space rather than one more outcome in an existing one?** Both are legitimate. Creating a space is the right answer when the need is durable and has its own reconciliation logic; adding an outcome is right when it is one-off assembly. The boundary between these cases is not yet sharp.
