@@ -3,7 +3,7 @@
 **Working title:** Purpose-Driven Personal AI
 **Document type:** Product Vision
 **Status:** Early concept / foundation for product discovery
-**Version:** v6.2 — storage substrate resolved: database is the system of record for the knowledge layer
+**Version:** v6.3 — minimal required human decisions: defaults over approvals, reversibility as the licence
 **Revised:** September 2, 2026
 
 ---
@@ -139,7 +139,7 @@ Every outcome version is persisted as an immutable artifact with a build manifes
 - **Snapshot** — one stored version; later signals do not refresh it. An ad-hoc request is therefore not disposable; it becomes a durable record of what was needed and what was produced.
 - **Maintained** — a logical outcome with a version history. When a bound claim changes materially, regeneration creates a new version and designates it current; older versions remain.
 
-There is no promotion lifecycle. Changing the policy is a property change, not a migration.
+There is no promotion lifecycle. Changing the policy is a property change, not a migration — which is what allows the choice to be **defaulted rather than asked**. Every outcome starts as a snapshot. It becomes maintained when the system observes demand for currency: the same outcome is requested again, another outcome binds to it, or the user acts on it repeatedly. The user may override at any time and never has to decide up front.
 
 Persisting outcomes also gives **pre-computed context packing** for reasoners under a context budget, which is a real consumer of this system.
 
@@ -156,7 +156,7 @@ An outcome does not say "read the Project X topic." It says "I depend on `projec
 This buys three things:
 
 1. **Targeted invalidation.** When a claim changes, exactly the maintained outcomes bound to it can become stale.
-2. **Computable blast radius.** The number of affected maintained outcomes is known, which makes review tiering possible (§8).
+2. **Computable blast radius.** The number of affected maintained outcomes is known, which makes it possible to rank what a change touches and to express any change in outcome terms rather than graph terms (§8).
 3. **Representation freedom.** Internal representation can change without breaking consumers, as long as the named claims still resolve.
 
 ### 5.1 Claim versions are superseded, never overwritten
@@ -185,7 +185,7 @@ The sequence is: claim changes → find bound **maintained** outcomes → mark p
 
 Snapshot outcomes never enter this path.
 
-Whether regeneration is automatic or gated on review is a **per-outcome property**, not a system-wide policy.
+Whether regeneration is automatic or gated on review is a **per-outcome property**, not a system-wide policy. That property is **set by the system, not by the user**: regeneration is automatic by default, and an outcome escalates to gated when its own correction history says it should (§8). The user can pin either value; they are not asked to choose one.
 
 ### 6.3 The reverse edge
 
@@ -242,17 +242,53 @@ Three things explicitly not borrowed: a **global schema or ontology defined up f
 
 ---
 
-## 8. Human Review: Scale with Consequence, Not Volume
+## 8. Human Review: Minimal, Earned, and Reversible
 
-The pattern is **AI does the work, human reviews the important decisions** — it substitutes for deterministic data-quality gates where judgment is required. Applied uniformly it fails, because review requests scale with input volume and the queue becomes the new job.
+The pattern is **AI does the work, human reviews what matters** — it substitutes for deterministic data-quality gates where judgment is required. Applied uniformly it fails, because review requests scale with input volume and the queue becomes the new job. A system that asks for a decision every time it is unsure has moved the work, not removed it.
 
-Three rules keep it usable:
+> **Decisions are defaulted, not asked. Structure is applied, not approved. The human corrects rather than pre-approves.**
 
-**Tier by blast radius.** A claim change's blast radius is the number of **maintained** outcomes that may need reconsideration. Narrow, reversible changes are applied and optionally flagged. Changes affecting many maintained outcomes, topic boundary changes, bulk migrations, and unresolvable contradictions are queued for approval.
+### 8.1 Reversibility is what licenses the default
 
-**Prefer "apply, then flag" over "approve before applying."** Immutable versions and change records make most changes traceable and reversible, so the second mode is available far more often than instinct suggests, and it preserves flow. Reserve pre-approval for changes that are hard to reverse, consequentially uncertain, or wide.
+Pre-approval buys protection against changes that cannot be undone. Inside this knowledge layer, almost nothing qualifies. Claim versions are superseded, never overwritten (§5.1); outcome versions are immutable and additive (§4.4); change records make every mutation causally traceable and revertible as one operation (§9.5); and consumers bind to names, so internal reorganization cannot break them (§5).
 
-**Batch, don't interrupt.** Review is a periodic pass over a queue ordered by consequence, so that a user who reads only the top of it still sees the decisions that matter most.
+So the question for any change is not "how big is it?" but **"can it be undone?"** Reversible changes are applied. Only these require approval before the fact:
+
+- **deletion from the raw layer** — the one genuinely irreversible act in the system (§19 Q4);
+- **actions with effects outside the knowledge base** — sending, publishing, purchasing, committing on the user's behalf;
+- **sharing or exposing knowledge to another party** (a multi-writer concern, Appendix B).
+
+Everything else — new claims, supersessions, contradictions, topic boundary changes, space splits, bulk migrations, outcome regeneration — is applied and made visible.
+
+### 8.2 Escalation is learned, not configured
+
+A blanket "apply everything" would be reckless in areas where the system is demonstrably wrong. Rather than asking the user to configure strictness, the system derives it per outcome and per topic from its own correction history:
+
+| State | Behaviour | Entry condition |
+|---|---|---|
+| **Silent** | Applied; visible only in the inspection view | Default |
+| **Flagged** | Applied; surfaced in the Inbox as "this changed, and why" | Wide blast radius, weak evidence, or a recent correction nearby |
+| **Gated** | Queued for approval before taking effect | Sustained correction rate in this outcome or topic |
+
+Escalation and relaxation are automatic. The system gets stricter exactly where it has been wrong and quieter where it has been right, so the review burden tracks **demonstrated unreliability** rather than input volume. Blast radius still matters — it ranks what to show first — but it no longer decides *whether* to ask.
+
+### 8.3 Ask at the point of use, not the point of ingestion
+
+Most ambiguity never matters. A contradiction is a representable state (§7), not an error demanding immediate resolution: the system carries both readings with uncertainty visible (Principle 7) and asks only when an outcome actually depends on the resolution. Clarification questions are ranked by value of information, batched, budgeted to a small number per period, and allowed to expire. **No outcome ever blocks on an unanswered question** — the system proceeds with its best current understanding and marks the uncertainty in the result.
+
+### 8.4 Three cheap substitutes for exhaustive review
+
+Approval never made claims correct; §7 already concedes that correctness moves to sampling and human review. Three mechanisms deliver that more cheaply than a queue:
+
+**Use is review.** Every use of an outcome is an implicit check, and every correction is an explicit one that already routes upward to the owning claim (§6.3). Correcting the outcome in front of you costs nothing extra; approving a change you have no context for costs attention.
+
+**Sampling audit.** A small random sample of recent claim changes is offered for verification on a periodic pass. Small-N (§7) makes this affordable, and its cost is fixed by the sample size rather than by how much information entered the system.
+
+**Undo as a first-class action.** Because every applied change has a change record, "revert this" is a supported operation on anything the user disagrees with — which is what makes applying-by-default honest rather than merely convenient.
+
+### 8.5 The budget
+
+Required decisions per week should be **a small constant**, not a function of input volume. §17 tracks this. If it climbs with capture volume, the review model has failed regardless of how good the knowledge is, and the correct response is to convert the most frequent decision back into a default.
 
 ---
 
@@ -308,7 +344,7 @@ Version history says *what* changed; trust also requires *why*. A change record 
 
 ## 10. The Core Loop
 
-1. **Define the purpose.** The human establishes what the space is for — desired outcome, why it matters, success criteria, constraints, time horizon. This need not be perfect on day one.
+1. **Establish the purpose.** What the space is for — desired outcome, why it matters, success criteria, constraints, time horizon. The human is not asked to author this before doing anything useful: the system drafts it from the first outcomes requested (§15) and keeps it current as a versioned claim like any other. The human edits it when the draft is wrong, which is a correction, not a setup step.
 2. **Capture.** Very low friction; capture must be easier than organization. Connect to existing sources with permission to reduce manual entry.
 3. **Interpret and extract.** AI evaluates incoming information against the purpose and identifies durable knowledge: facts, decisions, constraints, preferences, commitments, risks, open questions.
 4. **Reconcile.** New information confirms, updates, supersedes, contradicts, or adds nuance. The system maintains a current best understanding rather than appending statements forever.
@@ -329,9 +365,11 @@ Version history says *what* changed; trust also requires *why*. A change record 
 7. **Preserve provenance and make uncertainty visible.** Knowledge retains a link to its evidence; conflicts, gaps, and low confidence are explicit rather than smoothed over. Source information stays distinguishable from AI-generated conclusions.
 8. **Derived knowledge is an asset, not a cache.** Re-derivation is expensive and nondeterministic, so knowledge is preserved and versioned rather than regenerated on a whim.
 9. **Corrections travel upward.** A fix applied only to an outcome will be undone the next time it regenerates.
-10. **Review scales with consequence, not volume.** Human attention goes to changes that are wide or hard to reverse; everything else is applied and made reversible.
+10. **Review scales with consequence, not volume.** Human attention is reserved for what is irreversible or externally consequential, and for areas the system has demonstrably got wrong; everything else is applied, recorded, and revertible.
 11. **Knowledge is consumer-agnostic.** The knowledge layer does not encode whether the next consumer is a human, an agent, or another system.
 12. **The knowledge base is grown, not designed.** Claims — and later, spaces — accrete from demonstrated demand, not in anticipation.
+13. **Default rather than ask.** Any decision the system can make and later reverse, it makes. Pre-approval is reserved for the irreversible and the externally consequential. A feature that adds a required human decision must justify why it cannot be a default with an undo.
+14. **Outcome-first, structure-on-demand.** The human works with outcomes and their purpose. Topics, claims, bindings, and the space network are always inspectable and never required knowledge; structural changes are expressed in terms of the outcomes they affect, not the graph they alter.
 
 ---
 
@@ -343,7 +381,7 @@ The first implementation does not need a complex ontology. Seven objects carry t
 |---|---|
 | **Source** | Raw information entering the system. Immutable. |
 | **Space** | A bounded body of knowledge serving one purpose. Owns topics, claims, and outcomes; exposes a published interface. v1 has one. |
-| **Topic** | The subject that owns a set of claims inside a space. Emergent rather than pre-designed; AI proposes boundaries, humans review consequential changes. Every claim belongs to exactly one topic. |
+| **Topic** | The subject that owns a set of claims inside a space. Emergent rather than pre-designed and **fully AI-managed**: because outcomes bind to claim names, re-homing a claim cannot break a consumer, so boundary changes are applied with a redirect and a change record rather than queued for approval (§8.1). Every claim belongs to exactly one topic. |
 | **Claim** | A named, typed logical unit of knowledge owned by one topic. May have many immutable **versions**, one designated current, each evidence-linked with its validity period and supersession record. Types are open: fact, decision, preference, constraint, observation, hypothesis, risk, question, lesson, and others as needed. |
 | **Outcome** | A persisted view over claims serving one specific purpose. Has a maintenance mode (snapshot or maintained) and one or more immutable **versions**, each with a build manifest. |
 | **Binding** | The declared dependency from an outcome version to the claim versions it used. The unit of provenance, targeted invalidation, and correction routing. A build manifest is the binding set of one outcome version. |
@@ -436,26 +474,30 @@ The second space appears when the first one's purposes visibly diverge (Appendix
 
 1. The user names something that needs to be produced now — the first outcome.
 2. The system checks existing claims.
-3. Where knowledge is insufficient, the user supplies context and/or the system consults raw sources.
+3. Where knowledge is insufficient, the system consults raw sources and proceeds with its best understanding, marking what it is unsure of rather than stopping to ask.
 4. The system creates or reconciles the claims the outcome requires, with evidence and lineage.
-5. The outcome is persisted as an immutable version bound to the exact claim versions used.
-6. The user chooses snapshot or maintained. Nothing about the claim lifecycle changes.
-7. Corrections and decisions flow upward as new raw evidence and may supersede claims.
-8. New signals stale only maintained outcomes; a material refresh creates a new version and advances the current pointer.
-9. The system asks only high-value clarification questions, batched rather than interrupting.
+5. The outcome is persisted as an immutable version bound to the exact claim versions used, and delivered.
+6. Maintenance mode is defaulted, not asked: snapshot at first, promoted to maintained when demand for currency appears (§4.4).
+7. The user reacts to the outcome. Corrections and decisions flow upward as new raw evidence and may supersede claims — this is the primary review channel (§8.4).
+8. New signals stale only maintained outcomes; a material refresh creates a new version and advances the current pointer, applied silently or surfaced in the Inbox according to §8.2.
+9. Clarification questions are budgeted, batched, and expirable; nothing blocks on them.
+
+**The first session should require zero setup decisions.** No purpose statement, no maintenance policy, no topic structure, no review preferences — only a request and a result.
 
 ### Initial views
 
 - **Goal** — what are we trying to accomplish?
-- **Knowledge** — what does the system currently understand that matters?
-- **Inbox** — what entered the system, what did it change, what is now stale, and what needs a decision?
+- **Inbox** — what entered the system, what did it change, what is now stale, and what — rarely — needs a decision?
 - **Collaborate** — what should the human and AI think about, decide, or do next?
+- **Knowledge** — read-only inspection of what the system currently understands, how it is organized, and why anything changed.
 
-The user should be able to see the evolving shared working model rather than interacting only through a chat window.
+The first three are the working surface. **Knowledge is inspection, not operation** (Principle 14): it is always available, never required to get value, and read-only — a correction made from it enters as new evidence rather than editing a claim in place, because a fix applied directly to knowledge has no reconciliation record (§6.3). It also serves as the builder's debugging and evaluation surface for a process that is nondeterministic by construction.
+
+The user should be *able* to see the evolving shared working model rather than interacting only through a chat window — and should never be *obliged* to.
 
 ### What the MVP should not try to be
 
-A universal life-logging platform; a replacement for every note-taking app; a document management system; an enterprise knowledge graph; an unbounded autonomous agent; a perfect memory of a life; an ontology-design product; a generic RAG platform; a workflow orchestration platform; a complete data warehouse for a person's life; a system that asks approval for everything; or a network of thin spaces built before one space has demonstrated value.
+A universal life-logging platform; a replacement for every note-taking app; a document management system; an enterprise knowledge graph; an unbounded autonomous agent; a perfect memory of a life; an ontology-design product; a generic RAG platform; a workflow orchestration platform; a complete data warehouse for a person's life; a system that asks approval for everything; a system with a settings page for review policy; or a network of thin spaces built before one space has demonstrated value.
 
 ---
 
@@ -470,7 +512,9 @@ If this does not climb within recurring problem areas, the core bet is wrong or 
 ### Supporting metrics
 
 - **Correction rate on regenerated maintained outcomes** — does propagation produce trustworthy results?
-- **Review queue volume per unit of input** — is human-in-the-loop saving time or becoming the new job?
+- **Required decisions per week** — a **constraint, not an observation**. The target is a small constant, flat with respect to capture volume. If it correlates with how much information entered the system, §8 has failed and the most frequent decision must be converted back into a default with an undo.
+- **Correction rate by topic and outcome** — the control signal that drives escalation and relaxation in §8.2, not merely a quality report.
+- **Sampling audit agreement rate** — of the sampled claim changes a user checks, what fraction do they accept? This is the evidence that applying-by-default is safe.
 - **Gap-to-claim latency** — how long from discovering missing knowledge to having the claim available?
 - **Knowledge reuse rate** — how often do new outcomes reuse existing claims rather than creating new ones?
 - **Synchronization time per day** — human effort to keep real-world context current. The aspiration is tens of minutes per day or less, yielding many hours of leveraged assistance.
@@ -516,9 +560,13 @@ That is a fundamentally different optimization target.
 4. **What is the retention policy for the raw layer?** Immutability implies unbounded growth. At what point does that become a cost or privacy problem, and what goes first?
 5. **How is a superseded claim distinguished from a contradicted one?** "I changed my mind" and "two sources disagree" have the same shape and different correct handling.
 6. **How long should snapshot outcomes be retained?** They are useful as demand history and reproducibility artifacts, but indefinite retention carries privacy and storage cost.
-7. **What is the concrete signal that the single space should become two?** Divergence of purpose is the stated criterion; it is not yet operational.
+7. **What is the concrete signal that the single space should become two?** Divergence of purpose is the stated criterion; it is not yet operational. A candidate: two clusters of outcomes that share few bound claims.
 8. **Where does the single-database substrate stop being enough?** §9 asserts that millions of rows across 1000+ spaces is unremarkable. The pressure is more likely to come from embedding volume, per-space isolation requirements, or export size than from row count — which of those arrives first is unknown.
 9. **What is the size threshold at which an outcome body spills to object storage,** and does an outcome that *is* a file behave differently in any other respect — diffing, review, or reproduction?
+10. **What are the escalation thresholds in §8.2?** Correction rate over what window, at what level, before an outcome or topic moves from silent to flagged to gated — and what relaxes it again. Wrong thresholds either restore the queue or hide real unreliability.
+11. **Does silence mean acceptance?** §8.4 treats use without correction as weak evidence of correctness. That is plausible for an outcome the user reads closely and false for one they skim, and the system cannot currently tell the difference.
+12. **What is the right sampling rate for the audit?** Too low and it certifies nothing; too high and it becomes the review queue under another name.
+13. **How is uncertainty rendered in an outcome** so that it prompts a correction instead of eroding trust in the result? Proceeding-with-flagged-uncertainty (§8.3) only works if the flag is legible and proportionate.
 
 ---
 
@@ -549,7 +597,9 @@ Lower in the network, spaces tend to be subject-oriented and durable; higher, go
 
 **Corrections route to the owning space.** This is the rule most easily got wrong. If a goal space notices a consumed fact is wrong, it must not fix it locally — a local fix creates a divergent belief with no reconciliation home and is silently overwritten on the next refresh.
 
-**Open network questions:** what stops space proliferation (over-fragmentation is the likely failure mode); who decides a new space is needed; what happens to a completed goal space that downstream spaces still bind to; whether base/goal ever becomes a real type.
+**Splits are applied, not approved.** Because published names must keep resolving or carry an explicit redirect, a split is reversible and invisible to consumers, so it falls under §8.1: the system proposes, applies, and flags it in the Inbox in terms of the outcomes affected — never as a graph edit the user must adjudicate. Over-fragmentation is guarded by making the split criterion operational and conservative, not by asking a human every time.
+
+**Open network questions:** what stops space proliferation (over-fragmentation is the likely failure mode); what the operational threshold for splitting is; what happens to a completed goal space that downstream spaces still bind to; whether base/goal ever becomes a real type.
 
 ## Appendix B — Growth Path: Multi-Writer
 
